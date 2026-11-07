@@ -1,0 +1,36 @@
+# Builds the standalone app on Windows, macOS and Linux and uploads each as
+# an artifact. Inactive until the repository is on GitHub.
+# Secure edition only for now (no network code); see packaging/build.py.
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Linux GUI libraries for pywebview
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-gi gir1.2-webkit2-4.1
+      - run: pip install -e ".[build,dev]"
+      - run: python -m playwright install --with-deps chromium
+      - run: git config --global user.email ci@example.com && git config --global user.name CI
+      - name: Tests (including the network-isolation contract)
+        run: pytest -q
+      - name: Build secure edition
+        run: python packaging/build.py --variant secure
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Debrief-${{ runner.os }}
+          path: dist/

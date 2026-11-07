@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "carrier"
+version = "0.6.0"
+description = "Brief. Launch. Debrief. A mothership for Claude Code: launch AI agents in parallel, keep them aware of each other, and review every change they bring home."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [{ name = "Thomas" }]
+keywords = ["code-review", "claude", "claude-code", "agents", "tui", "planning"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+  "textual>=0.80",
+  "claude-agent-sdk>=0.1",
+  "pywebview>=5.0",  # desktop window; on Linux also needs GTK or Qt (see README)
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "playwright>=1.40"]
+build = ["pyinstaller>=6.0"]
+qt = ["pywebview[qt]"]  # Linux alternative to GTK for the desktop window
+
+[project.scripts]
+carrier = "carrier.cli:main"
+debrief = "carrier.debrief.cli:main"  # shortcut for `carrier debrief`
+
+[project.gui-scripts]
+# Opens the desktop window without a console window on Windows.
+carrier-app = "carrier.desktop.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/carrier"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

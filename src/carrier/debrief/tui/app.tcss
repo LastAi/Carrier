@@ -1,0 +1,97 @@
+/* Debrief TUI styles. Textual CSS: https://textual.textualize.io/guide/CSS/ */
+
+#body {
+    height: 1fr;
+}
+
+#items {
+    width: 42;
+    border-right: solid $primary-background-lighten-2;
+}
+
+#items > ListItem {
+    padding: 0 1;
+}
+
+#right {
+    width: 1fr;
+}
+
+#detail {
+    height: 1fr;
+    padding: 0 2;
+}
+
+#diff-bar {
+    height: 1;
+    padding: 0 1;
+    background: $boost;
+}
+
+#diff {
+    height: 1fr;
+    min-height: 8;
+}
+
+#diff:focus {
+    border-left: thick $accent;
+}
+
+#sel-label {
+    height: 1;
+    padding: 0 2;
+    color: $accent;
+}
+
+#item-head {
+    padding: 1 0 0 0;
+    text-style: bold;
+}
+
+#banner {
+    color: $warning;
+    padding: 0 0 1 0;
+}
+
+.section-title {
+    color: $accent;
+    text-style: bold;
+    padding: 1 0 0 0;
+}
+
+#flags {
+    padding: 0 0 0 1;
+}
+
+#explanation, #chat {
+    padding: 0 0 0 0;
+    margin: 0;
+}
+
+#ask {
+    dock: bottom;
+    margin: 0 1;
+}
+
+/* Modal prompt used for fix instructions and notes */
+PromptScreen, ConfirmScreen, ThemeScreen {
+    align: center middle;
+}
+
+#dialog {
+    width: 80;
+    height: auto;
+    padding: 1 2;
+    border: thick $accent;
+    background: $surface;
+}
+
+#dialog Label {
+    padding: 0 0 1 0;
+}
+
+#theme-list {
+    height: auto;
+    max-height: 10;
+    margin: 0 0 1 0;
+}

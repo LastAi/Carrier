@@ -1,0 +1,4 @@
+# Windows batch files must keep CRLF line endings (cmd can misread labels
+# otherwise); shell scripts must keep LF.
+*.bat text eol=crlf
+*.sh  text eol=lf

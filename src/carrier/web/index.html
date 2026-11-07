@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: AGPL-3.0-only · Copyright (C) 2026 Thomas and Carrier contributors -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- No network access of any kind: only this page's own inline script/styles. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Carrier</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header id="topbar">
+  <div class="brand">◆ Carrier <span class="version">{{VERSION}}</span></div>
+  <nav class="tools" role="tablist" aria-label="Tools">
+    <button class="tool" role="tab" data-tool="readyroom" title="Set up projects, rules and presets">Ready Room</button>
+    <button class="tool" role="tab" data-tool="flightdeck" title="Run Claude Code sessions">Flight Deck <span id="fd-badge" class="badge hidden"></span></button>
+    <button class="tool on" role="tab" data-tool="debrief" title="Review what changed">Debrief</button>
+  </nav>
+  <div id="project-name" class="muted"></div>
+  <div id="progress-pill" class="pill hidden"></div>
+  <div class="spacer"></div>
+  <button id="btn-home" class="ghost hidden" title="Back to project choice">Projects</button>
+  <button id="btn-help" class="ghost" title="Keyboard shortcuts (?)">?</button>
+  <button id="btn-settings" class="ghost" title="Settings">⚙ Settings</button>
+  <button id="btn-finish" class="primary hidden">Finish review</button>
+</header>
+
+<div id="banner" class="banner hidden" role="alert"></div>
+
+<!-- ===================== READY ROOM / FLIGHT DECK (soon) ================= -->
+<main id="view-readyroom" class="view hidden">
+  <aside id="rr-sidebar">
+    <div class="rr-search">
+      <input id="rr-search" spellcheck="false" type="search" placeholder="Search projects…" aria-label="Search projects">
+      <div id="rr-tags" class="tag-filter"></div>
+    </div>
+    <div class="sidebar-head">
+      <span>Projects</span>
+      <button id="rr-new-btn" class="ghost small-btn">＋ New project</button>
+    </div>
+    <div id="rr-list" class="rr-list"></div>
+    <nav class="rr-nav">
+      <button class="rr-navbtn" data-pane="global">Global rules</button>
+      <button class="rr-navbtn" data-pane="rulesets">Rule sets</button>
+      <button class="rr-navbtn" data-pane="presets">Session presets</button>
+      <button class="rr-navbtn" data-pane="templates">Project templates</button>
+      <button class="rr-navbtn" data-pane="agents">Review agents</button>
+    </nav>
+  </aside>
+
+  <section id="rr-main">
+    <!-- Intro -->
+    <div id="rr-pane-intro" class="rr-pane">
+      <h1>Ready Room</h1>
+      <p>Set your projects up here before you fly. Each project has a <b>long-term goal</b> (what the project
+        is), <b>rules</b>, and a queue of <b>tasks</b> — the current one is what Flight Deck works on.</p>
+      <ul>
+        <li><b>Global rules</b> apply to every session; project rules add to them.</li>
+        <li><b>Rule sets</b> are reusable bundles of rules you can attach anywhere.</li>
+        <li><b>Session presets</b> save a model, permission mode and overlap setting.</li>
+        <li><b>Project templates</b> are starting points for new projects.</li>
+        <li><b>Tags</b> help you find projects; they're only for you and never sent to Claude.</li>
+      </ul>
+      <button id="rr-intro-new" class="primary big">＋ New project</button>
+      <section class="card checks-card">
+          <h3>Setup</h3>
+          <ul id="checks" class="checks"></ul>
+          <button id="btn-test-claude" class="ghost">Test Claude connection</button>
+          <span id="test-claude-result" class="muted"></span>
+      </section>
+    </div>
+
+    <!-- New project -->
+    <div id="rr-pane-new" class="rr-pane hidden">
+      <h2>New project</h2>
+      <label class="field">Start from
+        <select id="rrn-template"><option value="">A blank project</option></select>
+      </label>
+      <label class="field">Folder
+        <span class="folder-row"><span id="rrn-folder" class="muted">No folder chosen</span>
+          <button id="rrn-folder-btn" class="ghost">Choose…</button></span>
+      </label>
+      <label class="field">Name <input id="rrn-name" type="text" placeholder="defaults to the folder name"></label>
+      <label class="field">Long-term goal <span class="muted small">— what this project is</span>
+        <textarea id="rrn-goal" rows="3" placeholder="e.g. A small web service that lets users book meeting rooms."></textarea>
+      </label>
+      <label class="field">Starting task
+        <input id="rrn-task" type="text" placeholder="e.g. add input validation to the signup form">
+      </label>
+      <label class="field">Tags <span class="muted small">— comma-separated, just for you</span>
+        <input id="rrn-tags" spellcheck="false" type="text" placeholder="e.g. backend, client work">
+      </label>
+      <div class="modal-actions left">
+        <button id="rrn-create" class="primary">Create project</button>
+        <button id="rrn-cancel" class="ghost">Cancel</button>
+      </div>
+    </div>
+
+    <!-- Project editor -->
+    <div id="rr-pane-project" class="rr-pane hidden">
+      <div class="rr-head">
+        <input id="rrp-name" class="title-input" type="text" aria-label="Project name">
+        <span id="rrp-dirty" class="muted small hidden">Unsaved changes</span>
+        <button id="rrp-save" class="primary" disabled>Save</button>
+        <button id="rrp-fly" class="ghost" title="Go to this project in Flight Deck">Flight Deck ▸</button>
+      </div>
+      <div class="rr-sub">
+        <span class="muted small">Main folder:</span> <span id="rrp-folder" class="small"></span>
+        <button id="rrp-folder-btn" class="link">change</button>
+      </div>
+      <div class="rr-sub folders-row">
+        <span class="muted small" title="Claude Code runs in the main folder. Work folders: Claude reads and edits them, and Debrief reviews them with the main folder. Reference folders: read only.">Extra folders:</span>
+        <div class="fc-col">
+          <span id="rrp-folders" class="small"></span>
+          <span class="fc-add">
+            <button id="rrp-addfolder-btn" class="link" title="Claude can read and edit it; Debrief reviews it">＋ work folder</button>
+            <button id="rrp-addref-btn" class="link" title="Claude can read it to understand the task, but not change it">＋ reference folder</button>
+          </span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Long-term goal</h3>
+        <textarea id="rrp-goal" rows="3" placeholder="What this project is, in a few sentences."></textarea>
+        <label class="field">Tags <span class="muted small">— comma-separated, just for you</span>
+          <input id="rrp-tags" spellcheck="false" type="text">
+        </label>
+      </div>
+
+      <div class="card">
+        <h3>Tasks</h3>
+        <p class="muted small">The first task is the <b>current task</b> — what Flight Deck works on next.</p>
+        <ol id="rrp-tasks" class="task-list"></ol>
+        <div class="add-task">
+          <input id="rrp-task-title" type="text" placeholder="New task…">
+          <label class="check inline"><input type="checkbox" id="rrp-task-first"> make it current</label>
+          <button id="rrp-task-add" class="ghost">Add task</button>
+        </div>
+        <details class="history">
+          <summary>History <span id="rrp-history-count" class="muted small"></span></summary>
+          <ol id="rrp-history" class="task-list done"></ol>
+        </details>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>Rules</h3><button class="ghost small-btn draft-btn" data-draft="project_rules" data-target="#rrp-rules" title="Describe what you want; Claude writes it up for you to edit and save">✨ Draft with Claude…</button></div>
+        <p class="muted small">Added to global rules for this project's sessions. CLAUDE.md files still apply as usual.</p>
+        <textarea id="rrp-rules" rows="5" placeholder="e.g. Keep functions small. Don't add dependencies without asking."></textarea>
+        <div class="field">Rule sets <div id="rrp-rulesets" class="checks-row"></div></div>
+        <label class="field">Default session preset
+          <select id="rrp-preset"><option value="">None (Claude Code defaults)</option></select>
+        </label>
+      </div>
+
+      <div class="card">
+        <h3>Linked projects</h3>
+        <p class="muted small">Link projects that can affect each other and name the shared files (globs relative to
+          each project, e.g. <code>schema/**/*.json</code>). Flight Deck uses this to keep their sessions aware of each other.</p>
+        <div id="rrp-links"></div>
+        <div class="link-form">
+          <label class="field">Link with <select id="rrl-other"></select></label>
+          <label class="field">How they relate <input id="rrl-note" type="text" placeholder="e.g. the client uses this API's schema"></label>
+          <label class="field">Shared files here <input id="rrl-mine" spellcheck="false" type="text" placeholder="comma-separated globs (optional)"></label>
+          <label class="field">Shared files there <input id="rrl-theirs" spellcheck="false" type="text" placeholder="comma-separated globs (optional)"></label>
+        </div>
+        <button id="rrl-add" class="ghost">Add link</button>
+      </div>
+
+      <div class="card">
+        <h3>Review agents <span class="muted small">(Debrief)</span></h3>
+        <p id="rrp-agents-summary" class="muted small"></p>
+        <button id="rrp-agents-btn" class="ghost">Review agents for this project…</button>
+      </div>
+
+      <div class="rr-foot">
+        <button id="rrp-preview" class="ghost">What Claude will be told…</button>
+        <button id="rrp-totemplate" class="ghost">Save as template…</button>
+        <span class="spacer"></span>
+        <button id="rrp-remove" class="ghost danger">Remove project</button>
+      </div>
+    </div>
+
+    <!-- Global rules -->
+    <div id="rr-pane-global" class="rr-pane hidden">
+      <div class="card-head"><h2>Global rules</h2><button class="ghost small-btn draft-btn" data-draft="global_rules" data-target="#rrg-rules" title="Describe what you want; Claude writes it up for you to edit and save">✨ Draft with Claude…</button></div>
+      <p class="muted">Apply to every Flight Deck session, in every project and standalone task.</p>
+      <textarea id="rrg-rules" rows="10" placeholder="e.g. Explain any command before running it."></textarea>
+      <div class="field">Rule sets <div id="rrg-rulesets" class="checks-row"></div></div>
+      <button id="rrg-save" class="primary">Save</button>
+    </div>
+
+    <!-- Rule sets / presets / templates share one list+editor layout -->
+    <div id="rr-pane-rulesets" class="rr-pane hidden">
+      <h2>Rule sets</h2>
+      <p class="muted">Reusable bundles of rules. Attach them to projects, presets, templates or the global rules.</p>
+      <div class="split-pane">
+        <div><div id="rrs-list" class="item-picker"></div><button id="rrs-new" class="ghost">＋ New rule set</button></div>
+        <div id="rrs-editor" class="hidden">
+          <label class="field">Name <input id="rrs-name" type="text"></label>
+          <div class="field"><span class="card-head">Rules <button class="ghost small-btn draft-btn" data-draft="rule_set" data-target="#rrs-body" title="Describe what you want; Claude writes it up for you to edit and save">✨ Draft with Claude…</button></span>
+            <textarea id="rrs-body" rows="10"></textarea></div>
+          <div class="modal-actions left"><button id="rrs-save" class="primary">Save</button>
+            <button id="rrs-delete" class="ghost danger">Delete</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="rr-pane-presets" class="rr-pane hidden">
+      <h2>Session presets</h2>
+      <p class="muted">Saved settings for starting a session. A project can have a default preset.</p>
+      <div class="split-pane">
+        <div><div id="rrps-list" class="item-picker"></div><button id="rrps-new" class="ghost">＋ New preset</button></div>
+        <div id="rrps-editor" class="hidden">
+          <label class="field">Name <input id="rrps-name" type="text"></label>
+          <label class="field">Model
+            <select id="rrps-model"><option value="">Claude Code default</option><option value="sonnet">Sonnet</option>
+              <option value="opus">Opus</option><option value="haiku">Haiku</option></select></label>
+          <label class="field" title="How hard the model thinks. Higher is more thorough, slower and costs more.">Effort
+            <select id="rrps-effort"><option value="">Model default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option></select></label>
+          <label class="field">Permissions
+            <select id="rrps-mode"><option value="default">Ask before acting</option>
+              <option value="acceptEdits">Auto-accept edits</option><option value="plan">Plan only (no changes)</option></select></label>
+          <label class="field">When sessions overlap
+            <select id="rrps-policy"><option value="">Use the Flight Deck setting</option>
+              <option value="warn">Warn Claude</option><option value="ask">Ask me first</option>
+              <option value="block">Block the edit</option><option value="inform">Only show it</option></select></label>
+          <label class="field">Extra rule set <select id="rrps-ruleset"><option value="">None</option></select></label>
+          <div class="modal-actions left"><button id="rrps-save" class="primary">Save</button>
+            <button id="rrps-delete" class="ghost danger">Delete</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="rr-pane-templates" class="rr-pane hidden">
+      <h2>Project templates</h2>
+      <p class="muted">Starting points for new projects. Use “Save as template” on a project to make one from it.</p>
+      <div class="split-pane">
+        <div><div id="rrt-list" class="item-picker"></div><button id="rrt-new" class="ghost">＋ New template</button></div>
+        <div id="rrt-editor" class="hidden">
+          <label class="field">Name <input id="rrt-name" type="text"></label>
+          <label class="field">Goal <textarea id="rrt-goal" rows="3"></textarea></label>
+          <label class="field">Rules <textarea id="rrt-rules" rows="4"></textarea></label>
+          <div class="field">Rule sets <div id="rrt-rulesets" class="checks-row"></div></div>
+          <label class="field">Tags <input id="rrt-tags" spellcheck="false" type="text"></label>
+          <label class="field">First task <input id="rrt-task" type="text"></label>
+          <label class="field">Session preset <select id="rrt-preset"><option value="">None</option></select></label>
+          <div class="modal-actions left"><button id="rrt-save" class="primary">Save</button>
+            <button id="rrt-delete" class="ghost danger">Delete</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="rr-pane-agents" class="rr-pane hidden">
+      <div class="rr-head"><h2 id="rra-title">Review agents</h2>
+        <button id="rra-back" class="ghost hidden">◂ Back to the project</button></div>
+      <p id="rra-intro" class="muted"></p>
+      <div class="card">
+        <h3>Built-in agents</h3>
+        <p class="muted small"><b>Flags as</b> is how serious the problems an agent reports are (changes are sorted high
+          first). <b>Model</b> and <b>effort</b> set how thorough it is: a bigger model or more effort notices more but
+          is slower and costs more.</p>
+        <div id="rra-builtins" class="builtin-list"></div>
+      </div>
+      <div class="card">
+        <h3 id="rra-own-title">Your agents</h3>
+        <p id="rra-global-note" class="muted small hidden"></p>
+        <div class="split-pane">
+          <div><div id="rra-list" class="item-picker"></div><button id="rra-new" class="ghost">＋ New review agent</button></div>
+          <div id="rra-editor" class="hidden">
+            <label class="field">Name <input id="rra-title-in" type="text" placeholder="e.g. Save compatibility"></label>
+            <div class="field"><span class="card-head">What to look for <button class="ghost small-btn draft-btn" data-draft="agent" data-target="#rra-prompt" title="Describe what you want; Claude writes it up for you to edit and save">✨ Draft with Claude…</button></span>
+              <textarea id="rra-prompt" rows="9" placeholder="Describe what this agent should flag, and what it should leave alone."></textarea></div>
+            <div class="agent-opts">
+              <label class="field" title="How serious the problems it reports are, by default. Flagged changes are sorted high first.">Flags as
+                <select id="rra-severity"><option value="high">High</option><option value="medium" selected>Medium</option>
+                  <option value="low">Low</option></select></label>
+              <label class="field" title="Which Claude model runs this agent. Bigger models notice more and cost more.">Model
+                <select id="rra-model"></select></label>
+              <label class="field" title="How hard the model thinks. Higher is more thorough, slower and costs more.">Effort
+                <select id="rra-effort"></select></label>
+            </div>
+            <div class="checks-row">
+              <label class="check inline"><input type="checkbox" id="rra-notes" checked> Reads project notes and goal</label>
+              <label class="check inline"><input type="checkbox" id="rra-rationale"> Sees Claude's own explanations</label>
+              <label class="check inline"><input type="checkbox" id="rra-explore"> May browse the code (read-only, slower)</label>
+              <label class="check inline"><input type="checkbox" id="rra-enabled" checked> On</label>
+            </div>
+            <div class="modal-actions left"><button id="rra-save" class="primary">Save</button>
+              <button id="rra-delete" class="ghost danger">Delete</button></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+<main id="view-flightdeck" class="view hidden">
+  <aside id="fd-sidebar">
+    <div class="sidebar-head">
+      <span>Work</span>
+      <button id="fd-standalone-btn" class="ghost small-btn" title="A task that isn't part of a project">＋ Standalone task</button>
+    </div>
+    <div id="fd-projects" class="fd-projects"></div>
+    <div class="fd-side-foot">
+      <label class="small">When sessions overlap
+        <select id="fd-policy">
+          <option value="warn">Warn Claude (recommended)</option>
+          <option value="ask">Ask me first</option>
+          <option value="block">Block the edit</option>
+          <option value="inform">Only show it here</option>
+        </select>
+      </label>
+    </div>
+  </aside>
+
+  <section id="fd-main">
+    <div id="fd-empty" class="fd-empty">
+      <h1>Flight Deck</h1>
+      <p>Work happens here: start a project's <b>current task</b>, guide Claude Code as it works, stop it, and mark
+        the task done. Several sessions can run at once; sessions in linked projects are kept aware of each other.</p>
+      <ul>
+        <li>Projects, their goals, rules and task queues are set up in the <b>Ready Room</b>.</li>
+        <li>A <b>standalone task</b> is a one-off with no project. Later you can turn it into a project, or add its
+          finished work to an existing project's history.</li>
+      </ul>
+      <button id="fd-goto-rr" class="ghost">Set up projects in the Ready Room ▸</button>
+      <div id="fd-feed"></div>
+    </div>
+
+    <div id="fd-session" class="hidden">
+      <div id="fd-head">
+        <div class="fd-title">
+          <h2 id="fd-task"></h2>
+          <div id="fd-meta" class="muted small"></div>
+        </div>
+        <span id="fd-status" class="pill"></span>
+        <label class="small" title="Switches from the next message">Model
+          <select id="fd-model"><option value="">Default</option><option value="haiku">Haiku</option><option value="sonnet">Sonnet</option><option value="opus">Opus</option></select>
+        </label>
+        <label class="small" title="How hard the model thinks. Changing it reconnects the session (same conversation).">Effort
+          <select id="fd-effort"><option value="">Default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option></select>
+        </label>
+        <label class="small">Permissions
+          <select id="fd-mode" title="How Claude Code asks before acting">
+            <option value="default">Ask before acting</option>
+            <option value="acceptEdits">Auto-accept edits</option>
+            <option value="plan">Plan only (no changes)</option>
+            <option value="bypassPermissions">Never ask (careful)</option>
+          </select>
+        </label>
+        <button id="fd-resume" class="primary hidden">Resume</button>
+        <button id="fd-done" class="ghost" title="Mark this task done (saves a summary to the project history)">✓ Mark done</button>
+        <button id="fd-upgrade" class="ghost hidden">Make it a project…</button>
+        <button id="fd-assign" class="ghost hidden">Add to a project…</button>
+        <button id="fd-debrief" class="ghost" title="Review this session's changes in Debrief">Debrief this</button>
+        <button id="fd-end" class="ghost">End session</button>
+        <button id="fd-rmcopy" class="ghost hidden">Remove copy</button>
+      </div>
+      <div id="fd-aware" class="fd-aware"></div>
+      <div id="fd-transcript" class="fd-transcript" aria-live="polite"></div>
+      <div id="fd-live" class="fd-live hidden"></div>
+      <div id="fd-composer">
+        <textarea id="fd-input" rows="2" placeholder="Message Claude Code…  (Enter to send · Shift+Enter for a new line)"></textarea>
+        <button id="fd-send" class="primary">Send</button>
+        <button id="fd-stop" class="ghost hidden" title="Interrupt Claude">■ Stop</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ======================= DEBRIEF: START SCREEN ======================== -->
+<main id="view-start" class="view">
+  <section class="card start-card">
+    <h1>Debrief — review what changed</h1>
+    <p class="muted">Pick a project. Debrief shows every change since its last review — across all of the
+      project's folders — explains why each was made and which task made it, and lets you approve or
+      request fixes. Requested fixes go back to the project as its next task.</p>
+    <div id="db-projects" class="recent"></div>
+  </section>
+
+  <section id="folder-card" class="card hidden">
+    <h2 id="folder-title"></h2>
+    <ul id="db-folders" class="folder-status"></ul>
+    <div id="folder-untracked" class="hidden">
+      <p>Debrief uses <b>git</b> to see exactly what changed. Tracking takes a snapshot of a folder as it
+        is now; changes after that are reviewable.</p>
+    </div>
+    <div id="folder-ready" class="hidden">
+      <div id="resume-box" class="resume hidden">
+        <p id="resume-text"></p>
+        <button id="btn-resume" class="primary">Resume review</button>
+        <button id="btn-new" class="ghost">Start a new one instead</button>
+      </div>
+      <div id="start-box">
+        <label class="field">Review changes
+          <select id="from-select"></select>
+        </label>
+        <p id="extras-note" class="muted small hidden">Extra folders are always reviewed since their own last review.</p>
+        <label class="check"><input type="checkbox" id="use-ai" checked>
+          Use AI agents (grouping, flags and explanations)</label>
+        <button id="btn-start" class="primary big">Start review</button>
+      </div>
+      <pre id="progress-log" class="log hidden"></pre>
+      <button id="btn-cancel" class="ghost hidden">Cancel</button>
+    </div>
+  </section>
+</main>
+
+<!-- ======================= DEBRIEF: REVIEW SCREEN ======================= -->
+<main id="view-review" class="view hidden">
+  <aside id="sidebar">
+    <div class="sidebar-head">
+      <span>Changes</span>
+      <span class="muted small">↑/↓ or j/k</span>
+    </div>
+    <ol id="item-list" role="listbox" aria-label="Changes to review"></ol>
+  </aside>
+
+  <section id="detail">
+    <div id="detail-scroll">
+      <div id="item-head"></div>
+      <div id="warnings"></div>
+      <div id="flags"></div>
+      <div id="guide" class="card"></div>
+
+      <div class="diff-card card">
+        <div class="diff-toolbar">
+          <div class="segmented" role="group" aria-label="Diff view">
+            <button id="mode-unified" class="seg">Unified</button>
+            <button id="mode-split" class="seg">Side by side</button>
+          </div>
+          <span class="muted small">Drag across lines to highlight them, then ask about them below.
+            Shift-click extends. Esc clears.</span>
+        </div>
+        <div id="diff" class="diff" tabindex="0" aria-label="Diff"></div>
+      </div>
+
+      <div id="chat"></div>
+    </div>
+
+    <div id="composer">
+      <div id="sel-chip" class="chip hidden">
+        <span id="sel-label"></span>
+        <button id="sel-copy" class="link" title="Copy the highlighted code">copy</button>
+        <button id="sel-clear" class="link" title="Clear highlight (Esc)">✕</button>
+      </div>
+      <div class="ask-row">
+        <textarea id="ask-input" rows="2" placeholder="Ask the guide about this change…  (/ to focus · Enter to send · Shift+Enter for a new line)"></textarea>
+        <button id="btn-ask" class="primary">Ask</button>
+      </div>
+      <div class="decide-row">
+        <button data-action="approve" class="decide approve">✓ Approve <kbd>a</kbd></button>
+        <button data-action="fix" class="decide fix">✎ Needs fix… <kbd>f</kbd></button>
+        <button data-action="revert" class="decide revert">↺ Revert… <kbd>r</kbd></button>
+        <button data-action="skip" class="decide skip">· Skip <kbd>s</kbd></button>
+        <button id="btn-note" class="decide note">＋ Note… <kbd>n</kbd></button>
+        <span id="decision-state" class="muted"></span>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ============================== MODALS ================================ -->
+<div id="modal-backdrop" class="backdrop hidden"></div>
+
+<div id="modal-prompt" class="modal hidden" role="dialog" aria-modal="true">
+  <h3 id="prompt-title"></h3>
+  <textarea id="prompt-input" rows="3"></textarea>
+  <input id="prompt-line" class="prompt-line hidden" type="text" autocomplete="off" spellcheck="false">
+  <div class="modal-actions">
+    <button id="prompt-cancel" class="ghost">Cancel <kbd>Esc</kbd></button>
+    <button id="prompt-ok" class="primary">Save <kbd>Ctrl+Enter</kbd></button>
+  </div>
+</div>
+
+<div id="modal-finish" class="modal hidden" role="dialog" aria-modal="true">
+  <h3>Finish review</h3>
+  <div id="finish-body"></div>
+  <div class="modal-actions" id="finish-actions"></div>
+</div>
+
+<div id="modal-settings" class="modal wide hidden" role="dialog" aria-modal="true">
+  <h3>Settings</h3>
+  <h4>Colour theme</h4>
+  <p class="muted small">Presets for colour-vision differences. Changed lines always keep their
+    + / − markers, so colour is never the only signal. Also applies in the terminal version.</p>
+  <div id="theme-list" class="theme-list"></div>
+  <h4>Custom colours <span class="muted small">(override the theme)</span></h4>
+  <div id="color-grid" class="color-grid"></div>
+  <button id="colors-reset" class="ghost">Reset custom colours</button>
+  <h4>Text size</h4>
+  <label class="field inline">Code font size
+    <input type="range" id="font-size" min="11" max="22" step="1">
+    <span id="font-size-value"></span>
+  </label>
+  <div class="modal-actions">
+    <button id="settings-close" class="primary">Done</button>
+  </div>
+</div>
+
+<div id="modal-fd-new" class="modal hidden" role="dialog" aria-modal="true">
+  <h3 id="fdn-title">Start a task</h3>
+  <p id="fdn-where" class="muted small"></p>
+  <label class="field">Task <select id="fdn-task-sel"></select></label>
+  <div id="fdn-newtask" class="hidden">
+    <label class="field">New task <input id="fdn-task" type="text" placeholder="e.g. add input validation to the signup form"></label>
+  </div>
+  <div id="fdn-iso" class="hidden">
+    <p id="fdn-iso-text" class="warn"></p>
+    <label class="check"><input type="radio" name="fdn-iso" value="shared" checked>
+      Share the folder — Flight Deck warns about overlapping edits</label>
+    <label class="check" id="fdn-iso-wt"><input type="radio" name="fdn-iso" value="worktree">
+      Own copy (git worktree on a new branch) — cannot clash; merge later</label>
+    <p id="fdn-iso-uncommitted" class="muted small hidden">Note: the copy starts from the last commit;
+      uncommitted changes in the folder are not included.</p>
+  </div>
+  <label class="field">Session preset <select id="fdn-preset"><option value="">None (Claude Code defaults)</option></select></label>
+  <div class="agent-opts two">
+    <label class="field" title="Overrides the preset for this session. You can switch later in the session header.">Model
+      <select id="fdn-model"><option value="">From the preset</option><option value="haiku">Haiku</option><option value="sonnet">Sonnet</option><option value="opus">Opus</option></select></label>
+    <label class="field" title="How hard the model thinks. Higher is more thorough, slower and costs more.">Effort
+      <select id="fdn-effort"><option value="">From the preset</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option></select></label>
+  </div>
+  <label class="check"><input type="checkbox" id="fdn-send" checked> Send the task to Claude as the first message</label>
+  <div class="modal-actions">
+    <button id="fdn-cancel" class="ghost">Cancel</button>
+    <button id="fdn-start" class="primary">Start</button>
+  </div>
+</div>
+
+<div id="modal-fd-standalone" class="modal hidden" role="dialog" aria-modal="true">
+  <h3>Standalone task</h3>
+  <p class="muted small">A task that isn't part of a project. You can turn it into a project later, or add its
+    finished work to an existing project.</p>
+  <label class="field">Task <input id="fds-title" type="text" placeholder="e.g. try out a new parsing approach"></label>
+  <label class="field">Details <span class="muted small">(optional)</span><textarea id="fds-details" rows="3"></textarea></label>
+  <div class="field">Folder
+    <label class="check"><input type="radio" name="fds-where" value="scratch" checked> A new scratch folder (Carrier makes one)</label>
+    <label class="check"><input type="radio" name="fds-where" value="folder"> A folder I choose
+      <button id="fds-folder-btn" class="ghost small-btn">Choose…</button> <span id="fds-folder" class="muted small"></span></label>
+  </div>
+  <label class="field">Session preset <select id="fds-preset"><option value="">None (Claude Code defaults)</option></select></label>
+  <div class="agent-opts two">
+    <label class="field">Model <select id="fds-model"><option value="">From the preset</option><option value="haiku">Haiku</option><option value="sonnet">Sonnet</option><option value="opus">Opus</option></select></label>
+    <label class="field">Effort <select id="fds-effort"><option value="">From the preset</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option></select></label>
+  </div>
+  <div class="modal-actions">
+    <button id="fds-cancel" class="ghost">Cancel</button>
+    <button id="fds-start" class="primary">Start task</button>
+  </div>
+</div>
+
+<div id="modal-fd-done" class="modal hidden" role="dialog" aria-modal="true">
+  <h3>Mark task done</h3>
+  <p class="muted small">A short summary is saved to the project's history, so later sessions know what was done.</p>
+  <label class="check"><input type="radio" name="fdd-how" value="claude" checked> Ask Claude to write the summary</label>
+  <label class="check"><input type="radio" name="fdd-how" value="me"> I'll write it</label>
+  <textarea id="fdd-summary" rows="3" class="hidden" placeholder="What was done, and anything left open."></textarea>
+  <div class="modal-actions">
+    <button id="fdd-cancel" class="ghost">Cancel</button>
+    <button id="fdd-ok" class="primary">Mark done</button>
+  </div>
+</div>
+
+<div id="modal-fd-upgrade" class="modal hidden" role="dialog" aria-modal="true">
+  <h3>Make it a project</h3>
+  <p class="muted small">The task's folder becomes the project folder, and the task joins its history.</p>
+  <label class="field">Name <input id="fdu-name" type="text"></label>
+  <label class="field">Long-term goal <textarea id="fdu-goal" rows="3"></textarea></label>
+  <label class="field">Tags <input id="fdu-tags" spellcheck="false" type="text"></label>
+  <div class="modal-actions">
+    <button id="fdu-cancel" class="ghost">Cancel</button>
+    <button id="fdu-ok" class="primary">Create project</button>
+  </div>
+</div>
+
+<div id="modal-fd-assign" class="modal hidden" role="dialog" aria-modal="true">
+  <h3>Add to a project</h3>
+  <p class="muted small">Records this finished task in the project's history. Files are not moved.</p>
+  <label class="field">Project <select id="fda-project"></select></label>
+  <label class="check"><input type="checkbox" id="fda-merge" checked>
+    Add an “Integrate this work” task to the project (with where the files are)</label>
+  <div class="modal-actions">
+    <button id="fda-cancel" class="ghost">Cancel</button>
+    <button id="fda-ok" class="primary">Add to project</button>
+  </div>
+</div>
+
+<div id="modal-draft" class="modal wide hidden" role="dialog" aria-modal="true">
+  <h3 id="draft-title">Draft with Claude</h3>
+  <p class="muted small">Describe what you want in your own words. Claude writes it up; you can edit the draft,
+    then use it. Nothing is saved until you press Save.</p>
+  <label class="field">What you want
+    <textarea id="draft-desc" rows="4" placeholder="e.g. Don't add new libraries without asking. Keep the old save format loading."></textarea></label>
+  <label id="draft-revise-row" class="check hidden"><input type="checkbox" id="draft-revise" checked> Revise the current text (otherwise start fresh)</label>
+  <div class="modal-actions left"><button id="draft-go" class="primary">Write draft</button>
+    <span id="draft-busy" class="muted small hidden">Claude is writing…</span></div>
+  <div id="draft-result" class="hidden">
+    <label id="draft-agent-title-row" class="field hidden">Name <input id="draft-agent-title" type="text"></label>
+    <label id="draft-agent-sev-row" class="field hidden">Severity
+      <select id="draft-agent-sev"><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
+    <label class="field">Draft <span class="muted small">— edit freely</span><textarea id="draft-text" rows="12"></textarea></label>
+  </div>
+  <div class="modal-actions">
+    <button id="draft-cancel" class="ghost">Cancel</button>
+    <button id="draft-use" class="primary" disabled>Use this draft</button>
+  </div>
+</div>
+
+<div id="modal-preview" class="modal wide hidden" role="dialog" aria-modal="true">
+  <h3>What Claude will be told</h3>
+  <p class="muted small">Added to Claude Code's own instructions at the start of each session. CLAUDE.md files load as usual.</p>
+  <pre id="preview-text" class="preview"></pre>
+  <div class="modal-actions"><button id="preview-close" class="primary">Close</button></div>
+</div>
+
+<div id="modal-help" class="modal hidden" role="dialog" aria-modal="true">
+  <h3>Keyboard shortcuts</h3>
+  <table class="keys">
+    <tr><td><kbd>↑</kbd> <kbd>↓</kbd> / <kbd>k</kbd> <kbd>j</kbd></td><td>previous / next change</td></tr>
+    <tr><td><kbd>a</kbd></td><td>approve</td></tr>
+    <tr><td><kbd>f</kbd></td><td>needs fix (describe what should change)</td></tr>
+    <tr><td><kbd>r</kbd></td><td>revert</td></tr>
+    <tr><td><kbd>s</kbd></td><td>skip</td></tr>
+    <tr><td><kbd>n</kbd></td><td>add a project note</td></tr>
+    <tr><td><kbd>v</kbd></td><td>toggle unified / side by side</td></tr>
+    <tr><td><kbd>/</kbd></td><td>ask the guide</td></tr>
+    <tr><td><kbd>Esc</kbd></td><td>clear highlight / close dialog</td></tr>
+    <tr><td><kbd>?</kbd></td><td>this help</td></tr>
+  </table>
+  <p class="muted small">Everything is also available with the mouse. Progress is saved after every action.</p>
+  <p class="muted small">Carrier is free software under the GNU Affero General Public License v3.0.
+    It comes with no warranty; see the LICENSE file for details.</p>
+  <div class="modal-actions"><button id="help-close" class="primary">Close</button></div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
