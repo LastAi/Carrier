@@ -559,3 +559,30 @@ pre.removed { border-left: 3px solid var(--sev-medium); padding-left: 6px; }
 .bb-options { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; align-items: center; margin: 10px 0; }
 button.danger { color: var(--sev-high); border-color: var(--sev-high); }
 .im-history { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+
+/* ---- usage and limits ---- */
+.usage-chip { font-variant-numeric: tabular-nums; font-size: 12px; }
+.usage-chip.near { color: var(--sev-medium); }
+.usage-chip.hold { color: var(--sev-medium); border-color: var(--sev-medium); }
+.usage-chip.reached { color: var(--sev-high); border-color: var(--sev-high); }
+.dot.limited { background: var(--sev-medium); border-radius: 2px; }
+.pill.limited { color: var(--sev-medium); }
+.usage-limits { display: grid; gap: 10px; margin: 8px 0 4px; }
+.usage-limit-head { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; }
+.usage-bar { height: 8px; border-radius: 4px; background: var(--panel-2); overflow: hidden; margin: 4px 0 2px; }
+.usage-bar .fill { height: 100%; background: var(--accent); }
+.usage-limit.near .fill { background: var(--sev-medium); }
+.usage-limit.reached .fill { background: var(--sev-high); }
+.usage-totals { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+.usage-total { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border: 1px solid var(--border);
+  border-radius: 6px; }
+.usage-days { display: flex; gap: 4px; align-items: flex-end; height: 90px; margin: 14px 0 4px; }
+.usage-day { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px; height: 100%; }
+.usage-day .stack { flex: 1; width: 100%; display: flex; flex-direction: column; justify-content: flex-end; }
+.usage-day .other { background: var(--muted); opacity: .45; border-radius: 2px 2px 0 0; }
+.usage-day .deck { background: var(--accent); }
+.usage-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.usage-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; font-size: 13px; padding: 2px 0; }
+.usage-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-row .num { font-variant-numeric: tabular-nums; text-align: right; }
+#modal-usage { max-height: 84vh; overflow: auto; }

@@ -13,4 +13,4 @@ tool, and one desktop app (``carrier.desktop`` + ``carrier.web``) that
 hosts all three. See ARCHITECTURE.md in the repository root for the map.
 """
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"

@@ -426,6 +426,58 @@ task.
   conversation.
 * **Cost** for the session is shown in the header.
 
+### Usage and limits
+
+The **Usage** button at the top of every tab shows how close you are to
+Claude's usage limits, for example *5h 62% · Week 30%*. It turns amber near a
+limit and red when one is reached. Click it for the full picture:
+
+* **Limits** (subscriptions — Pro and Max): each window Claude Code reports —
+  the 5-hour limit, the weekly limit and any per-model weekly limits — with
+  how much is used, when it resets and the tokens used in that window.
+  Claude Code reports limits only while an agent runs, so each shows how old
+  its figures are; once a reset time passes, the window shows as reset.
+* **Tokens:** today, the last 7 days, Flight Deck sessions against the rest of
+  your Claude Code use (the terminal, the Claude app's Code tab, Debrief's
+  reviews and drafts), a 14-day chart, and the top projects, tasks and models.
+  Hover any figure for input, output and cache tokens.
+* **Cost:** what the same use costs at API list prices. With an API key that
+  is real money (each Flight Deck session also shows its exact cost); on a
+  subscription it is only a comparison. Models older than the 5 series show
+  tokens without a cost.
+
+Token counts come from the logs Claude Code keeps in `~/.claude/projects`,
+so they include work done outside Carrier. Carrier reads them read only and
+keeps only the numbers (time, model, folder, conversation id, tokens), for 60
+days — never what was said. You can turn this off.
+
+**When a limit is reached** in the middle of a task, Claude Code stops.
+Carrier doesn't treat that as a failure: the session shows *usage limit —
+until 15:40*, nothing starts on its own, and when the limit resets Carrier
+tells Claude to carry on where it stopped. This works across a restart of
+Carrier too. **Continue now** carries on straight away (useful if you have
+extra usage turned on), and typing a message works as usual. If Claude Code
+doesn't say when the limit resets, Carrier tries again after 10 minutes, then
+20, 40 and every hour. Starting work by hand while a limit is reached asks
+first.
+
+**Before a limit** (⚙ Settings → Usage and limits):
+
+| Setting | Default | What it does |
+|---|---|---|
+| How you pay for Claude | Detect it | Subscription shows limits; API key puts cost first |
+| Warn me at | 80% | A banner (and the alerts you chose) when a limit gets this full |
+| Hold automatic starts at | 90% | The level for the next two settings |
+| Hold auto take-off | on | Auto take-off waits; the take-off list says why |
+| Ask before starting a routine | on | Starting a routine by hand asks first |
+| Continue after the reset | on | Off: the session waits for you to press **Continue now** |
+| Count tokens from Claude Code's logs | on | Off: no token counts, limits still work |
+
+Claude Code may only report a percentage near a limit; until then a window
+can show as *ok* without a figure. A per-model weekly limit (for example Opus) only
+warns: Claude Code carries on with another model, so nothing is held for it.
+With an API key, the same waiting applies to API rate limits.
+
 ### Finishing a task
 
 **✓ Mark done** saves a short summary to the project's history — written by
@@ -745,6 +797,10 @@ always does.
   text can never run as HTML or script in the app.
 * **Projects only.** The window can only review your projects and Flight Deck
   sessions, not arbitrary folders.
+* **Usage counts are numbers only.** For token counts Carrier reads Claude
+  Code's own logs, read only, and keeps just the time, model, folder,
+  conversation id and token counts for 60 days — never the conversation.
+  Turn it off in ⚙ Settings → Usage and limits.
 * The planned **network edition** (access from other devices on your LAN)
   will live in a separate package that the standard build leaves out
   entirely — see [ARCHITECTURE.md](../ARCHITECTURE.md#editions-and-the-network-seam).
@@ -774,9 +830,9 @@ Linux:
 
 | File | Holds |
 |---|---|
-| `carrier.db` | Projects, tasks, rules, presets, templates, review agents, links, sessions and transcripts |
+| `carrier.db` | Projects, tasks, rules, presets, templates, review agents, links, sessions and transcripts, and token counts (numbers only, 60 days) |
 | `models.json` | The model list from Claude Code |
-| `settings.json` | Theme, colours, overlap setting |
+| `settings.json` | Theme, colours, overlap, alert, layout and usage settings |
 | `desktop.log` | Errors and diagnostics from the desktop app |
 | `worktrees/`, `scratch/` | Own-copy worktrees and standalone scratch folders |
 | `backups/` | A copy of `carrier.db` taken before a new version upgrades it (the newest five are kept) |
@@ -829,7 +885,6 @@ should yet.
 
 | Feature | What it adds |
 |---|---|
-| Usage and limits | See tokens and cost per session, project, day and week; set limits; recognise Claude's usage-limit stops, pause instead of failing, and resume when the limit resets |
 | Local network access | Use Carrier from other devices on your network. An optional build that can be left out entirely |
 | Right-click menu on macOS and Linux | Spelling suggestions and copy/paste in text boxes, as on Windows |
 

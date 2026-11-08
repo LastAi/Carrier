@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import subprocess
 import sys
 import traceback
@@ -359,9 +360,16 @@ class DesktopApi:
     @_guard
     def fd_start_task(self, task_id: int, isolation: str = "shared", preset_id: int | None = None,
                       model: str | None = None, mode: str | None = None, send_task: bool = True,
-                      effort: str | None = None) -> dict[str, Any]:
-        return self._fd().start_task(task_id, isolation, preset_id or None, model or None, mode or None, send_task,
-                                     effort or None)
+                      effort: str | None = None, confirm_usage: bool = False) -> dict[str, Any]:
+        """Start a session. Near or at a usage limit the result is {"usage_hold": why} instead,
+        and the page asks the user before calling again with ``confirm_usage``."""
+        from carrier.flightdeck.manager import UsageHold
+
+        try:
+            return self._fd().start_task(task_id, isolation, preset_id or None, model or None, mode or None,
+                                         send_task, effort or None, confirm_usage=bool(confirm_usage))
+        except UsageHold as exc:
+            return {"usage_hold": str(exc)}
 
     @_guard
     def fd_new_task(self, project_id: int, title: str, details: str = "") -> dict[str, Any]:
@@ -889,6 +897,35 @@ class DesktopApi:
     @_guard
     def fd_set_auto_takeoff(self, on: bool) -> bool:
         return self._fd().set_auto_takeoff(bool(on))
+
+    # -- usage and limits (core/usage.py) ----------------------------------------------
+
+    @_guard
+    def usage(self) -> dict[str, Any]:
+        """The Usage panel. Reading new lines of Claude Code's logs carries on in the background."""
+        from carrier.core import usage
+
+        store = self._store()
+        st = usage.scan_state(store)
+        if not st["running"] and (not st["done"] or time.time() - st["last"] > 30):
+            threading.Thread(target=self._scan_usage, args=(store,), daemon=True, name="usage-scan").start()
+        return usage.summary(store)
+
+    @staticmethod
+    def _scan_usage(store: Any) -> None:
+        from carrier.core import usage
+
+        files = usage.find_logs()
+        for _ in range(2000):  # a few seconds at a time, so other work isn't starved
+            st = usage.scan(store, budget=1.5, files=files)
+            if st.get("done") or st.get("off"):
+                return
+            time.sleep(0.05)
+
+    @_guard
+    def fd_continue(self, sid: int) -> dict[str, Any]:
+        """Carry on a session that stopped at a usage limit."""
+        return self._fd().continue_session(sid)
 
     @_guard
     def rr_run_routine(self, rid: int) -> dict[str, Any]:

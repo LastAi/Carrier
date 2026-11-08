@@ -11,6 +11,8 @@ The "model" follows commands in the prompt, one per line::
 
     write <path> <text>     use the Write tool on <path> (relative to cwd)
     ask                     ask the user a question (AskUserQuestion)
+    limit-warn              report the 5-hour limit as nearly used (85%)
+    limit-hit [seconds]     stop at the usage limit (it resets after ``seconds``, default 3600)
     slow                    take a long time (for interrupt tests)
     anything else           just reply
 """
@@ -23,8 +25,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import time
+
 from claude_agent_sdk import (AssistantMessage, ResultMessage, StreamEvent, SystemMessage, TextBlock,
                               ToolPermissionContext, ToolResultBlock, ToolUseBlock, UserMessage)
+from claude_agent_sdk.types import RateLimitEvent, RateLimitInfo
 
 ALL_CLIENTS: list["FakeClaudeClient"] = []
 
@@ -84,7 +89,8 @@ class FakeClaudeClient:
         prompt = self.prompts[-1]
         await self._hooks("UserPromptSubmit", None, {"prompt": prompt})
         if len(self.prompts) == 1:
-            yield SystemMessage(subtype="init", data={"session_id": self.session_id, "model": "fake-model"})
+            yield SystemMessage(subtype="init", data={"session_id": self.session_id, "model": "fake-model",
+                                                            "apiKeySource": "none"})
         yield StreamEvent(uuid="u", session_id=self.session_id,
                           event={"type": "content_block_delta", "delta": {"type": "text_delta", "text": "On it"}})
         for line in prompt.splitlines():
@@ -96,6 +102,22 @@ class FakeClaudeClient:
                     pass
                 yield ResultMessage(subtype="error_during_execution", duration_ms=1, duration_api_ms=1,
                                     is_error=False, num_turns=1, session_id=self.session_id, total_cost_usd=0.01)
+                return
+            if parts[0] == "limit-warn":
+                yield RateLimitEvent(rate_limit_info=RateLimitInfo(
+                    status="allowed_warning", resets_at=int(time.time()) + 7200, rate_limit_type="five_hour",
+                    utilization=0.85), uuid="rl", session_id=self.session_id)
+                continue
+            if parts[0] == "limit-hit":
+                reset = int(time.time()) + (int(parts[1]) if len(parts) > 1 else 3600)
+                yield RateLimitEvent(rate_limit_info=RateLimitInfo(
+                    status="rejected", resets_at=reset, rate_limit_type="five_hour", utilization=1.0),
+                    uuid="rl", session_id=self.session_id)
+                yield AssistantMessage(content=[TextBlock(text="You've hit your limit.")], model="<synthetic>",
+                                       error="rate_limit")
+                yield ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=True,
+                                    num_turns=1, session_id=self.session_id, total_cost_usd=0.0,
+                                    result="You've hit your limit.", api_error_status=429)
                 return
             if parts[0] == "ask-unrouted":  # Claude Code asks without calling the permission callback
                 inp = {"questions": [{"question": "Which colour?", "options": [{"label": "Red"}, {"label": "Blue"}]}]}

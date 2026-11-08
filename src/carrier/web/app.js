@@ -921,6 +921,13 @@ function renderSettings() {
   $("#alerts-sound").checked = !!s.alerts_sound;
   $("#alerts-dnd").checked = !!s.alerts_dnd;
   $("#content-center").checked = !!s.content_center;
+  $("#usage-plan").value = s.usage_plan || "auto";
+  $("#usage-warn-at").value = s.usage_warn_at;
+  $("#usage-hold-at").value = s.usage_hold_at;
+  $("#usage-hold-takeoff").checked = !!s.usage_hold_takeoff;
+  $("#usage-hold-routines").checked = !!s.usage_hold_routines;
+  $("#usage-auto-resume").checked = !!s.usage_auto_resume;
+  $("#usage-read-logs").checked = !!s.usage_read_logs;
 }
 
 /* ---------------------------------------------------------------- modals */
@@ -939,7 +946,7 @@ function closeModal() {
 function onKey(e) {
   const typing = /^(TEXTAREA|INPUT|SELECT)$/.test(document.activeElement.tagName);
   if (openModalSel) {
-    if (e.key === "Escape" && openModalSel !== "#modal-prompt") closeModal();
+    if (e.key === "Escape" && openModalSel !== "#modal-prompt" && openModalSel !== "#modal-confirm") closeModal();
     return;
   }
   if (e.key === "Escape") { clearSelection(); if (typing) document.activeElement.blur(); return; }
@@ -981,7 +988,7 @@ const fd = {
 };
 
 const FD_STATUS = { starting: "starting", working: "working", needs_you: "needs you", idle: "waiting for you",
-                    paused: "paused", error: "error", ended: "ended" };
+                    paused: "paused", error: "error", ended: "ended", limited: "waiting for the usage limit" };
 
 async function fdOpen() {
   if (!fd.ready) {
@@ -993,6 +1000,7 @@ async function fdOpen() {
 }
 
 const fdRefresh = guarded(async () => {
+  fd.lastRefresh = Date.now();
   fd.overview = await api("fd_overview");
   if (activeTool() === "flightdeck") fdRenderSidebar();
   updateAlerts(fd.overview);
@@ -1031,6 +1039,7 @@ function chime() {
 
 function updateAlerts(ov) {
   const st = state.settings || {};
+  if (ov.usage) { renderUsageChip(ov.usage); usageAlerts(ov.usage); }
   const waiting = needsYou(ov);
   const onDeck = activeTool() === "flightdeck";
   // Badge on the Flight Deck tab: urgent count, or a dot for routines ready to take off.
@@ -1070,6 +1079,185 @@ function updateAlerts(ov) {
   }
 }
 
+/* ---- usage and limits ---- */
+
+const usageUi = { level: "ok", seen: false, timer: null };
+const USAGE_SHORT = { five_hour: "5h", seven_day: "Week", seven_day_opus: "Opus week", seven_day_sonnet: "Sonnet week" };
+
+function fmtTokens(n) {
+  if (n == null) return "—";
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + "K";
+  return String(n);
+}
+const fmtMoney = (x) => "$" + (x >= 100 ? x.toFixed(0) : x >= 1 ? x.toFixed(2) : x.toFixed(3));
+function fmtClock(ts) {
+  const d = new Date(ts * 1000);
+  const t = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return ts - Date.now() / 1000 < 20 * 3600 ? t : d.toLocaleDateString([], { weekday: "short" }) + " " + t;
+}
+function fmtAgo(ts) {
+  const m = Math.round((Date.now() / 1000 - ts) / 60);
+  return m < 1 ? "just now" : m < 60 ? `${m} min ago` : m < 48 * 60 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`;
+}
+
+function renderUsageChip(u) {
+  const b = $("#btn-usage");
+  const known = (u.limits || []).filter((w) => w.percent != null || w.status !== "allowed");
+  b.textContent = known.length ? known.map((w) => `${USAGE_SHORT[w.kind] || w.label} ` +
+    (w.status === "rejected" ? "full" : w.percent != null ? Math.round(w.percent) + "%" : "near")).join(" · ") : "Usage";
+  b.className = "ghost usage-chip " + u.level.state;
+  b.title = (u.level.text || "Usage and limits") + (u.reached_until ? ` Work can go on at ${fmtClock(u.reached_until)}.` : "");
+}
+
+function usageAlerts(u) {
+  const rank = { ok: 0, near: 1, hold: 2, reached: 3 };
+  const lv = u.level.state, st = state.settings || {};
+  if (usageUi.seen && rank[lv] > rank[usageUi.level]) {
+    const extra = lv === "reached" ? " Nothing starts on its own until it resets; stopped tasks continue after the reset."
+      : lv === "hold" ? " Automatic starts are on hold." : "";
+    banner(u.level.text + extra, lv === "near" ? "info" : "error");
+    if (!st.alerts_dnd) {
+      if (lv === "reached" && st.alerts_flash !== false && !document.hasFocus()) api("attention").catch(() => {});
+      if (st.alerts_sound) chime();
+    }
+  }
+  usageUi.level = lv;
+  usageUi.seen = true;
+}
+
+const openUsage = guarded(async () => {
+  await renderUsage();
+  openModal("#modal-usage");
+  clearInterval(usageUi.timer);
+  usageUi.timer = setInterval(() => {
+    if (openModalSel !== "#modal-usage") { clearInterval(usageUi.timer); return; }
+    renderUsage().catch(() => {});
+  }, 3000);
+});
+
+function usageTable(box, rows, name) {
+  box.replaceChildren();
+  if (!rows.length) { box.appendChild(el("div", "muted small", "Nothing yet.")); return; }
+  for (const r of rows) {
+    const row = el("div", "usage-row");
+    const n = el("span", "name", name(r));
+    n.title = name(r);
+    row.append(n, el("span", "num", fmtTokens(r.total)),
+               el("span", "num muted", r.total - r.unpriced > 0 ? "≈ " + fmtMoney(r.cost) : ""));
+    row.title = `in ${fmtTokens(r.input)} · out ${fmtTokens(r.output)} · cache write ${fmtTokens(r.cache_write)} · cache read ${fmtTokens(r.cache_read)}`;
+    box.appendChild(row);
+  }
+}
+
+async function renderUsage() {
+  const u = await api("usage");
+  const sub = u.plan === "subscription";
+  $("#usage-plan-line").textContent = sub
+    ? "Subscription: Claude's usage limits apply. Costs shown are what the same use would cost at API prices."
+    : u.plan === "api" ? "API key: you pay per token. Costs are estimates at API list prices; Flight Deck sessions also show their exact cost."
+    : "Carrier learns how you pay for Claude when a session starts (or choose it in Settings → Usage and limits).";
+  const lim = $("#usage-limits");
+  lim.replaceChildren();
+  const wins = u.limits.filter((w) => w.kind !== "overage");
+  if (!wins.length) {
+    lim.appendChild(el("p", "muted small", sub || u.plan === "unknown"
+      ? "No limit reports yet. Claude Code reports your limits while an agent runs." : "Usage limits apply to subscriptions."));
+  }
+  for (const w of wins) {
+    const row = el("div", "usage-limit " + (w.status === "rejected" ? "reached" : w.status === "allowed_warning" ? "near" : ""));
+    const head = el("div", "usage-limit-head");
+    const state_ = w.status === "rejected" ? "reached" : w.percent != null ? `${w.percent}% used`
+      : w.status === "allowed_warning" ? "close to the limit" : w.reset_at ? "reset" : "ok";
+    head.append(el("b", "", w.label), el("span", "", state_));
+    const bar = el("div", "usage-bar");
+    const fill = el("div", "fill");
+    fill.style.width = (w.status === "rejected" ? 100 : Math.min(100, w.percent || 0)) + "%";
+    bar.appendChild(fill);
+    const bits = [];
+    if (w.resets_at) bits.push(`resets ${fmtClock(w.resets_at)}`);
+    if (w.reset_at) bits.push(`reset at ${fmtClock(w.reset_at)}`);
+    if (w.tokens) bits.push(`${fmtTokens(w.tokens.total)} tokens in this window`);
+    if (w.seen) bits.push(`as of ${fmtAgo(w.seen)}`);
+    row.append(head, bar, el("div", "muted small", bits.join(" · ")));
+    lim.appendChild(row);
+  }
+  if (u.level.state === "reached") lim.appendChild(el("p", "warn", "Nothing starts on its own while a limit is reached. Tasks it stopped continue after the reset."));
+  else if (u.hold.takeoff || u.hold.routines) lim.appendChild(el("p", "warn", "On hold: " + (u.hold.takeoff ? "auto take-off" : "") + (u.hold.takeoff && u.hold.routines ? " and " : "") + (u.hold.routines ? "routines (you'll be asked)" : "") + "."));
+
+  const tot = $("#usage-totals");
+  tot.replaceChildren();
+  const cell = (label, t, note) => {
+    const c = el("div", "usage-total");
+    c.append(el("span", "muted small", label), el("b", "", fmtTokens(t.total) + " tokens"),
+             el("span", "muted small", (t.total - t.unpriced > 0 ? "≈ " + fmtMoney(t.cost) + (sub ? " at API prices" : "") : "") + (note || "")));
+    c.title = `in ${fmtTokens(t.input)} · out ${fmtTokens(t.output)} · cache write ${fmtTokens(t.cache_write)} · cache read ${fmtTokens(t.cache_read)}`;
+    return c;
+  };
+  const other = cell("Other Claude Code (7 days)", u.other_week);
+  other.title += "\nClaude Code used outside Flight Deck sessions, including Debrief reviews and Draft with Claude.";
+  tot.append(cell("Today", u.today), cell("Last 7 days", u.week), cell("Flight Deck (7 days)", u.carrier_week), other);
+
+  const days = $("#usage-days");
+  days.replaceChildren();
+  const max = Math.max(1, ...u.days.map((d) => d.total));
+  for (const d of u.days) {
+    const col = el("div", "usage-day");
+    const stack = el("div", "stack");
+    const other = el("div", "other"), deck = el("div", "deck");
+    other.style.height = ((d.total - d.carrier) / max * 100) + "%";
+    deck.style.height = (d.carrier / max * 100) + "%";
+    stack.append(other, deck);
+    const dt = new Date(d.day + "T12:00:00");
+    col.append(stack, el("span", "muted small", dt.toLocaleDateString([], { weekday: "narrow" })));
+    col.title = `${d.day}: ${fmtTokens(d.total)} tokens (Flight Deck ${fmtTokens(d.carrier)})` + (d.cost ? ` · ≈ ${fmtMoney(d.cost)}` : "");
+    days.appendChild(col);
+  }
+  usageTable($("#usage-projects"), u.projects, (r) => r.name);
+  usageTable($("#usage-tasks"), u.tasks, (r) => r.title);
+  usageTable($("#usage-models"), u.models, (r) => r.model);
+  const sc = u.scan;
+  $("#usage-scan").textContent = !u.settings.usage_read_logs ? "Token counts from Claude Code's logs are off (Settings → Usage and limits)."
+    : !sc.dirs.length ? "No Claude Code logs found, so there are no token counts yet."
+    : !sc.done ? `Reading Claude Code's logs… ${sc.read} of ${sc.files} files.`
+    : `Counted from ${sc.files} Claude Code log file${sc.files === 1 ? "" : "s"} in ${sc.dirs.join(", ")} (read only; only the numbers are kept, for 60 days).`;
+}
+
+function confirmDialog(title, text, okLabel = "OK") {
+  return new Promise((resolve) => {
+    const prev = openModalSel;
+    $("#confirm-title").textContent = title;
+    $("#confirm-text").textContent = text;
+    $("#confirm-ok").textContent = okLabel;
+    if (prev) show($(prev), false);
+    openModal("#modal-confirm");
+    const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); done(false); } };
+    const done = (v) => {
+      document.removeEventListener("keydown", onKey, true);
+      show($("#modal-confirm"), false);
+      openModalSel = prev;
+      if (prev) show($(prev)); else show($("#modal-backdrop"), false);
+      $("#confirm-ok").onclick = $("#confirm-cancel").onclick = null;
+      resolve(v);
+    };
+    document.addEventListener("keydown", onKey, true);
+    $("#confirm-ok").onclick = () => done(true);
+    $("#confirm-cancel").onclick = () => done(false);
+    $("#confirm-ok").focus();
+  });
+}
+
+/* Start a task; near or at a usage limit, ask first. Returns the session, or null if not started. */
+async function fdStartTaskApi(taskId, isolation, presetId, model, mode, sendTask, effort) {
+  let s = await api("fd_start_task", taskId, isolation, presetId, model, mode, sendTask, effort, false);
+  if (s && s.usage_hold) {
+    if (!(await confirmDialog("Start anyway?", s.usage_hold, "Start anyway"))) return null;
+    s = await api("fd_start_task", taskId, isolation, presetId, model, mode, sendTask, effort, true);
+  }
+  return s;
+}
+
 function fdRefreshSoon() {
   clearTimeout(fd.refreshTimer);
   fd.refreshTimer = setTimeout(fdRefresh, 250);
@@ -1085,7 +1273,8 @@ function fdSessionRow(s) {
     + (s.status === "needs_you" ? " needs" : ""));
   row.tabIndex = 0;
   row.append(el("span", "dot " + s.status), el("span", "task", s.task),
-             el("span", "st", (FD_STATUS[s.status] || s.status) + (s.alerts ? ` · ${s.alerts}⚑` : "")));
+             el("span", "st", (s.status === "limited" ? (s.limit_until ? "usage limit — until " + fmtClock(s.limit_until)
+               : "limit reset — continue?") : FD_STATUS[s.status] || s.status) + (s.alerts ? ` · ${s.alerts}⚑` : "")));
   row.title = (s.worktree ? `Own copy on ${s.branch}\n` : "") + s.cwd;
   row.onclick = () => fdSelect(s.id);
   row.onkeydown = (e) => { if (e.key === "Enter") fdSelect(s.id); };
@@ -1101,13 +1290,17 @@ function fdRenderTakeoff() {
   const list = $("#fd-takeoff-list");
   list.replaceChildren();
   $("#fd-auto-takeoff").checked = !!ov.auto_takeoff;
+  const hold = $("#fd-takeoff-hold");
+  hold.textContent = ov.takeoff_hold ? "Holding automatic starts: " + ov.takeoff_hold : "";
+  show(hold, !!ov.takeoff_hold && !!ov.auto_takeoff);
   for (const q of ov.takeoff || []) {
     const row = el("div", "takeoff-row");
     const info = el("div", "takeoff-info");
     info.appendChild(el("b", "", q.title));
     info.appendChild(el("span", "muted small", q.project + (q.group ? ` · ${q.group}` : "")));
     const state = q.backlog ? "backlog — start it by hand" : q.blockers.length ? "waiting: " + q.blockers.join(" ")
-      : q.error ? "couldn't start: " + q.error : ov.auto_takeoff ? "taking off…" : "ready";
+      : q.error ? "couldn't start: " + q.error : ov.auto_takeoff && ov.takeoff_hold ? "held: usage limit"
+      : ov.auto_takeoff ? "taking off…" : "ready";
     info.appendChild(el("span", "small " + (q.blockers.length || q.error ? "warn" : "muted"), state));
     const go = el("button", "primary small-btn", "▶ Start");
     go.disabled = q.blockers.length > 0;
@@ -1270,6 +1463,11 @@ function fdSetStatus(status) {
   $("#fd-send").disabled = busy || !live;
   $("#fd-input").disabled = !live;
   show($("#fd-resume"), status === "paused" || status === "error");
+  show($("#fd-continue"), status === "limited");
+  if (status === "limited") {
+    pill.textContent = fd.detail.limit_until ? "usage limit — continues " + fmtClock(fd.detail.limit_until)
+      : "usage limit reset — press Continue now";
+  }
   show($("#fd-end"), status !== "ended");
   show($("#fd-rmcopy"), status === "ended" && !!fd.detail.branch && !!fd.detail.project);
   $("#fd-mode").disabled = status === "ended";
@@ -1398,7 +1596,7 @@ function fdRenderEvent(ev, scroll = true) {
       break;
     }
     case "notice": {
-      const warnKinds = ["same_file", "contract", "worktree_overlap", "contract_changed"];
+      const warnKinds = ["same_file", "contract", "worktree_overlap", "contract_changed", "usage", "limit"];
       const cls = warnKinds.includes(ev.kind) ? "notice warn" : ev.kind === "briefing" || ev.kind === "contract_sent"
         ? "notice share" : "notice";
       const icon = warnKinds.includes(ev.kind) ? "⚑ " : ev.kind === "briefing" ? "✈ " : "";
@@ -1410,7 +1608,7 @@ function fdRenderEvent(ev, scroll = true) {
       add(el("div", "turn-end" + (ev.is_error ? " msg-error" : ""), `— ${t}${ev.cost ? ` · $${ev.cost.toFixed(4)} so far` : ""} —`));
       break;
     }
-    case "error": add(el("div", "msg-error", ev.text)); break;
+    case "error": if (ev.code === "rate_limit") return; add(el("div", "msg-error", ev.text)); break;  // the limit notice says it
     case "system": add(el("div", "notice", ev.text)); break;
     case "live": fdSetLive(ev.text, true); return;
     case "status": fdSetStatus(ev.status); return;
@@ -1520,7 +1718,7 @@ async function fdPollLoop() {
              "work_proposal", "change_proposal", "proposal_done"].includes(event.type)) refresh = true;
       }
       fd.seq = Math.max(fd.seq, res.seq);
-      if (refresh) fdRefreshSoon();
+      if (refresh || Date.now() - (fd.lastRefresh || 0) > 30000) fdRefreshSoon();  // usage and resets change too
     } catch (_) { /* keep polling */ }
     await new Promise((r) => setTimeout(r, activeTool() === "flightdeck" ? 250 : 1500));
   }
@@ -1535,8 +1733,9 @@ function fdRefreshAwareSoon() {
       const d = await api("fd_session", fd.current);
       if (d.id !== fd.current) return;
       fd.detail.awareness = d.awareness; fd.detail.cost = d.cost; fd.detail.files = d.files;
-      fd.detail.task_row = d.task_row; fd.detail.running = d.running;
+      fd.detail.task_row = d.task_row; fd.detail.running = d.running; fd.detail.limit_until = d.limit_until;
       fdRenderAware(d.awareness); fdRenderHead();
+      if (d.status === "limited" || fd.detail.status === "limited") fdSetStatus(d.status);  // when it continues
     } catch (_) { /* ignore */ }
   }, 400);
 }
@@ -1940,8 +2139,9 @@ const fdUpdateIsolation = guarded(async () => {
 async function fdBegin(taskId, isolation, presetId, sendTask, btn, label, extra = {}) {
   btn.disabled = true; btn.textContent = "Starting…";
   try {
-    const s = await api("fd_start_task", taskId, isolation, presetId ? Number(presetId) : null,
-                        extra.model || null, null, sendTask, extra.effort || null);
+    const s = await fdStartTaskApi(taskId, isolation, presetId ? Number(presetId) : null,
+                                   extra.model || null, null, sendTask, extra.effort || null);
+    if (!s) return;
     closeModal();
     await fdRefresh();
     await fdSelect(s.id);
@@ -1985,7 +2185,8 @@ const fdCreateStandalone = guarded(async () => {
 });
 
 const fdStartStandalone = guarded(async (t) => {
-  const s = await api("fd_start_task", t.id, "shared", null, null, null, true);
+  const s = await fdStartTaskApi(t.id, "shared", null, null, null, true, null);
+  if (!s) return;
   await fdRefresh();
   await fdSelect(s.id);
 });
@@ -2160,6 +2361,7 @@ function fdBind() {
   $("#fd-model").onchange = switcher($("#fd-model"), "fd_set_model", "model");
   $("#fd-effort").onchange = switcher($("#fd-effort"), "fd_set_effort", "effort");
   $("#fd-resume").onclick = guarded(async () => { await api("fd_resume", fd.current); await fdSelect(fd.current); });
+  $("#fd-continue").onclick = guarded(async () => { await api("fd_continue", fd.current); await fdSelect(fd.current); });
   $("#fd-end").onclick = guarded(async () => {
     if (!(await confirmWord("End this session? (The conversation stays in the list for a day.)", "yes", "End session"))) return;
     await api("fd_end", fd.current); await fdSelect(fd.current); fdRefresh();
@@ -3989,7 +4191,7 @@ async function init() {
   $("#btn-help").onclick = () => openModal("#modal-help");
   $("#help-close").onclick = closeModal;
   $("#settings-close").onclick = closeModal;
-  $("#modal-backdrop").onclick = () => { if (openModalSel !== "#modal-prompt") closeModal(); };
+  $("#modal-backdrop").onclick = () => { if (openModalSel !== "#modal-prompt" && openModalSel !== "#modal-confirm") closeModal(); };
   $("#colors-reset").onclick = guarded(async () => { applyTheme(await api("save_settings", { custom_colors: {} })); renderSettings(); });
   // Preview while dragging; save once when the slider is released.
   $("#font-size").oninput = (e) => {
@@ -4012,6 +4214,25 @@ async function init() {
   $("#content-center").onchange = guarded(async (e) => {
     applyTheme(await api("save_settings", { content_center: e.target.checked }));
   });
+  for (const [id, key] of [["#usage-hold-takeoff", "usage_hold_takeoff"], ["#usage-hold-routines", "usage_hold_routines"],
+                           ["#usage-auto-resume", "usage_auto_resume"], ["#usage-read-logs", "usage_read_logs"]]) {
+    $(id).onchange = guarded(async (e) => {
+      applyTheme(await api("save_settings", { [key]: e.target.checked }));
+      fdRefreshSoon();
+    });
+  }
+  $("#usage-plan").onchange = guarded(async (e) => { applyTheme(await api("save_settings", { usage_plan: e.target.value })); });
+  for (const [id, key] of [["#usage-warn-at", "usage_warn_at"], ["#usage-hold-at", "usage_hold_at"]]) {
+    $(id).onchange = guarded(async (e) => {
+      const v = Math.max(1, Math.min(100, Math.round(Number(e.target.value) || 0)));
+      e.target.value = v;
+      applyTheme(await api("save_settings", { [key]: v }));
+      fdRefreshSoon();
+    });
+  }
+  $("#btn-usage").onclick = openUsage;
+  $("#usage-close").onclick = closeModal;
+  $("#usage-settings").onclick = () => { closeModal(); openSettings(); };
   $("#mode-unified").onclick = () => setSplit(false);
   $("#mode-split").onclick = () => setSplit(true);
   $("#btn-ask").onclick = ask;

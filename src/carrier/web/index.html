@@ -23,6 +23,7 @@
   <div id="progress-pill" class="pill hidden"></div>
   <div class="spacer"></div>
   <button id="btn-home" class="ghost hidden" title="Back to project choice">Projects</button>
+  <button id="btn-usage" class="ghost usage-chip" title="Usage and limits">Usage</button>
   <button id="btn-help" class="ghost" title="Keyboard shortcuts (?)">?</button>
   <button id="btn-settings" class="ghost" title="Settings">⚙ Settings</button>
   <button id="btn-finish" class="primary hidden">Finish review</button>
@@ -503,6 +504,7 @@
       <summary>Ready for take-off <span id="fd-takeoff-count" class="muted small"></span></summary>
       <label class="check small" title="Start queued routines automatically when their review gate is clear (backlog groups excepted)">
         <input type="checkbox" id="fd-auto-takeoff"> Auto take-off</label>
+      <div id="fd-takeoff-hold" class="small warn hidden"></div>
       <div id="fd-takeoff-list"></div>
     </details>
     <div class="fd-side-foot">
@@ -553,6 +555,7 @@
           </select>
         </label>
         <button id="fd-resume" class="primary hidden">Resume</button>
+        <button id="fd-continue" class="primary hidden" title="Carry on now instead of waiting for the usage limit to reset">Continue now</button>
         <button id="fd-done" class="ghost" title="Mark this task done (saves a summary to the project history)">✓ Mark done</button>
         <button id="fd-upgrade" class="ghost hidden">Make it a project…</button>
         <button id="fd-assign" class="ghost hidden">Add to a project…</button>
@@ -724,6 +727,21 @@
   </label>
   <label class="check"><input type="checkbox" id="content-center"> Centre the work area in the window</label>
   <p class="muted small">Applies to Ready Room pages (including imports) and Flight Deck conversations. Debrief's diffs always use the full width.</p>
+  <h4>Usage and limits</h4>
+  <label class="field inline">How you pay for Claude
+    <select id="usage-plan">
+      <option value="auto">Detect it</option>
+      <option value="subscription">Subscription (Pro / Max): show limits</option>
+      <option value="api">API key: show cost</option>
+    </select>
+  </label>
+  <label class="field inline">Warn me at <input type="number" id="usage-warn-at" min="1" max="100" step="1"> % of a limit</label>
+  <label class="field inline">Hold automatic starts at <input type="number" id="usage-hold-at" min="1" max="100" step="1"> % of a limit</label>
+  <label class="check"><input type="checkbox" id="usage-hold-takeoff"> Hold auto take-off at that level</label>
+  <label class="check"><input type="checkbox" id="usage-hold-routines"> Ask before starting a routine at that level</label>
+  <label class="check"><input type="checkbox" id="usage-auto-resume"> When a limit stops a task, continue it after the reset</label>
+  <label class="check"><input type="checkbox" id="usage-read-logs"> Count tokens from Claude Code's own logs (read only; only the numbers are kept)</label>
+  <p class="muted small">While a limit is reached, nothing starts on its own. Limit figures come from Claude Code while an agent runs, so they are as fresh as the last run.</p>
   <div class="modal-actions">
     <button id="settings-close" class="primary">Done</button>
   </div>
@@ -767,6 +785,35 @@
     <span class="muted small">Deletes the work in it. Asks you to confirm.</span>
   </div>
   <div class="modal-actions"><button id="bb-cancel" class="ghost">Cancel</button></div>
+</div>
+
+<div id="modal-usage" class="modal wide hidden" role="dialog" aria-modal="true" aria-labelledby="usage-title">
+  <h3 id="usage-title">Usage and limits</h3>
+  <p id="usage-plan-line" class="muted small"></p>
+  <div id="usage-limits" class="usage-limits"></div>
+  <h4>Tokens</h4>
+  <div id="usage-totals" class="usage-totals"></div>
+  <div id="usage-days" class="usage-days" aria-label="Tokens per day, last 14 days"></div>
+  <div class="usage-tables">
+    <div><h4>By project <span class="muted small">— last 7 days</span></h4><div id="usage-projects"></div></div>
+    <div><h4>By task <span class="muted small">— Flight Deck, last 7 days</span></h4><div id="usage-tasks"></div></div>
+    <div><h4>By model <span class="muted small">— last 7 days</span></h4><div id="usage-models"></div></div>
+  </div>
+  <p id="usage-scan" class="muted small"></p>
+  <div class="modal-actions">
+    <button id="usage-settings" class="ghost">Settings…</button>
+    <span class="spacer"></span>
+    <button id="usage-close" class="primary">Close</button>
+  </div>
+</div>
+
+<div id="modal-confirm" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+  <h3 id="confirm-title"></h3>
+  <p id="confirm-text"></p>
+  <div class="modal-actions">
+    <button id="confirm-cancel" class="ghost">Cancel</button>
+    <button id="confirm-ok" class="primary">OK</button>
+  </div>
 </div>
 
 <div id="modal-history" class="modal wide hidden" role="dialog" aria-modal="true" aria-labelledby="history-title">

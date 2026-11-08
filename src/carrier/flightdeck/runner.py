@@ -101,7 +101,8 @@ class SessionRunner:
         self.cost_base = float(row["cost_usd"] or 0.0)
         self.client = self.client_factory(options)
         await self.client.connect()
-        self.set_status("idle")
+        # Reconnecting (new model or effort) while waiting out a usage limit keeps the wait.
+        self.set_status("limited" if self.row["status"] == "limited" else "idle")
 
     def claim(self) -> bool:
         """Mark the session busy *before* a turn is scheduled.
@@ -132,6 +133,7 @@ class SessionRunner:
         self.emit({"type": "user", "text": text, **({"images": images} if images else {})})
         reply: list[str] = []
         ok = False
+        limit_signs: list[str] = []  # why this turn looks stopped by a usage limit
         try:
             await self.client.query(sdk.user_message(text, images) if images else text)
             async for msg in self.client.receive_response():
@@ -140,6 +142,13 @@ class SessionRunner:
                         reply.append(ev["text"])
                     if ev["type"] == "result":
                         ok = not ev.get("is_error")
+                        if ev.get("api_status") == 429:
+                            limit_signs.append(ev.get("text") or "429")
+                    if ev["type"] == "error" and ev.get("code") == "rate_limit":
+                        limit_signs.append(ev.get("text") or "rate_limit")
+                    if ev["type"] == "rate_limit" and ev.get("status") == "rejected" \
+                            and ev.get("overage_status") not in ("allowed", "allowed_warning"):
+                        limit_signs.append("rejected")
                     self._handle(ev)
         except asyncio.CancelledError:
             raise
@@ -152,8 +161,13 @@ class SessionRunner:
             return
         finally:
             self.busy = False
-        if self.row["status"] not in ("ended", "error"):
+        limited = bool(limit_signs) and not ok and not self.interrupted
+        if limited and self.row["status"] not in ("ended", "error"):
+            self.deck.limit_hit(self.sid, "\n".join(limit_signs + reply))
+        elif self.row["status"] not in ("ended", "error"):
             self.set_status("idle")
+        if ok and (self.row.get("limit_tries") or 0):
+            self.deck.store.update_session(self.sid, limit_tries=0)  # past the limit
         if ok and not self.interrupted and reply:
             if on_done is not None:
                 on_done("\n\n".join(reply).strip())
@@ -174,6 +188,13 @@ class SessionRunner:
                 from carrier.readyroom.importer import clean_questions
 
                 self.emit({"type": "question_fallback", "questions": clean_questions(questions)})
+        if ev["type"] == "rate_limit":
+            self.deck.on_rate_limit(self.sid, ev)  # recorded and, if it changed, a notice
+            return
+        if ev["type"] == "system":
+            from carrier.core import usage
+
+            usage.record_account(self.deck.store, ev.get("key_source"))
         if ev["type"] == "system" and ev.get("session"):
             self.deck.store.update_session(self.sid, sdk_session=ev["session"])
         if ev["type"] == "reset":

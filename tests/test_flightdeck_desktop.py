@@ -435,3 +435,64 @@ def test_alerts_when_claude_needs_you(fdpage):
     page.click(".tool[data-tool='readyroom']")
     page.wait_for_timeout(600)
     assert page.locator("#alert-strip.hidden").count() == 1 and page.inner_text("#fd-badge") == "1"
+
+
+def test_usage_limits_in_the_page(fdpage):
+    import time
+
+    from .test_usage import reply
+
+    page, srv = fdpage
+    logs = Path(__import__("os").environ["CARRIER_CLAUDE_LOGS"])
+    (logs / "proj").mkdir()
+    (logs / "proj" / "x.jsonl").write_text(reply(time.time() - 60, "m1", cwd=str(srv), inp=1200, out=300) + "\n")
+    page.click(".tool[data-tool='readyroom']")
+    page.wait_for_selector("#rr-pane-intro:not(.hidden)")
+    rr_new_project(page, "ApiServer", "A small API server.", "limit-warn")
+    page.click(".tool[data-tool='flightdeck']")
+    page.click(".fd-project:has(.name:text-is('ApiServer')) >> text=▶ Start")
+    page.click("#fdn-start")
+    page.wait_for_selector("#fd-transcript .notice >> text=close to your 5-hour limit")
+    page.wait_for_selector("#btn-usage.near:text('5h 85%')")
+    # Claude stops at the limit: the session waits, with a Continue now button.
+    deck = page.carrier_api._fd()
+    sid = next(iter(deck.runners))
+    deck.send(sid, "limit-hit 600")
+    page.wait_for_selector("#fd-continue:not(.hidden)")
+    page.wait_for_selector(".fd-sess .st:text-matches('usage limit — until')")
+    page.wait_for_selector("#btn-usage.reached:text('5h full')")
+    page.wait_for_selector("#fd-status:text-matches('continues')")
+    # Starting more work now asks first.
+    page.click(".fd-project:has(.name:text-is('ApiServer')) >> text=＋ Task")
+    page.select_option("#fdn-task-sel", "new")
+    page.fill("#fdn-task", "another task")
+    page.click("#fdn-start")
+    page.wait_for_selector("#modal-confirm:not(.hidden) >> text=5-hour limit reached")
+    page.click("#confirm-cancel")
+    assert page.locator("#modal-fd-new:not(.hidden)").count() == 1  # back in the start dialog
+    page.click("#modal-fd-new >> text=Cancel")
+    # The usage panel: the limit and the tokens from Claude Code's logs.
+    page.click("#btn-usage")
+    page.wait_for_selector("#usage-limits >> text=5-hour limit")
+    page.wait_for_selector("#usage-projects >> text=ApiServer")
+    assert "2.5K" in page.inner_text("#usage-projects")  # 1200 in + 300 out + 1000 cache read
+    page.screenshot(path="/tmp/carrier-shots/usage-panel.png")
+    page.click("#usage-close")
+    # Continue now: Claude is told to carry on.
+    page.click("#fd-continue")
+    page.wait_for_selector("#fd-continue", state="hidden")
+    deadline = time.time() + 10
+    while not ALL_CLIENTS[-1].prompts[-1].startswith("[Carrier] The limit that stopped") and time.time() < deadline:
+        time.sleep(0.05)
+    assert ALL_CLIENTS[-1].prompts[-1].startswith("[Carrier] The limit that stopped")
+    # Settings save.
+    page.click("#btn-settings")
+    page.fill("#usage-hold-at", "70")
+    page.press("#usage-hold-at", "Tab")
+    page.uncheck("#usage-auto-resume")
+    page.click("#settings-close")
+    from carrier.core import usersettings
+
+    s = usersettings.load()
+    assert s["usage_hold_at"] == 70 and s["usage_auto_resume"] is False
+    page.screenshot(path="/tmp/carrier-shots/usage.png")

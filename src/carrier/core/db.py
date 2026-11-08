@@ -219,10 +219,29 @@ CREATE TABLE IF NOT EXISTS messages (
     ts          REAL NOT NULL,
     body        TEXT NOT NULL                 -- JSON event (see sdk.py)
 );
+CREATE TABLE IF NOT EXISTS usage_files (      -- how far each Claude Code log was read (core/usage.py)
+    path        TEXT PRIMARY KEY,
+    size        INTEGER NOT NULL,             -- -1 = not finished (read again next time)
+    mtime       REAL NOT NULL,
+    offset      INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS usage_entries (    -- one row per Claude reply: tokens only, no content
+    key         TEXT PRIMARY KEY,             -- message id + request id (logs repeat a reply per block)
+    ts          REAL NOT NULL,
+    model       TEXT NOT NULL,
+    session     TEXT NOT NULL,                -- Claude Code conversation id
+    cwd         TEXT NOT NULL,
+    input       INTEGER NOT NULL,
+    output      INTEGER NOT NULL,
+    cache_write INTEGER NOT NULL,
+    cache_write_1h INTEGER NOT NULL,
+    cache_read  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS usage_by_ts ON usage_entries(ts);
 """
 
 # Sessions in these states hold the deck: they count for coordination.
-ACTIVE = ("starting", "working", "needs_you", "idle", "paused")
+ACTIVE = ("starting", "working", "needs_you", "idle", "paused", "limited")
 
 # Columns added after the first release, created on open if missing.
 _MIGRATIONS: dict[str, dict[str, str]] = {
@@ -236,7 +255,9 @@ _MIGRATIONS: dict[str, dict[str, str]] = {
         # files are named "<label>/<path>" in edits, contracts and reviews.
         "folders": "TEXT NOT NULL DEFAULT '[]'",
     },
-    "sessions": {"task_id": "INTEGER", "policy": "TEXT", "preset_id": "INTEGER", "effort": "TEXT"},
+    "sessions": {"task_id": "INTEGER", "policy": "TEXT", "preset_id": "INTEGER", "effort": "TEXT",
+                 "limit_until": "REAL",  # waiting for a usage limit to reset: continue then
+                 "limit_tries": "INTEGER NOT NULL DEFAULT 0"},
     "events": {"path": "TEXT"},
     "review_agents": {"model": "TEXT", "effort": "TEXT"},
     "tasks": {"routine_id": "INTEGER", "fix_review": "TEXT", "group_id": "INTEGER"},
@@ -860,6 +881,52 @@ class Store:
     def add_message(self, session_id: int, body: dict[str, Any]) -> None:
         self._x("INSERT INTO messages(session_id, ts, body) VALUES (?,?,?)",
                 (session_id, time.time(), json.dumps(body)))
+
+    # -- usage (core/usage.py) ---------------------------------------------------
+
+    def usage_files(self) -> list[dict[str, Any]]:
+        return self._q("SELECT * FROM usage_files")
+
+    def usage_file(self, path: str, size: int, mtime: float, offset: int) -> None:
+        self._x("INSERT INTO usage_files(path, size, mtime, offset) VALUES (?,?,?,?) ON CONFLICT(path) DO UPDATE "
+                "SET size=excluded.size, mtime=excluded.mtime, offset=excluded.offset", (path, size, mtime, offset))
+
+    def add_usage(self, rows: list[dict[str, Any]]) -> None:
+        """Add replies; one seen again (logs repeat a reply) keeps the larger counts."""
+        cols = ("key", "ts", "model", "session", "cwd", "input", "output", "cache_write", "cache_write_1h", "cache_read")
+        sql = (f"INSERT INTO usage_entries({', '.join(cols)}) VALUES ({','.join('?' for _ in cols)}) "
+               "ON CONFLICT(key) DO UPDATE SET " +
+               ", ".join(f"{c}=MAX({c}, excluded.{c})" for c in cols[5:]))
+        with self._write_lock:
+            conn = self._conn()
+            conn.execute("BEGIN")
+            try:
+                conn.executemany(sql, [tuple(r[c] for c in cols) for r in rows])
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+
+    def prune_usage(self, before: float) -> None:
+        self._x("DELETE FROM usage_entries WHERE ts < ?", (before,))
+
+    def usage_rows(self, since: float) -> list[dict[str, Any]]:
+        """Token sums by local day, model, conversation and folder."""
+        return self._q(
+            "SELECT date(ts, 'unixepoch', 'localtime') AS day, model, session, cwd, SUM(input) AS input, "
+            "SUM(output) AS output, SUM(cache_write) AS cache_write, SUM(cache_write_1h) AS cache_write_1h, "
+            "SUM(cache_read) AS cache_read FROM usage_entries WHERE ts >= ? GROUP BY day, model, session, cwd",
+            (since,))
+
+    def usage_total(self, since: float) -> dict[str, int]:
+        r = self._q("SELECT COALESCE(SUM(input),0) AS input, COALESCE(SUM(output),0) AS output, "
+                    "COALESCE(SUM(cache_write),0) AS cache_write, COALESCE(SUM(cache_read),0) AS cache_read "
+                    "FROM usage_entries WHERE ts >= ?", (since,))[0]
+        return {**r, "total": sum(r.values())}
+
+    def usage_sessions(self) -> list[dict[str, Any]]:
+        """Every Flight Deck session that has a Claude Code conversation id (any age)."""
+        return self._q("SELECT id, sdk_session, task_id, project_id, task FROM sessions WHERE sdk_session IS NOT NULL")
 
     def messages(self, session_id: int, limit: int = 2000) -> list[dict[str, Any]]:
         rows = self._q("SELECT body FROM messages WHERE session_id=? ORDER BY id DESC LIMIT ?", (session_id, limit))

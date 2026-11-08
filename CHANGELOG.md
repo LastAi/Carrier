@@ -4,6 +4,22 @@ All notable changes are listed here. Format: [Keep a Changelog](https://keepacha
 
 ## Unreleased
 
+## 0.8.0 — Usage and limits (alpha)
+
+- **Usage and limits.** A Usage button on every tab shows how full Claude's
+  5-hour and weekly limits are (as Claude Code reports them) and when they
+  reset. The Usage panel adds tokens for today and the last 7 days, Flight
+  Deck against other Claude Code use, a 14-day chart, the top projects, tasks
+  and models, and the cost at API prices. Token counts come from Claude
+  Code's own logs, read only, numbers only, kept 60 days; can be turned off.
+- **Usage-limit stops are waited out.** When a limit stops a task, the session
+  waits instead of failing and Carrier tells Claude to carry on after the
+  reset — also after a restart. **Continue now** carries on at once.
+- **Holding near a limit:** a warning at a level you set (80%), and at a
+  higher level (90%) auto take-off waits and starting a routine asks first.
+  While a limit is reached nothing starts on its own, and starting work by
+  hand asks first.
+
 ## 0.7.0 — Import, groups, routines and safety
 
 - **Alerts** when Claude needs you: a pulsing badge on the Flight Deck tab, a

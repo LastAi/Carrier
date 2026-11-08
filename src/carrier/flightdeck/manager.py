@@ -36,7 +36,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
-from carrier.core import gitutil, usersettings
+from carrier.core import gitutil, usage, usersettings
 from carrier.flightdeck import coordination, worktrees
 from carrier.readyroom import context as rr_context
 from carrier.readyroom.manager import ReadyRoom, RoomError
@@ -54,12 +54,28 @@ class DeckError(Exception):
     """A user-facing problem; the message is written for the user."""
 
 
+class UsageHold(DeckError):
+    """Starting this now would run into a usage limit: ask the user first (start_task's ``confirm_usage``)."""
+
+
 def _norm(p: str | Path) -> str:
     return os.path.normcase(os.path.realpath(str(p)))
 
 
 MAX_IMAGES = 6  # pasted images per message
 TAKEOFF_RETRY_SECONDS = 300  # after a failed auto take-off, wait this long before trying that run again
+LIMIT_RETRY_SECONDS = (600, 1200, 2400, 3600)  # usage limit hit with no reset time known: try again after
+LIMIT_SLACK_SECONDS = 60  # continue this long after a limit's reset time
+CONTINUE_FAILURES = 3  # couldn't continue after a limit this many times in a row: pause and say so
+CONTINUE_PROMPT = ("[Carrier] The limit that stopped your last reply has reset. Continue the task from where "
+                   "you stopped (your last reply was cut off).")
+
+
+def _clock(ts: float | None) -> str:
+    if not ts:
+        return "?"
+    d = time.localtime(ts)
+    return time.strftime("%H:%M" if ts - time.time() < 20 * 3600 else "%a %H:%M", d)
 
 
 class FlightDeck:
@@ -77,6 +93,11 @@ class FlightDeck:
         self._takeoff_lock = threading.Lock()
         self._takeoff_errors: dict[int, str] = {}  # task id -> why auto take-off couldn't start it
         self._takeoff_failed: dict[int, float] = {}  # task id -> when it last failed to start
+        self._takeoff_hold = ""  # why auto take-off is holding (usage limits), shown in the list
+        self._last_usage_tick = 0.0
+        self._usage_lock = threading.Lock()
+        self._continue_lock = threading.Lock()
+        self._continue_failed: dict[int, int] = {}  # session id -> failed continues in a row
         self._events: deque[dict[str, Any]] = deque(maxlen=MAX_EVENTS)
         self._seq = 0
         self._ev_lock = threading.Lock()
@@ -109,6 +130,8 @@ class FlightDeck:
     def _mark_orphans_paused(self) -> None:
         """Sessions that were open when Carrier last closed can be resumed."""
         for s in self.store.sessions(active_only=True):
+            if s["status"] == "limited":
+                continue  # waiting for a usage limit: continued when it resets (usage_tick), or by the user
             if s["status"] != "paused":
                 self.store.update_session(s["id"], status="paused", last_activity=s["last_activity"])
 
@@ -123,7 +146,9 @@ class FlightDeck:
                 self._run(runner.stop(), timeout=10)
             except Exception:
                 pass
-            self.store.update_session(runner.sid, status="paused")
+            row = self.store.session(runner.sid)
+            if not (row and row["status"] == "limited"):
+                self.store.update_session(runner.sid, status="paused")
         self.runners.clear()
         self._loop.call_soon_threadsafe(self._loop.stop)
 
@@ -310,6 +335,8 @@ class FlightDeck:
                 "takeoff": [{**q, "error": self._takeoff_errors.get(q["task_id"], "")}
                             for q in routines.takeoff_queue(self.store)],
                 "auto_takeoff": self.auto_takeoff,
+                "takeoff_hold": self._hold_reason("takeoff") or self._hold_reason("routines"),
+                "usage": usage.brief(self.store),
                 "needs_you": sum(1 for s in all_sessions if s["status"] == "needs_you"), "policy": self.policy,
                 "active": sum(1 for s in all_sessions if s["status"] in ACTIVE),
                 "presets": self.store.presets()}
@@ -324,6 +351,7 @@ class FlightDeck:
             "model": s["model"], "effort": s.get("effort"), "cost": round(s["cost_usd"] or 0, 4), "started": s["started"],
             "last_activity": s["last_activity"], "running": s["id"] in self.runners,
             "task_id": s.get("task_id"), "policy": s.get("policy"),
+            "limit_until": s.get("limit_until"),
             "alerts": len(self.store.pending_events(s["id"])),
         }
 
@@ -409,11 +437,13 @@ class FlightDeck:
 
     def start_task(self, task_id: int, isolation: str = "shared", preset_id: int | None = None,
                    model: str | None = None, mode: str | None = None, send_task: bool = True,
-                   effort: str | None = None, auto: bool = False) -> dict[str, Any]:
+                   effort: str | None = None, auto: bool = False, confirm_usage: bool = False) -> dict[str, Any]:
         """Start a Flight Deck session working on a task (project or standalone).
 
         Settings come from, in order: explicit arguments, the chosen preset,
-        the project's default preset, then Claude Code's defaults.
+        the project's default preset, then Claude Code's defaults. Raises
+        :class:`UsageHold` when a usage limit is reached (or, for a routine, close)
+        unless ``confirm_usage``.
         """
         task = self.store.task(task_id)
         if task is None:
@@ -426,6 +456,13 @@ class FlightDeck:
             routines.check_gate(self.store, task)  # e.g. "push" only once everything is reviewed
         except routines.RoutineError as exc:
             raise DeckError(str(exc)) from exc
+        if not confirm_usage:
+            lv = usage.level(self.store, usage.settings())
+            if lv["state"] == "reached":
+                raise UsageHold(f"{lv['text']} Claude can't work until then; "
+                                "the task would wait and continue after the reset.")
+            if task.get("routine_id") and (why := self._hold_reason("routines")):
+                raise UsageHold(f"{why} You asked Carrier to hold routines this close to a limit.")
         pid = task["project_id"]
         project = self.store.project(pid) if pid is not None else None
         if project is None and not task["cwd"]:
@@ -614,6 +651,8 @@ class FlightDeck:
         runner = self._runner(sid)
         if not runner.claim():
             raise DeckError("Claude is still working. Wait for it, or press Stop.")
+        if row and row.get("limit_until"):
+            self.store.update_session(sid, limit_until=None)  # the user carried on themselves
         self._spawn(runner.send(text or "(see the attached image)", images=clean))
         return True
 
@@ -772,6 +811,9 @@ class FlightDeck:
             self._last_takeoff = time.time()
             from carrier.readyroom import routines
 
+            self._takeoff_hold = self._hold_reason("takeoff") or self._hold_reason("routines")
+            if self._takeoff_hold:
+                return []  # close to (or at) a usage limit: nothing starts on its own
             started = []
             busy_projects: set[int] = set()
             now = time.time()
@@ -792,6 +834,125 @@ class FlightDeck:
             return started
         finally:
             self._takeoff_lock.release()
+
+    # -- usage limits: hold automatic starts, wait out a limit, continue after it ---------
+
+    def _hold_reason(self, what: str) -> str:
+        try:
+            return usage.hold_reason(self.store, what)
+        except Exception:  # a broken settings file must not stop the deck
+            traceback.print_exc()
+            return ""
+
+    def on_rate_limit(self, sid: int, ev: dict[str, Any]) -> None:
+        """Claude Code reported a limit window's state (from a session's stream)."""
+        state, prev = usage.record_limit(self.store, ev)
+        status = state["status"]
+        if status == prev:
+            return
+        label = usage.WINDOWS.get(str(ev.get("kind")), ("usage limit", 0))[0].lower()
+        pct = state["utilization"]
+        pct_text = f" ({pct * 100:.0f}% used)" if pct is not None else ""
+        when = f" It resets at {_clock(state['resets_at'])}." if state["resets_at"] else ""
+        if status == "allowed_warning":
+            text = f"Claude Code reports you're close to your {label}{pct_text}.{when}"
+        elif status == "rejected" and state.get("overage_status") in ("allowed", "allowed_warning"):
+            text = f"Your {label} is reached; Claude carries on with extra usage (billed).{when}"
+        elif status == "rejected":
+            text = f"Your {label} is reached.{when}"
+        else:
+            return
+        self.emit(sid, {"type": "notice", "kind": "usage", "text": text})
+
+    def limit_hit(self, sid: int, text: str = "") -> None:
+        """A turn stopped at a usage limit: wait for the reset, then continue (usage_tick)."""
+        row = self.store.session(sid)
+        if row is None:
+            return
+        now = time.time()
+        tries = int(row.get("limit_tries") or 0) + 1
+        until = usage.reached(self.store, now) or usage.reset_from_text(text)
+        if until and until > now:
+            until += LIMIT_SLACK_SECONDS
+        else:  # no reset time known: try again later, waiting longer each time
+            until = now + LIMIT_RETRY_SECONDS[min(tries, len(LIMIT_RETRY_SECONDS)) - 1]
+        self.store.update_session(sid, status="limited", limit_until=until, limit_tries=tries)
+        self.emit(sid, {"type": "status", "status": "limited"}, persist=False)
+        auto = usage.settings()["usage_auto_resume"]
+        what = "An API rate limit" if usage.plan(self.store) == "api" else "Claude's usage limit"
+        self.emit(sid, {"type": "notice", "kind": "limit", "until": until,
+                        "text": f"{what} stopped this task. "
+                                + (f"Carrier will continue it at {_clock(until)}." if auto else
+                                   f"It can go on after {_clock(until)}: press Continue now then.")})
+
+    def usage_tick(self, every: float = 15.0) -> list[int]:
+        """Continue sessions whose usage limit has reset. Called as the page polls."""
+        now = time.time()
+        if now - self._last_usage_tick < every or not self._usage_lock.acquire(blocking=False):
+            return []
+        try:
+            self._last_usage_tick = now
+            continued = []
+            auto = usage.settings()["usage_auto_resume"]
+            for row in self.store.sessions(active_only=True):
+                until = row.get("limit_until")
+                if row["status"] != "limited" or not until or until > now:
+                    continue
+                sid = row["id"]
+                still = usage.reached(self.store, now)
+                if still and still > now:  # another window (e.g. weekly) is still reached
+                    self.store.update_session(sid, limit_until=still + LIMIT_SLACK_SECONDS)
+                    continue
+                if not auto:  # stays "limited" (Continue now is the way on), no longer timed
+                    self.store.update_session(sid, limit_until=None)
+                    self.emit(sid, {"type": "status", "status": "limited"}, persist=False)
+                    self.emit(sid, {"type": "notice", "kind": "limit",
+                                    "text": "The limit has reset. Press Continue now to carry on."})
+                    continue
+                try:
+                    if self.continue_session(sid, scheduled=True) is not None:
+                        continued.append(sid)
+                    self._continue_failed.pop(sid, None)
+                except Exception as exc:  # e.g. the folder is gone: try again later, say why; give up after a few
+                    fails = self._continue_failed.get(sid, 0) + 1
+                    self._continue_failed[sid] = fails
+                    if fails >= CONTINUE_FAILURES:
+                        self._continue_failed.pop(sid, None)
+                        self.store.update_session(sid, status="paused", limit_until=None)
+                        self.emit(sid, {"type": "status", "status": "paused"}, persist=False)
+                        self.emit(sid, {"type": "notice", "kind": "limit",
+                                        "text": f"Couldn't continue after the limit: {exc}. Stopped trying; "
+                                                "fix the problem, then press Resume."})
+                    else:
+                        self.store.update_session(sid, limit_until=now + LIMIT_RETRY_SECONDS[0])
+                        self.emit(sid, {"type": "notice", "kind": "limit",
+                                        "text": f"Couldn't continue after the limit: {exc}. Trying again later."})
+            return continued
+        finally:
+            self._usage_lock.release()
+
+    def continue_session(self, sid: int, scheduled: bool = False) -> dict[str, Any] | None:
+        """Carry on after a usage limit (the Continue now button, or ``scheduled`` by
+        :meth:`usage_tick`): tell Claude to go on. Scheduled, it returns None if the
+        session was already continued (e.g. the user pressed the button meanwhile)."""
+        with self._continue_lock:  # the button and the scheduled continue can't both go
+            row = self.store.session(sid)
+            if row is None:
+                raise DeckError("Unknown session.")
+            if row["status"] == "ended":
+                raise DeckError("This session has ended.")
+            if scheduled and row["status"] != "limited":
+                return None
+            if sid not in self.runners:
+                self.resume_session(sid)
+            runner = self._runner(sid)
+            if not runner.claim():
+                if scheduled:
+                    return None
+                raise DeckError("Claude is still working.")
+            self.store.update_session(sid, limit_until=None)
+            self._spawn(runner.send(CONTINUE_PROMPT))
+            return self._session_summary(self.store.session(sid))
 
     def set_policy(self, policy: str) -> str:
         if policy not in POLICIES:
@@ -936,10 +1097,11 @@ class FlightDeck:
                            for e in self.store.recent_events(sid, limit=10)]}
 
     def poll(self, since: int = 0) -> dict[str, Any]:
-        try:
-            self.takeoff_tick()
-        except Exception:  # never break polling
-            traceback.print_exc()
+        for tick in (self.usage_tick, self.takeoff_tick):
+            try:
+                tick()
+            except Exception:  # never break polling
+                traceback.print_exc()
         with self._ev_lock:
             events = [e for e in self._events if e["seq"] > since]
             seq = self._seq

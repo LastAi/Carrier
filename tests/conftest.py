@@ -28,6 +28,8 @@ def run(repo: Path, *args: str) -> str:
 def _isolated_user_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Never touch the real per-user settings file during tests."""
     monkeypatch.setenv("CARRIER_CONFIG_HOME", str(tmp_path / "user-config"))
+    (tmp_path / "claude-logs").mkdir(exist_ok=True)
+    monkeypatch.setenv("CARRIER_CLAUDE_LOGS", str(tmp_path / "claude-logs"))  # never read the real logs
 
 
 @pytest.fixture

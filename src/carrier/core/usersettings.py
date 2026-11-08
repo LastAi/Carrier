@@ -35,6 +35,14 @@ DEFAULTS: dict[str, Any] = {
     "alerts_flash": True,  # desktop app: flash the taskbar button when Claude needs you
     "alerts_sound": False,  # desktop app: a short chime when Claude needs you
     "alerts_dnd": False,  # desktop app: do not disturb — only the badge, no banner/flash/sound
+    # Usage and limits (core/usage.py SETTINGS has the meanings).
+    "usage_plan": "auto",
+    "usage_read_logs": True,
+    "usage_warn_at": 80,
+    "usage_hold_at": 90,
+    "usage_hold_takeoff": True,
+    "usage_hold_routines": True,
+    "usage_auto_resume": True,
     "recent_repos": [],  # most recent first
     "fd_policy": "warn",  # Flight Deck: what happens when sessions overlap (see flightdeck/manager.py)
 }

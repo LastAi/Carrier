@@ -404,7 +404,9 @@ def normalize(msg: Any, cwd: Path | None = None) -> list[dict[str, Any]]:
                                "summary": summarize_tool(b.name, b.input or {}, cwd),
                                "input": _trim_input(b.input or {})})
         if msg.error:
-            events.append({"type": "error", "text": str(msg.error)})
+            code = str(msg.error)
+            text = "Claude's usage limit was reached." if code == "rate_limit" else code
+            events.append({"type": "error", "code": code, "text": text})
         return events
     if isinstance(msg, UserMessage):
         content = msg.content if isinstance(msg.content, list) else []
@@ -425,7 +427,13 @@ def normalize(msg: Any, cwd: Path | None = None) -> list[dict[str, Any]]:
     if isinstance(msg, ResultMessage):
         events.append({"type": "result", "cost": msg.total_cost_usd or 0.0, "turns": msg.num_turns,
                        "is_error": bool(msg.is_error), "text": (msg.result or "") if msg.is_error else "",
-                       "session": msg.session_id})
+                       "session": msg.session_id, "api_status": getattr(msg, "api_error_status", None)})
+        return events
+    if type(msg).__name__ == "RateLimitEvent":  # a usage-limit window changed state (subscriptions)
+        info = msg.rate_limit_info
+        events.append({"type": "rate_limit", "kind": info.rate_limit_type or "five_hour", "status": info.status,
+                       "resets_at": info.resets_at, "utilization": info.utilization,
+                       "overage_status": info.overage_status})
         return events
     if type(msg).__name__ == "ConversationResetMessage":  # e.g. after /clear: cost counter restarts
         events.append({"type": "reset", "text": "Conversation cleared."})
@@ -433,5 +441,6 @@ def normalize(msg: Any, cwd: Path | None = None) -> list[dict[str, Any]]:
     if isinstance(msg, SystemMessage) and msg.subtype == "init":
         data = msg.data or {}
         events.append({"type": "system", "session": data.get("session_id"), "model": data.get("model"),
+                       "key_source": data.get("apiKeySource"),
                        "text": f"Claude Code session started ({data.get('model', 'default model')})."})
     return events

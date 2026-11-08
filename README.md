@@ -1,5 +1,11 @@
 # Carrier
 
+> [!WARNING]
+> **Pre-release alpha.** Carrier is early software under active development. Features change
+> between versions, and it has had little testing beyond its author's own use. **Do not rely on it
+> in a production setting or with work you can't afford to lose.** Keep your projects in git, review
+> what agents change before you keep it, and back up anything important. Bug reports are very welcome.
+
 **Brief. Launch. Debrief.**
 
 A mothership for Claude Code: launch AI agents in parallel, keep them aware
@@ -56,6 +62,9 @@ The first start sets everything up (about a minute). Then:
   review gate, and a full history of every change to a task.
 - **Safety nets.** A local secrets scan before anything is published, alerts
   when Claude needs you, and a backup of your data before every upgrade.
+- **Usage limits handled.** See how full your 5-hour and weekly limits are and
+  where your tokens go; near a limit automatic work waits, and a task stopped
+  by a limit carries on by itself after the reset.
 - **Private by default.** No network code in Carrier itself, no open ports,
   read-only review agents. Only Claude Code talks to the internet.
 - **Accessible.** Colour-blind-safe themes, high contrast and monochrome,
@@ -70,8 +79,8 @@ The first start sets everything up (about a minute). Then:
 
 ## Status
 
-Alpha — usable day to day, still changing. Bug reports and ideas are
-welcome in Issues.
+Pre-release alpha — not for production use (see the warning at the top).
+Bug reports and ideas are welcome in Issues.
 
 **Tested on Windows 11**, which is where Carrier is used day to day. It is
 built to run on macOS and Linux too, and the automated tests run there, but
