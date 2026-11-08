@@ -52,7 +52,7 @@ class ProjectSpec:
     context: str = ""
     criteria: list[Criterion] | None = None
     task_lookup: Callable[[str, float | None], list[dict[str, Any]]] | None = None
-    add_fix_task: Callable[[str, str], dict[str, Any]] | None = None
+    add_fix_task: Callable[..., dict[str, Any]] | None = None
 
 
 # -- review agents -------------------------------------------------------------------
@@ -61,17 +61,30 @@ def _disabled_key(pid: int | None) -> str:
     return "review_builtins_disabled" if pid is None else f"project:{pid}:review_builtins_disabled"
 
 
+# Built-in agents that start switched off (turn them on in the Ready Room). "secrets"
+# overlaps "security", and the review gate already runs a pattern scan for secrets.
+DEFAULT_OFF = ("secrets",)
+_ON_KEY = "review_builtins_on"
+
+
 def disabled_builtins(store: Store, pid: int | None) -> list[str]:
-    return list(store.get_setting(_disabled_key(pid), []))
+    off = list(store.get_setting(_disabled_key(pid), []))
+    if pid is None:
+        on = set(store.get_setting(_ON_KEY, []))
+        off += [n for n in DEFAULT_OFF if n not in on and n not in off]
+    return off
 
 
 def set_builtin_enabled(store: Store, name: str, enabled: bool, pid: int | None) -> None:
     if name not in {c.name for c in builtin_criteria()}:
         raise ValueError(f"Unknown built-in agent: {name}")
-    off = [n for n in disabled_builtins(store, pid) if n != name]
+    off = [n for n in store.get_setting(_disabled_key(pid), []) if n != name]
     if not enabled:
         off.append(name)
     store.set_setting(_disabled_key(pid), off)
+    if pid is None and name in DEFAULT_OFF:
+        on = [n for n in store.get_setting(_ON_KEY, []) if n != name]
+        store.set_setting(_ON_KEY, on + [name] if enabled else on)
 
 
 # Per-scope settings for built-in agents: {name: {"severity", "model", "effort"}}.
@@ -199,6 +212,50 @@ def effective_criteria(store: Store, pid: int, repo: Path) -> list[Criterion]:
     return [c for c in merged.values() if c.enabled]
 
 
+# -- what each task was meant to cover (its change log) -------------------------------------
+
+EDIT_LABEL = {"created": "created", "edited": "edited", "scope_added": "scope added", "merged_in": "pulled in work",
+              "merged_away": "work moved out", "split_out": "split", "moved": "moved", "status": "status",
+              "deleted": "deleted"}
+
+
+def task_scope_text(store: Store, pid: int, main: Path) -> str:
+    """The tasks worked on since the project's last review, as they now read, with every
+    change to their scope — so the review judges the work against what was actually asked,
+    and work that was dropped from a task (descoped) stands out."""
+    import time as _time
+
+    since = 0.0
+    try:
+        repo, _sub = gitutil.locate(main)
+        cp = gitutil.get_checkpoint(repo, str(pid))
+        since = float(gitutil.commit_time(repo, cp) or 0) if cp else 0.0
+    except gitutil.GitError:
+        pass
+    tasks = [t for t in store.tasks(pid) if t["status"] == "active"
+             or (t["status"] in ("done", "dropped") and (t["finished"] or 0) >= since)]
+    lines: list[str] = []
+    for t in tasks:
+        edits = [e for e in store.task_edits(t["id"]) if e["ts"] >= since and e["kind"] not in ("created",)]
+        if not edits and t["status"] != "active" and not (t["finished"] or 0) >= since:
+            continue
+        lines.append(f"### Task #{t['id']}: {t['title']} [{t['status']}]")
+        if t["details"].strip():
+            lines.append(t["details"].strip()[:3000])
+        for e in edits:
+            when = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(e["ts"]))
+            lines.append(f"- {when} {EDIT_LABEL.get(e['kind'], e['kind'])} by {e['by']}"
+                         + (f": {e['note']}" if e["note"] else ""))
+            if e["removed"].strip():
+                lines.append("  REMOVED from the task (check this wasn't dropped by mistake):\n"
+                             + "\n".join(f"    {ln}" for ln in e["removed"].splitlines()[:20]))
+    if not lines:
+        return ""
+    return ("## Tasks in this review and how their scope changed\nJudge each change against the task as it "
+            "finally read; work added to a task on the way is in scope, and anything REMOVED should not be "
+            "silently missing.\n" + "\n".join(lines))
+
+
 # -- project specs -----------------------------------------------------------------------
 
 def project_spec(store: Store, pid: int) -> ProjectSpec:
@@ -210,6 +267,9 @@ def project_spec(store: Store, pid: int) -> ProjectSpec:
         raise ValueError("Unknown project.")
     extras = [(lbl, Path(path)) for lbl, path in store.project_roots(p)[1:]]  # work folders only
     text = rr_context.build(store, pid, None, for_review=True)
+    scope = task_scope_text(store, pid, Path(p["path"]))
+    if scope:
+        text += "\n\n" + scope
     if extras:
         text += "\n\n## Folders in this review\nFiles named `<label>/…` are in the project's extra folders:\n" + \
             "\n".join(f"- {lbl}/ = {path}" for lbl, path in extras)
@@ -225,8 +285,8 @@ def project_spec(store: Store, pid: int) -> ProjectSpec:
 
     room = ReadyRoom(store)
 
-    def add_fix_task(title: str, details: str) -> dict[str, Any]:
-        project = room.add_task(pid, title, details, first=True)
+    def add_fix_task(title: str, details: str, review_id: str = "") -> dict[str, Any]:
+        project = room.add_task(pid, title, details, first=True, fix_review=review_id or "review")
         return next(t for t in project["tasks"] if t["title"] == title)
 
     return ProjectSpec(id=pid, name=p["name"], path=Path(p["path"]), extras=extras, context=text,
@@ -255,9 +315,10 @@ def project_kwargs(repo: Path, store: Store | None = None) -> dict[str, Any]:
         spec = project_spec(store, p["id"])
     except Exception:  # no store yet, or it can't be read: plain folder review
         return {}
-    # Only folders that are git repositories of their own can be reviewed; the
-    # app asks to start tracking the others, here they are left out.
-    return {"extras": [(lbl, path) for lbl, path in spec.extras if gitutil.is_repo(path)],
+    # Folders not in git yet are left out here; the app offers to start tracking them.
+
+
+    return {"extras": [(lbl, path) for lbl, path in spec.extras if gitutil.in_repo(path)],
             "project": {"id": spec.id, "name": spec.name}, "context": spec.context,
             "criteria": spec.criteria, "task_lookup": spec.task_lookup}
 

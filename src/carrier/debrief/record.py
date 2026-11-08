@@ -22,6 +22,7 @@ checkpoint is left alone so it can never move backwards.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,7 +30,13 @@ from carrier.core import gitutil
 from carrier.core.config import Config
 from carrier.debrief.guide import render_explanation
 from carrier.debrief.models import ChangeItem, Review
-from carrier.debrief.store import OPEN_STATUSES, is_stale, review_dir, save_review, supersede
+from carrier.debrief.store import (
+    OPEN_STATUSES,
+    is_stale,
+    review_dir,
+    save_review,
+    supersede,
+)
 
 ACTION_LABEL = {"approve": "✅ Approved", "fix": "🔧 Needs fix", "revert": "↩️ Revert",
                 "skip": "⏭ Skipped", None: "— Not reviewed"}
@@ -135,17 +142,24 @@ def finish(cfg: Config, review: Review) -> FinishResult:
         if not gitutil.is_repo(Path(part["repo"])):
             raise gitutil.GitError(f"{part['repo']} is missing or no longer a git repository; "
                                    "fix it (or remove it from the project), then finish again.")
-    moved = not is_stale(cfg, review)
-    if moved:
+    moved = not review.scan and not is_stale(cfg, review)
+    if review.scan:
+        message = "Scan finished; scans don't move the review checkpoint."
+    elif moved:
         done: list[tuple[Path, str | None]] = []
         try:
+            seen: set[str] = set()
             for part in parts:
                 repo = Path(part["repo"])
+                key = os.path.normcase(os.path.realpath(repo))
+                if key in seen:
+                    continue  # folders in one repository share its checkpoint
+                seen.add(key)
                 previous = gitutil.resolve(repo, gitutil.checkpoint_ref(review.checkpoint_ns))
                 gitutil.set_checkpoint(repo, part["target"], review.checkpoint_ns)
                 done.append((repo, previous))
         except gitutil.GitError:
-            for repo, previous in done:
+            for repo, previous in reversed(done):
                 try:
                     if previous:
                         gitutil.set_checkpoint(repo, previous, review.checkpoint_ns)
@@ -157,7 +171,7 @@ def finish(cfg: Config, review: Review) -> FinishResult:
             raise
         message = (f"Checkpoint moved to snapshot {review.target[:10]}." if not review.parts else
                    f"Checkpoints moved in all {len(review.all_parts())} folders.")
-    else:
+    if not review.scan and not moved:
         # Another review finished after this one was prepared. Moving the
         # checkpoint here would send it *backwards* and re-show that work.
         message = ("Checkpoint not moved: another review finished after this one was "

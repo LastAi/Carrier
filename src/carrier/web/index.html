@@ -29,6 +29,10 @@
 </header>
 
 <div id="banner" class="banner hidden" role="alert"></div>
+<div id="alert-strip" class="alert-strip hidden" role="status">
+  <span id="alert-text"></span>
+  <button id="alert-go" class="primary small-btn">Go there</button>
+</div>
 
 <!-- ===================== READY ROOM / FLIGHT DECK (soon) ================= -->
 <main id="view-readyroom" class="view hidden">
@@ -43,8 +47,10 @@
     </div>
     <div id="rr-list" class="rr-list"></div>
     <nav class="rr-nav">
+      <button class="rr-navbtn" data-pane="import">Import existing work</button>
       <button class="rr-navbtn" data-pane="global">Global rules</button>
       <button class="rr-navbtn" data-pane="rulesets">Rule sets</button>
+      <button class="rr-navbtn" data-pane="skills">Skills</button>
       <button class="rr-navbtn" data-pane="presets">Session presets</button>
       <button class="rr-navbtn" data-pane="templates">Project templates</button>
       <button class="rr-navbtn" data-pane="agents">Review agents</button>
@@ -65,6 +71,7 @@
         <li><b>Tags</b> help you find projects; they're only for you and never sent to Claude.</li>
       </ul>
       <button id="rr-intro-new" class="primary big">＋ New project</button>
+      <button id="rr-intro-import" class="ghost big">Import existing work…</button>
       <section class="card checks-card">
           <h3>Setup</h3>
           <ul id="checks" class="checks"></ul>
@@ -99,6 +106,127 @@
       </div>
     </div>
 
+
+    <!-- Import existing work (readyroom/importer.py) -->
+    <div id="rr-pane-import" class="rr-pane hidden">
+      <h2>Import existing work</h2>
+      <p class="muted">Bring a folder you've used with plain Claude Code (or the Claude app) into Carrier. Claude reads
+        what's there — folders, READMEs, CLAUDE.md, git history, past Claude Code sessions and, if you add it, a
+        claude.ai chat export — and talks it through with you: one project or several, split in place or
+        reorganised. Nothing changes until you confirm the plan.</p>
+      <div id="im-recent" class="im-recent hidden"></div>
+
+      <div id="im-setup">
+        <label class="field">Folder
+          <span class="folder-row"><span id="im-folder" class="muted">No folder chosen</span>
+            <button id="im-folder-btn" class="ghost">Choose…</button></span>
+        </label>
+        <label class="field">Claude app chats <span class="muted small">— optional: the .zip from claude.ai Settings → Privacy → Export data</span>
+          <span class="folder-row"><span id="im-export" class="muted">None</span>
+            <button id="im-export-btn" class="ghost">Choose…</button>
+            <button id="im-export-clear" class="ghost hidden">Remove</button></span>
+        </label>
+        <button id="im-scan" class="primary" disabled>Look at it</button>
+        <span id="im-scan-busy" class="muted hidden">Reading the folder…</span>
+
+        <section id="im-found" class="card hidden">
+          <h3>What Carrier found</h3>
+          <ul id="im-found-list" class="im-found"></ul>
+          <div id="im-chats" class="hidden">
+            <h4>Chats to include <span class="muted small">— ticked ones mention this folder or its parts</span></h4>
+            <div id="im-chat-list" class="im-chat-list"></div>
+          </div>
+          <fieldset class="im-mode">
+            <legend>How to organise it</legend>
+            <label><input type="radio" name="im-mode" value="ask" checked> Decide with Claude</label>
+            <label><input type="radio" name="im-mode" value="in_place"> In place — nothing moves; projects use existing folders</label>
+            <label><input type="radio" name="im-mode" value="reorganize"> Reorganise — Claude may propose moving folders (you approve each move)</label>
+          </fieldset>
+          <label class="field inline">Model <select id="im-model"></select></label>
+          <div class="modal-actions left">
+            <button id="im-start" class="primary">Start talking it through</button>
+            <span id="im-start-busy" class="muted hidden">Claude is reading it… (this can take a minute)</span>
+          </div>
+        </section>
+      </div>
+
+      <div id="im-talk" class="hidden">
+        <p class="muted small" id="im-talk-root"></p>
+        <div id="im-log" class="im-log" aria-live="polite"></div>
+        <div class="im-reply">
+          <textarea id="im-text" rows="3" placeholder="Answer Claude, or ask for changes (e.g. “merge the demo into the animation project”)…"></textarea>
+          <div class="modal-actions left">
+            <button id="im-send" class="primary">Send</button>
+            <span id="im-send-busy" class="muted hidden">Claude is thinking…</span>
+            <span class="spacer"></span>
+            <button id="im-discard" class="ghost">Discard this import</button>
+          </div>
+        </div>
+
+        <section id="im-plan" class="hidden">
+          <h3>The plan <span class="muted small">— edit anything; Claude builds on your edits</span></h3>
+          <p id="im-summary" class="im-summary"></p>
+          <div id="im-moves" class="hidden">
+            <h4>Folder moves <span class="muted small">— untick a move to leave that folder where it is</span></h4>
+            <div id="im-move-list"></div>
+            <p class="muted small">Moves keep git history. Links that point into a moved folder from elsewhere
+              (shortcuts, symlinks, junctions) will need updating.</p>
+          </div>
+          <div id="im-sets" class="hidden">
+            <h4>Rule sets</h4>
+            <div id="im-set-list"></div>
+          </div>
+          <h4>Projects</h4>
+          <div id="im-projects"></div>
+          <button id="im-add-project" class="ghost small-btn">＋ Add a project</button>
+          <ul id="im-problems" class="im-problems hidden"></ul>
+          <div id="im-history" class="im-history hidden">
+            <label class="check"><input type="checkbox" id="im-first-commit" checked> Start git history here: make a
+              first commit of the workspace as it is now</label>
+            <p class="muted small">This folder has no git history yet, so reviews have nothing to compare with. These
+              lines go into <code>.gitignore</code> first (edit them — build output, caches, downloads and key files
+              don't belong in history):</p>
+            <textarea id="im-ignore" rows="5" spellcheck="false"></textarea>
+          </div>
+          <label class="check"><input type="checkbox" id="im-baseline" checked> Treat the current state as already
+            reviewed (Debrief then shows only new work)</label>
+          <div class="modal-actions left">
+            <button id="im-check" class="ghost">Check the plan</button>
+            <button id="im-apply" class="primary">Create projects</button>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <!-- Skills (core/skills.py) -->
+    <div id="rr-pane-skills" class="rr-pane hidden">
+      <h2>Skills</h2>
+      <p class="muted">Skills are reusable procedures Claude Code loads when their description fits the work —
+        a release checklist, a build-and-test routine, how to write a forum post. A project's skills live in
+        <code>.claude/skills</code> in its main folder; personal skills apply to every project. Claude can also
+        suggest one during a task for you to review.</p>
+      <label class="field inline">Show skills for <select id="sk-scope"></select></label>
+      <div id="sk-list" class="sk-list"></div>
+      <button id="sk-new" class="ghost small-btn">＋ New skill</button>
+      <section id="sk-edit" class="card hidden">
+        <h3 id="sk-edit-title">New skill</h3>
+        <label class="field">Describe it for Claude to write <span class="muted small">— optional</span>
+          <textarea id="sk-describe" rows="2" placeholder="e.g. Package Read Aloud for release: run the export script, build the zips, check the version numbers match."></textarea>
+        </label>
+        <button id="sk-draft" class="ghost">✨ Draft with Claude</button> <span id="sk-draft-busy" class="muted hidden">Writing…</span>
+        <label class="field">Name <input id="sk-name" type="text" spellcheck="false" placeholder="e.g. release-mod"></label>
+        <label class="field">When to use it <span class="muted small">— Claude Code decides from this sentence</span>
+          <input id="sk-desc" type="text" placeholder="Use when releasing a new version of a mod."></label>
+        <label class="field">Instructions <textarea id="sk-body" rows="14" spellcheck="false"></textarea></label>
+        <div class="modal-actions left">
+          <button id="sk-save" class="primary">Save skill</button>
+          <button id="sk-cancel" class="ghost">Cancel</button>
+          <span class="spacer"></span>
+          <button id="sk-delete" class="ghost hidden">Delete skill</button>
+        </div>
+      </section>
+    </div>
+
     <!-- Project editor -->
     <div id="rr-pane-project" class="rr-pane hidden">
       <div class="rr-head">
@@ -112,14 +240,24 @@
         <button id="rrp-folder-btn" class="link">change</button>
       </div>
       <div class="rr-sub folders-row">
-        <span class="muted small" title="Claude Code runs in the main folder. Work folders: Claude reads and edits them, and Debrief reviews them with the main folder. Reference folders: read only.">Extra folders:</span>
+        <span class="muted small" title="Claude Code runs in the main folder. Work folders: Claude reads and edits them, and Debrief reviews them with the main folder. Reference folders: read only. Workspace folders: read only, but new folders created there join the project as work folders.">Extra folders:</span>
         <div class="fc-col">
           <span id="rrp-folders" class="small"></span>
           <span class="fc-add">
             <button id="rrp-addfolder-btn" class="link" title="Claude can read and edit it; Debrief reviews it">＋ work folder</button>
             <button id="rrp-addref-btn" class="link" title="Claude can read it to understand the task, but not change it">＋ reference folder</button>
+            <button id="rrp-addws-btn" class="link" title="A shared parent folder (like a modding workspace): its contents stay read only, but new folders the project creates there become its work folders">＋ workspace folder</button>
           </span>
         </div>
+      </div>
+      <div id="rrp-copies" class="rr-sub hidden"></div>
+      <div class="rr-sub"><button id="rrp-log-btn" class="link">Activity log</button>
+        <span class="muted small">— every change to this project and its tasks</span></div>
+      <div class="rr-sub images-row">
+        <label class="check small"><input type="checkbox" id="rrp-images"> Allow images in this project's sessions</label>
+        <span class="muted small">Pictures you paste, and pictures Claude shows or opens, are sent to Anthropic as part
+          of the conversation — like your messages and the code Claude reads. Turn this off to keep a project's
+          sessions text only (Claude also can't open image files then).</span>
       </div>
 
       <div class="card">
@@ -131,17 +269,74 @@
       </div>
 
       <div class="card">
-        <h3>Tasks</h3>
+        <div class="card-head"><h3>Tasks</h3><button class="ghost small-btn draft-btn" data-draft="task" data-target="#rrp-task-details" title="Describe the work; Claude writes the task for you to edit and add">✨ Draft with Claude…</button></div>
         <p class="muted small">The first task is the <b>current task</b> — what Flight Deck works on next.</p>
         <ol id="rrp-tasks" class="task-list"></ol>
+        <div id="rrp-groups" class="task-groups"></div>
         <div class="add-task">
           <input id="rrp-task-title" type="text" placeholder="New task…">
+          <select id="rrp-task-group" title="Which queue the task goes in"></select>
           <label class="check inline"><input type="checkbox" id="rrp-task-first"> make it current</label>
           <button id="rrp-task-add" class="ghost">Add task</button>
         </div>
+        <textarea id="rrp-task-details" class="task-details" rows="2" placeholder="Details (optional): what to do and what “done” means"></textarea>
+        <details id="rrp-group-form" class="routine-form">
+          <summary>＋ New task group</summary>
+          <p class="muted small">A task group is a separate queue that runs alongside the main one — e.g. drafting
+            documents without holding up code work. Its sessions are aware of the others, like linked projects.
+            Backlog groups hold ideas with no priority yet; they never start on their own.</p>
+          <div class="agent-opts two">
+            <label class="field">Name <input id="tgf-name" type="text" placeholder="e.g. Documents"></label>
+            <label class="field">Priority <select id="tgf-priority">
+              <option value="high">High</option><option value="normal" selected>Normal</option>
+              <option value="low">Low</option><option value="backlog">Backlog (no priority yet)</option></select></label>
+          </div>
+          <label class="field">Tags <span class="muted small">— comma-separated, just for you</span>
+            <input id="tgf-tags" type="text" spellcheck="false" placeholder="e.g. docs, writing"></label>
+          <div class="modal-actions left">
+            <button id="tgf-save" class="primary">Save group</button>
+            <button id="tgf-cancel" class="ghost">Cancel</button>
+          </div>
+        </details>
         <details class="history">
           <summary>History <span id="rrp-history-count" class="muted small"></span></summary>
           <ol id="rrp-history" class="task-list done"></ol>
+        </details>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>Routines <span class="muted small">— repeatable tasks</span></h3><button class="ghost small-btn draft-btn" data-draft="routine" data-target="#rro-text" title="Describe the routine; Claude writes it up for you to edit and save">✨ Draft with Claude…</button></div>
+        <p class="muted small">A routine is a task the project runs again and again — update the docs after each
+          task, push to GitHub once everything is reviewed. <b>Run</b> puts it next in the queue; "after each
+          task" routines queue themselves when a task is finished. A routine that needs a clear review can only
+          start when nothing is waiting in Debrief.</p>
+        <div id="rrp-routines" class="routines"></div>
+        <p id="rrp-review-state" class="muted small"></p>
+        <button id="rrp-start-history" class="ghost small-btn hidden" title="For work done before this project was in Carrier: count everything up to now as reviewed">Start review history from now</button>
+        <div id="rrp-secrets" class="secrets-box hidden"></div>
+        <details id="rrp-routine-form" class="routine-form">
+          <summary>＋ New routine</summary>
+          <label class="field">Name <input id="rro-name" type="text" placeholder="e.g. Update the documentation"></label>
+          <label class="field">What Claude should do
+            <textarea id="rro-text" rows="4" placeholder="e.g. Update README.md and docs/ for the changes in the last task. Keep the style; don't touch code."></textarea></label>
+          <div class="agent-opts two">
+            <label class="field">When <select id="rro-trigger">
+              <option value="manual">When I press Run</option>
+              <option value="after_task">After each task is finished</option>
+              <option value="group_done">When its task group is finished</option></select></label>
+            <label class="field">Task group <select id="rro-group"></select></label>
+            <label class="field" title="Routines can start on their own, so they never use “Never ask”.">Permissions
+              <select id="rro-mode"><option value="">The project's default</option>
+                <option value="default">Ask before acting</option><option value="acceptEdits">Auto-accept edits</option>
+                <option value="plan">Plan only (no changes)</option></select></label>
+            <label class="field">Review gate <select id="rro-gate">
+              <option value="none">None — can start any time</option>
+              <option value="reviewed">Only when the review is clear</option></select></label>
+          </div>
+          <div class="modal-actions left">
+            <button id="rro-save" class="primary">Save routine</button>
+            <button id="rro-cancel" class="ghost">Cancel</button>
+          </div>
         </details>
       </div>
 
@@ -247,7 +442,8 @@
           <label class="field">Tags <input id="rrt-tags" spellcheck="false" type="text"></label>
           <label class="field">First task <input id="rrt-task" type="text"></label>
           <label class="field">Session preset <select id="rrt-preset"><option value="">None</option></select></label>
-          <div class="modal-actions left"><button id="rrt-save" class="primary">Save</button>
+          <p id="rrt-extras" class="muted small"></p>
+        <div class="modal-actions left"><button id="rrt-save" class="primary">Save</button>
             <button id="rrt-delete" class="ghost danger">Delete</button></div>
         </div>
       </div>
@@ -303,6 +499,12 @@
       <button id="fd-standalone-btn" class="ghost small-btn" title="A task that isn't part of a project">＋ Standalone task</button>
     </div>
     <div id="fd-projects" class="fd-projects"></div>
+    <details id="fd-takeoff" class="fd-takeoff" open>
+      <summary>Ready for take-off <span id="fd-takeoff-count" class="muted small"></span></summary>
+      <label class="check small" title="Start queued routines automatically when their review gate is clear (backlog groups excepted)">
+        <input type="checkbox" id="fd-auto-takeoff"> Auto take-off</label>
+      <div id="fd-takeoff-list"></div>
+    </details>
     <div class="fd-side-foot">
       <label class="small">When sessions overlap
         <select id="fd-policy">
@@ -356,13 +558,16 @@
         <button id="fd-assign" class="ghost hidden">Add to a project…</button>
         <button id="fd-debrief" class="ghost" title="Review this session's changes in Debrief">Debrief this</button>
         <button id="fd-end" class="ghost">End session</button>
-        <button id="fd-rmcopy" class="ghost hidden">Remove copy</button>
+        <button id="fd-rmcopy" class="ghost hidden">Bring it back…</button>
       </div>
       <div id="fd-aware" class="fd-aware"></div>
       <div id="fd-transcript" class="fd-transcript" aria-live="polite"></div>
       <div id="fd-live" class="fd-live hidden"></div>
+      <div id="fd-attach" class="fd-attach hidden" aria-label="Images to send"></div>
       <div id="fd-composer">
-        <textarea id="fd-input" rows="2" placeholder="Message Claude Code…  (Enter to send · Shift+Enter for a new line)"></textarea>
+        <button id="fd-image-btn" class="ghost" title="Add an image (or paste one into the message box)">🖼</button>
+        <input id="fd-image-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple class="hidden">
+        <textarea id="fd-input" rows="2" placeholder="Message Claude Code…  (Enter to send · Shift+Enter for a new line · paste images here)"></textarea>
         <button id="fd-send" class="primary">Send</button>
         <button id="fd-stop" class="ghost hidden" title="Interrupt Claude">■ Stop</button>
       </div>
@@ -402,6 +607,13 @@
           Use AI agents (grouping, flags and explanations)</label>
         <button id="btn-start" class="primary big">Start review</button>
       </div>
+      <details id="scan-box" class="scan-box">
+        <summary>Scan the whole project instead <span class="muted small">— no history needed, e.g. a security check</span></summary>
+        <p class="muted small">Every file in the project's folders is checked as it is now by the agents you pick.
+          Scans don't change what counts as reviewed, and fixes you request still become the project's next task.</p>
+        <div id="scan-agents" class="scan-agents"></div>
+        <button id="btn-scan" class="ghost">Start scan</button>
+      </details>
       <pre id="progress-log" class="log hidden"></pre>
       <button id="btn-cancel" class="ghost hidden">Cancel</button>
     </div>
@@ -495,9 +707,80 @@
     <input type="range" id="font-size" min="11" max="22" step="1">
     <span id="font-size-value"></span>
   </label>
+  <h4>Alerts <span class="muted small">— when Claude needs you</span></h4>
+  <p class="muted small">The Flight Deck tab always shows a badge. You can also get a banner on the other tabs,
+    a flashing taskbar button, and a chime.</p>
+  <label class="check"><input type="checkbox" id="alerts-flash"> Flash the taskbar button (Windows)</label>
+  <label class="check"><input type="checkbox" id="alerts-sound"> Play a short chime</label>
+  <label class="check"><input type="checkbox" id="alerts-dnd"> Do not disturb — badge only, no banner, flash or sound</label>
+  <h4>Layout <span class="muted small">— for wide and ultrawide screens</span></h4>
+  <label class="field inline">Work area width
+    <select id="content-width">
+      <option value="normal">Normal (about 960 px)</option>
+      <option value="wide">Wide (about 1440 px — a 16:9 screen)</option>
+      <option value="wider">Wider (about 1920 px)</option>
+      <option value="full">Full window</option>
+    </select>
+  </label>
+  <label class="check"><input type="checkbox" id="content-center"> Centre the work area in the window</label>
+  <p class="muted small">Applies to Ready Room pages (including imports) and Flight Deck conversations. Debrief's diffs always use the full width.</p>
   <div class="modal-actions">
     <button id="settings-close" class="primary">Done</button>
   </div>
+</div>
+
+
+<div id="modal-image" class="modal wide hidden" role="dialog" aria-modal="true" aria-labelledby="img-title">
+  <h3 id="img-title">Mark up the image</h3>
+  <div class="img-tools">
+    <label><input type="radio" name="img-tool" value="pen" checked> Pen</label>
+    <label><input type="radio" name="img-tool" value="box"> Box</label>
+    <label><input type="radio" name="img-tool" value="arrow"> Arrow</label>
+    <label>Colour <input type="color" id="img-color" value="#ff3b30"></label>
+    <button id="img-undo" class="ghost small-btn">Undo</button>
+    <button id="img-clear" class="ghost small-btn">Clear marks</button>
+  </div>
+  <div class="img-stage"><canvas id="img-canvas"></canvas></div>
+  <label class="field">Note for Claude <span class="muted small">— what to look at or change</span>
+    <textarea id="img-note" rows="2" placeholder="e.g. The circled button should be aligned with the panel title."></textarea>
+  </label>
+  <div class="modal-actions">
+    <button id="img-remove" class="ghost">Remove image</button>
+    <span class="spacer"></span>
+    <button id="img-cancel" class="ghost">Cancel</button>
+    <button id="img-done" class="primary">Done</button>
+  </div>
+</div>
+
+<div id="modal-bringback" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="bb-title">
+  <h3 id="bb-title">Bring the own copy back</h3>
+  <p id="bb-where" class="muted small"></p>
+  <div class="bb-options">
+    <button id="bb-merge" class="primary">Merge into the main folder</button>
+    <span class="muted small">Merges the copy's branch into the main folder's current branch. If there are conflicts,
+      nothing changes and you're told where.</span>
+    <button id="bb-review" class="ghost">Review it first in Debrief</button>
+    <span class="muted small">Review just this copy's work; come back here to merge it afterwards.</span>
+    <button id="bb-keep" class="ghost">Keep the branch, remove the copy</button>
+    <span class="muted small">Frees the folder; the work stays on its branch in git.</span>
+    <button id="bb-discard" class="ghost danger">Discard the copy and its branch</button>
+    <span class="muted small">Deletes the work in it. Asks you to confirm.</span>
+  </div>
+  <div class="modal-actions"><button id="bb-cancel" class="ghost">Cancel</button></div>
+</div>
+
+<div id="modal-history" class="modal wide hidden" role="dialog" aria-modal="true" aria-labelledby="history-title">
+  <h3 id="history-title">Changes</h3>
+  <p class="muted small">Every change to this task's scope or place, newest first. Debrief's agents see these too,
+    so a review judges the work against what the task finally asked for — and flags anything removed.</p>
+  <div id="history-list" class="history-list"></div>
+  <div class="modal-actions"><button id="history-close" class="primary">Close</button></div>
+</div>
+
+<div id="modal-view-image" class="modal wide hidden" role="dialog" aria-modal="true">
+  <div class="img-stage"><img id="view-image" alt=""></div>
+  <p id="view-caption" class="muted"></p>
+  <div class="modal-actions"><button id="view-close" class="primary">Close</button></div>
 </div>
 
 <div id="modal-fd-new" class="modal hidden" role="dialog" aria-modal="true">
@@ -598,7 +881,13 @@
   <div class="modal-actions left"><button id="draft-go" class="primary">Write draft</button>
     <span id="draft-busy" class="muted small hidden">Claude is writing…</span></div>
   <div id="draft-result" class="hidden">
-    <label id="draft-agent-title-row" class="field hidden">Name <input id="draft-agent-title" type="text"></label>
+    <label id="draft-agent-title-row" class="field hidden"><span id="draft-name-label">Name</span> <input id="draft-agent-title" type="text"></label>
+    <div id="draft-routine-row" class="agent-opts two hidden">
+      <label class="field">When <select id="draft-trigger"><option value="manual">When I press Run</option>
+        <option value="after_task">After each task is finished</option></select></label>
+      <label class="field">Review gate <select id="draft-gate"><option value="none">None</option>
+        <option value="reviewed">Only when the review is clear</option></select></label>
+    </div>
     <label id="draft-agent-sev-row" class="field hidden">Severity
       <select id="draft-agent-sev"><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
     <label class="field">Draft <span class="muted small">— edit freely</span><textarea id="draft-text" rows="12"></textarea></label>

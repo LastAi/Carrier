@@ -26,7 +26,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-from carrier.core import gitutil
 from carrier.core.db import ACTIVE, FOLDER_KINDS, Store, default_path, folder_kind
 from carrier.core.llm import EFFORTS
 from carrier.readyroom import context
@@ -35,6 +34,18 @@ OPEN = ("planned", "active")
 MODES = ("default", "acceptEdits", "plan", "bypassPermissions")
 POLICIES = ("warn", "ask", "block", "inform")
 MAX_TAG_LEN = 30
+
+
+GROUP_PRIORITIES = ("high", "normal", "low", "backlog")
+
+
+def _diff_lines(old: str, new: str) -> str:
+    """A short +/- list of the lines that changed between two texts (for the activity log)."""
+    a = [ln for ln in old.splitlines() if ln.strip()]
+    b = [ln for ln in new.splitlines() if ln.strip()]
+    gone = [f"- {ln}" for ln in a if ln not in b]
+    came = [f"+ {ln}" for ln in b if ln not in a]
+    return "\n".join(gone + came)
 
 
 class RoomError(Exception):
@@ -77,9 +88,147 @@ class ReadyRoom:
             raise RoomError("Unknown task.")
         return t
 
-    def current_task(self, pid: int) -> dict[str, Any] | None:
-        open_tasks = self.store.tasks(pid, statuses=OPEN)
-        return open_tasks[0] if open_tasks else None
+    def queue(self, pid: int, group_id: int | None = None) -> list[dict[str, Any]]:
+        """Open tasks of one queue: the main one (``group_id=None``) or a task group's."""
+        return [t for t in self.store.tasks(pid, statuses=OPEN) if t.get("group_id") == group_id]
+
+    def current_task(self, pid: int, group_id: int | None = None) -> dict[str, Any] | None:
+        q = self.queue(pid, group_id)
+        return q[0] if q else None
+
+    def _queue_name(self, pid: int, gid: int | None) -> str:
+        g = self.store.task_group(gid) if gid is not None else None
+        return f"task group {g['name']}" if g else "main queue"
+
+    # -- reshaping work (proposed by Claude in a session, approved by the user) -----------
+
+    def place_task(self, pid: int, title: str, details: str, *, group_id: int | None = None,
+                   new_group: dict[str, Any] | None = None, position: str = "end", by: str = "you",
+                   note: str = "", session_id: int | None = None) -> dict[str, Any]:
+        """Add a task where the user chose: a queue (main, a group, or a new group) and a
+        position ("next", "end", or "after:<task id>"). Returns the new task."""
+        if new_group:
+            name = str(new_group.get("name", "")).strip()
+            self.save_group(pid, name, str(new_group.get("priority", "normal")), new_group.get("tags"))
+            group_id = max(g["id"] for g in self.store.task_groups(pid) if g["name"] == name)
+        self.add_task(pid, title, details, first=(position == "next"), group_id=group_id, by=by, note=note,
+                      session_id=session_id)
+        new = max((t for t in self.queue(pid, group_id) if t["title"] == title.strip()), key=lambda t: t["id"])
+        if position.startswith("after:"):
+            after = int(position.split(":", 1)[1])
+            ids = [t["id"] for t in self.queue(pid, group_id) if t["id"] != new["id"]]
+            if after in ids:
+                ids.insert(ids.index(after) + 1, new["id"])
+                for n, task_id in enumerate(ids, start=1):
+                    self.store.update_task(task_id, position=n)
+        return self.store.task(new["id"])
+
+    def add_to_task(self, tid: int, title: str, details: str, *, by: str = "claude", note: str = "",
+                    session_id: int | None = None) -> dict[str, Any]:
+        """Widen a task's scope with new work (logged, so reviews see why it grew)."""
+        t = self._task(tid)
+        part = f"### Added: {title.strip()}\n{details.strip()}".strip()
+        new_details = (t["details"].rstrip() + "\n\n" + part).strip()
+        self.store.update_task(tid, details=new_details)
+        self._log(t, "scope_added", {"details": new_details}, by, note or f"Added “{title.strip()}”", session_id)
+        return self.store.task(tid)
+
+    def merge_tasks(self, into: int, source: int, *, part: str = "", remaining: str | None = None,
+                    by: str = "claude", note: str = "", session_id: int | None = None) -> dict[str, Any]:
+        """Pull another task — whole, or the ``part`` of it given — into task ``into``.
+
+        Whole: the other task is closed as merged. Part: its details become
+        ``remaining``. Both tasks' logs record it, so nothing silently disappears.
+        """
+        a, b = self._task(into), self._task(source)
+        if a["id"] == b["id"]:
+            raise RoomError("Pick a different task to pull in.")
+        if a["project_id"] != b["project_id"]:
+            raise RoomError("Tasks can only be combined within one project.")
+        if b["status"] == "active" and self._active_sessions(task_id=b["id"]):
+            raise RoomError(f"A session is working on “{b['title']}”. End it first.")
+        whole = not part.strip()
+        taken = (b["details"] if whole else part).strip()
+        block = f"### From task “{b['title']}”" + ("" if whole else " (part)") + (f"\n{taken}" if taken else "")
+        new_details = (a["details"].rstrip() + "\n\n" + block).strip()
+        self.store.update_task(a["id"], details=new_details)
+        self._log(a, "merged_in", {"details": new_details}, by, note or f"Pulled in “{b['title']}”"
+                  + ("" if whole else " (part)"), session_id)
+        if whole:
+            summary = f"Merged into task “{a['title']}” (#{a['id']})."
+            self.store.update_task(b["id"], status="dropped", summary=summary, finished=time.time())
+            self._log(b, "merged_away", {"status": "dropped"}, by, note or summary, session_id)
+        else:
+            rest = (remaining if remaining is not None else b["details"]).strip()
+            self.store.update_task(b["id"], details=rest)
+            self._log(b, "merged_away", {"details": rest}, by,
+                      note or f"Part moved to “{a['title']}” (#{a['id']})", session_id)
+        return self.store.task(a["id"])
+
+    def split_task(self, tid: int, keep: str, title: str, details: str, *, group_id: int | None = None,
+                   new_group: dict[str, Any] | None = None, position: str = "next", by: str = "claude",
+                   note: str = "", session_id: int | None = None) -> dict[str, Any]:
+        """Move part of a task out into a new task: ``keep`` is what stays."""
+        t = self._task(tid)
+        if t["project_id"] is None:
+            raise RoomError("Standalone tasks can't be split.")
+        self.store.update_task(tid, details=keep.strip())
+        self._log(t, "split_out", {"details": keep.strip()}, by, note or f"Split out “{title.strip()}”", session_id)
+        return self.place_task(t["project_id"], title, details, group_id=group_id, new_group=new_group,
+                               position=position, by=by, note=f"Split from “{t['title']}” (#{tid})",
+                               session_id=session_id)
+
+    # -- images in sessions ---------------------------------------------------------------
+
+    def images_allowed(self, pid: int | None) -> bool:
+        """Whether this project's sessions may use images (pasted, shown, or opened by Claude)."""
+        return pid is None or bool(self.store.get_setting(f"project:{pid}:images", True))
+
+    def set_images_allowed(self, pid: int, on: bool) -> dict[str, Any]:
+        self._project(pid)
+        self.store.set_setting(f"project:{pid}:images", bool(on))
+        self.store.log_project_event(pid, "images", "turned images " + ("on" if on else "off"))
+        return self.project(pid)
+
+    # -- task groups ---------------------------------------------------------------------
+
+    def save_group(self, pid: int, name: str, priority: str = "normal", tags: list[str] | str | None = None,
+                   gid: int | None = None) -> dict[str, Any]:
+        """A task group: its own queue of tasks (work in parallel with the main queue), a
+        priority ("backlog" = parked ideas, never started automatically) and tags."""
+        self._project(pid)
+        if not name.strip():
+            raise RoomError("A task group needs a name.")
+        if priority not in GROUP_PRIORITIES:
+            raise RoomError(f"Unknown priority: {priority}")
+        if gid is not None and (g := self.store.task_group(gid)) is not None and g["project_id"] != pid:
+            raise RoomError("That group belongs to another project.")
+        self.store.save_task_group(pid, gid, name=name.strip(), priority=priority, tags=clean_tags(tags))
+        self.store.log_project_event(pid, "group", ("changed" if gid else "created") + f" the task group {name.strip()}",
+                                     detail=f"priority {priority}")
+        return self.project(pid)
+
+    def delete_group(self, pid: int, gid: int) -> dict[str, Any]:
+        g = self.store.task_group(gid)
+        if g is None or g["project_id"] != pid:
+            raise RoomError("Unknown task group.")
+        self.store.delete_task_group(gid)  # its tasks join the main queue
+        self.store.log_project_event(pid, "group", f"deleted the task group {g['name']}",
+                                     detail="Its tasks moved to the main queue.")
+        return self.project(pid)
+
+    def set_task_group(self, tid: int, gid: int | None) -> dict[str, Any]:
+        """Move a task to another queue (to the end of it)."""
+        t = self._task(tid)
+        pid = t["project_id"]
+        if pid is None:
+            raise RoomError("Standalone tasks have no queue.")
+        if gid is not None and ((g := self.store.task_group(gid)) is None or g["project_id"] != pid):
+            raise RoomError("Unknown task group.")
+        last = max([x["position"] for x in self.queue(pid, gid)] or [0])
+        self.store.update_task(tid, group_id=gid, position=last + 1)
+        self._log(t, "moved", {"group_id": gid}, note=self._queue_name(pid, gid))
+        return self.project(pid)
 
     def _active_sessions(self, pid: int | None = None, task_id: int | None = None) -> list[dict[str, Any]]:
         rows = self.store.sessions(pid, active_only=True) if pid is not None else self.store.sessions(active_only=True)
@@ -133,7 +282,9 @@ class ReadyRoom:
                 "folders": [{**f, "kind": folder_kind(f), "exists": Path(f["path"]).is_dir()}
                             for f in p["folders"]],
                 "rule_set_ids": self.store.project_rule_set_ids(pid),
+                "images": self.images_allowed(pid),
                 "tasks": self.store.tasks(pid, statuses=OPEN),
+                "groups": self.store.task_groups(pid),
                 "history": self.store.tasks(pid, statuses=("done",)),
                 "links": links,
                 "active_sessions": len(self._active_sessions(pid))}
@@ -150,10 +301,18 @@ class ReadyRoom:
         folder = folder.resolve()
         if self.store.project_by_path(str(folder)):
             raise RoomError("That folder is already a project's main folder.")
+        for other in self.store.projects():
+            # Nested main folders would review (and edit) each other's files.
+            o = Path(other["path"])
+            if o in folder.parents or folder in o.parents:
+                raise RoomError(f"That folder is inside (or contains) the main folder of {other['name']}. "
+                                "Use it as a work or reference folder of that project instead.")
+        extras: dict[str, Any] = {}
         if template_id is not None:  # the template fills anything left empty
             t = self.store.template(template_id)
             if t is None:
                 raise RoomError("Unknown template.")
+            extras = t.get("extras") or {}
             goal = goal or t["goal"]
             rules = rules or t["rules"]
             first_task = first_task or t["first_task"]
@@ -164,13 +323,18 @@ class ReadyRoom:
         if preset_id is not None and self.store.preset(preset_id) is None:
             preset_id = None  # the template's preset was deleted
         pid = self.store.add_project(name, str(folder))
+        self.store.log_project_event(pid, "project", "created the project", detail=str(folder))
         try:
             self.store.update_project(pid, goal=goal.strip(), rules=rules.strip(), tags=clean_tags(tags),
                                       preset_id=preset_id)
             if rule_set_ids:
                 self.store.set_project_rule_sets(pid, [int(i) for i in rule_set_ids])
+            if extras:
+                self._apply_template_extras(pid, extras)
             if first_task.strip():
-                self.store.add_task(first_task.strip(), pid)
+                tid = self.store.add_task(first_task.strip(), pid)
+                self.store.log_task_edit(tid, "created", {}, {"title": first_task.strip(), "details": ""},
+                                         project_id=pid)
         except Exception:
             self.store.remove_project(pid)  # don't leave a half-made project behind
             raise
@@ -198,9 +362,22 @@ class ReadyRoom:
             if key in fields:
                 fields[key] = str(fields[key]).strip()
         rule_set_ids = fields.pop("rule_set_ids", None)
+        before = self._project(pid)
         self.store.update_project(pid, **fields)
+        for key, label in (("name", "name"), ("path", "main folder"), ("goal", "goal"), ("rules", "rules"),
+                           ("tags", "tags"), ("preset_id", "default preset")):
+            if key in fields and fields[key] != before.get(key):
+                old, new = before.get(key), fields[key]
+                detail = (f"{old} → {new}" if key in ("name", "path", "tags", "preset_id")
+                          else _diff_lines(str(old or ""), str(new or "")))
+                self.store.log_project_event(pid, "project", f"changed the {label}", detail=detail)
         if rule_set_ids is not None:
+            old_ids = self.store.project_rule_set_ids(pid)
             self.store.set_project_rule_sets(pid, [int(i) for i in rule_set_ids])
+            if sorted(old_ids) != sorted(int(i) for i in rule_set_ids):
+                names = {r["id"]: r["name"] for r in self.store.rule_sets()}
+                self.store.log_project_event(pid, "rule", "changed the rule sets", detail=", ".join(
+                    names.get(int(i), "?") for i in rule_set_ids) or "(none)")
         return self.project(pid)
 
     # -- extra folders -----------------------------------------------------------------
@@ -212,9 +389,14 @@ class ReadyRoom:
         extra folders too:
 
         * **work** — Claude may read and edit it; Debrief reviews it with the
-          main folder. Must be a git repository's top folder (or not in git yet).
+          main folder. It may be a whole git repository or a folder inside
+          one (then only that folder is reviewed).
         * **reference** — read only: Claude can look things up there; edits are
           blocked and it isn't reviewed.
+        * **workspace** — a shared parent folder (e.g. a modding workspace
+          holding several projects). Its contents are read only, but when the
+          project creates a *new* folder there, that folder is added to the
+          project as a work folder. The project's other folders may sit inside it.
 
         A folder can be another project's main folder (as work or reference);
         only main folders are exclusive. Files in an extra folder are named
@@ -230,10 +412,14 @@ class ReadyRoom:
         own = [Path(r).resolve() for _, r in self.store.project_roots(p, include_reference=True)]
         if folder in own:
             raise RoomError("That folder is already part of this project.")
-        if any(r in folder.parents or folder in r.parents for r in own):
+        # A workspace folder is a shared parent: the project's other folders
+        # (its main folder too) may sit inside it, and it may hold new ones.
+        workspaces = [Path(f["path"]).resolve() for f in p["folders"] if folder_kind(f) == "workspace"]
+        if kind == "workspace":
+            if any(r in folder.parents and r not in workspaces for r in own):
+                raise RoomError("That folder is inside one of this project's folders.")
+        elif any((r in folder.parents and r not in workspaces) or folder in r.parents for r in own):
             raise RoomError("That folder is inside (or contains) one of this project's folders.")
-        if kind == "work":
-            self._check_work_root(folder)
         label = re.sub(r"[^\w.-]+", "-", (label or folder.name).strip()).strip("-") or "folder"
         # Files in the extra folder are named "<label>/…", so the label must not
         # also be a top-level name in the main folder (or two files would share a name).
@@ -247,19 +433,8 @@ class ReadyRoom:
             label, n = f"{base}-{n}", n + 1
         self.store.update_project(pid, folders=[*p["folders"], {"path": str(folder), "label": label,
                                                                 "kind": kind}])
+        self.store.log_project_event(pid, "folder", f"added the {kind} folder {label}", detail=str(folder))
         return self.project(pid)
-
-    @staticmethod
-    def _check_work_root(folder: Path) -> None:
-        # Debrief and Flight Deck track a work folder through its git repository,
-        # so a folder inside a repository must be that repository's top folder.
-        try:
-            root = gitutil.repo_root(folder).resolve()
-        except gitutil.GitError:
-            root = folder  # not in git yet: Debrief offers to start tracking it
-        if root != folder:
-            raise RoomError(f"That folder is inside the git repository {root}. Add the repository's "
-                            "top folder instead, or add it as a reference folder.")
 
     def set_folder_kind(self, pid: int, path: str, kind: str) -> dict[str, Any]:
         """Switch an extra folder between work and reference."""
@@ -270,10 +445,15 @@ class ReadyRoom:
             raise RoomError("End this project's sessions before changing its folders.")
         if not any(f["path"] == path for f in p["folders"]):
             raise RoomError("That folder isn't part of this project.")
-        if kind == "work":
-            self._check_work_root(Path(path))
+        if kind != "workspace":
+            here = Path(path).resolve()
+            inner = [lbl or "the main folder" for lbl, r in self.store.project_roots(p, include_reference=True)
+                     if here in Path(r).resolve().parents]
+            if inner:
+                raise RoomError(f"{', '.join(inner)} is inside this folder, so it can only be a workspace folder.")
         self.store.update_project(pid, folders=[{**f, "kind": kind} if f["path"] == path else f
                                                 for f in p["folders"]])
+        self.store.log_project_event(pid, "folder", f"made {path} a {kind} folder")
         return self.project(pid)
 
     def remove_folder(self, pid: int, path: str) -> dict[str, Any]:
@@ -281,6 +461,7 @@ class ReadyRoom:
         if self._active_sessions(pid):
             raise RoomError("End this project's sessions before changing its folders.")
         self.store.update_project(pid, folders=[f for f in p["folders"] if f["path"] != path])
+        self.store.log_project_event(pid, "folder", "removed a folder", detail=path)
         return self.project(pid)
 
     def remove_project(self, pid: int) -> dict[str, Any]:
@@ -292,16 +473,26 @@ class ReadyRoom:
 
     # -- tasks ------------------------------------------------------------------------
 
-    def add_task(self, pid: int, title: str, details: str = "", first: bool = False) -> dict[str, Any]:
+    def add_task(self, pid: int, title: str, details: str = "", first: bool = False,
+                 **links: Any) -> dict[str, Any]:
+        """``links``: ``routine_id`` (a routine's run) or ``fix_review`` (Debrief's fix list)."""
         self._project(pid)
         title = title.strip()
         if not title:
             raise RoomError("A task needs a title.")
-        new_id = self.store.add_task(title, pid, details=details.strip())
+        extra = {k: v for k, v in links.items() if k in ("routine_id", "fix_review", "group_id") and v is not None}
+        gid = extra.get("group_id")
+        if gid is not None and ((g := self.store.task_group(gid)) is None or g["project_id"] != pid):
+            raise RoomError("Unknown task group.")
+        new_id = self.store.add_task(title, pid, details=details.strip(), **extra)
+        self.store.log_task_edit(new_id, "created", {}, {"title": title, "details": details.strip()},
+                                 by=links.get("by", "routine" if extra.get("routine_id") else
+                                              "debrief" if extra.get("fix_review") else "you"),
+                                 note=links.get("note", ""), session_id=links.get("session_id"), project_id=pid)
         if first:
-            # "First" means next up: after any task a session is already working
-            # on, so the current task doesn't change under a running session.
-            queue = [x["id"] for x in self.store.tasks(pid, statuses=OPEN) if x["id"] != new_id]
+            # "First" means next up in its queue: after any task a session is already
+            # working on, so the current task doesn't change under a running session.
+            queue = [x["id"] for x in self.queue(pid, gid) if x["id"] != new_id]
             active = {x["id"] for x in self.store.tasks(pid, statuses=("active",))}
             k = 0
             while k < len(queue) and queue[k] in active:
@@ -311,7 +502,16 @@ class ReadyRoom:
                 self.store.update_task(task_id, position=n)
         return self.project(pid)
 
-    def update_task(self, tid: int, title: str | None = None, details: str | None = None) -> dict[str, Any]:
+    def _log(self, t: dict[str, Any], kind: str, after: dict[str, Any], by: str = "you", note: str = "",
+             session_id: int | None = None) -> None:
+        before = {k: t.get(k) for k in after}
+        if kind == "edited" and before == after:
+            return
+        self.store.log_task_edit(t["id"], kind, before, after, by=by, note=note, session_id=session_id,
+                                 project_id=t["project_id"])
+
+    def update_task(self, tid: int, title: str | None = None, details: str | None = None, by: str = "you",
+                    note: str = "", session_id: int | None = None, kind: str = "edited") -> dict[str, Any]:
         t = self._task(tid)
         fields: dict[str, Any] = {}
         if title is not None:
@@ -321,12 +521,23 @@ class ReadyRoom:
         if details is not None:
             fields["details"] = details.strip()
         self.store.update_task(tid, **fields)
+        self._log(t, kind, fields, by, note, session_id)
         return self.project(t["project_id"]) if t["project_id"] is not None else self._task(tid)
+
+    def project_log(self, pid: int) -> list[dict[str, Any]]:
+        """Everything recorded for the project, newest first."""
+        self._project(pid)
+        return self.store.project_log(pid)
+
+    def task_history(self, tid: int) -> list[dict[str, Any]]:
+        """Every recorded change to a task (oldest first)."""
+        return self.store.task_edits(tid)
 
     def delete_task(self, tid: int) -> dict[str, Any]:
         t = self._task(tid)
         if self._active_sessions(task_id=tid):
             raise RoomError("A session is working on this task. End it first.")
+        self._log(t, "deleted", {"status": "deleted"})
         self.store.delete_task(tid)
         return self.project(t["project_id"]) if t["project_id"] is not None else {"deleted": tid}
 
@@ -336,7 +547,7 @@ class ReadyRoom:
         pid = t["project_id"]
         if pid is None:
             raise RoomError("Standalone tasks have no queue.")
-        queue = self.store.tasks(pid, statuses=OPEN)
+        queue = self.queue(pid, t.get("group_id"))
         ids = [x["id"] for x in queue]
         if tid not in ids:
             raise RoomError("Only open tasks can be moved. Reopen it first.")
@@ -354,11 +565,25 @@ class ReadyRoom:
     def finish_task(self, tid: int, summary: str = "") -> dict[str, Any]:
         t = self._task(tid)
         self.store.update_task(tid, status="done", summary=summary.strip(), finished=time.time())
+        self._log(t, "status", {"status": "done"}, note="Finished")
+        if t["project_id"] is not None:
+            from carrier.readyroom import routines as _r
+
+            _r.invalidate(t["project_id"])
+        if t["project_id"] is not None:
+            from carrier.readyroom import routines
+
+            if not t.get("routine_id"):
+                routines.after_task(self, t["project_id"], t.get("group_id"))  # e.g. "update the docs"
+            gid = t.get("group_id")
+            if gid is not None and not self.queue(t["project_id"], gid):
+                routines.group_done(self, t["project_id"], gid)  # the group's last task is done
         return self._task(tid) if t["project_id"] is None else self.project(t["project_id"])
 
     def reopen_task(self, tid: int) -> dict[str, Any]:
         t = self._task(tid)
         self.store.update_task(tid, status="planned", finished=None)
+        self._log(t, "status", {"status": "planned"}, note="Reopened")
         return self.project(t["project_id"]) if t["project_id"] is not None else self._task(tid)
 
     # -- standalone tasks -------------------------------------------------------------------
@@ -440,6 +665,54 @@ class ReadyRoom:
             self.store.update_rule_set(rid, name.strip(), body.strip())
         return self.store.rule_sets()
 
+    def apply_rule(self, text: str, target: str, pid: int | None = None, rule_set_id: int | None = None,
+                   new_rule_set: str = "") -> str:
+        """Add an approved rule (proposed by Claude, edited by the user) where the user chose.
+
+        ``target``: "project" (that project's rules), "global", or "rule_set"
+        (an existing set, or a new one named ``new_rule_set`` that is attached
+        to the project). Returns a short description of what changed.
+        """
+        text = text.strip()
+        if not text:
+            raise RoomError("The rule is empty.")
+
+        def joined(old: str) -> str:
+            return (old.rstrip() + "\n" + text).strip() if old.strip() else text
+
+        if target == "project":
+            p = self._project(int(pid)) if pid is not None else None
+            if p is None:
+                raise RoomError("This session has no project; add the rule to global rules or a rule set.")
+            self.store.update_project(p["id"], rules=joined(p["rules"]))
+            self.store.log_project_event(p["id"], "rule", "added a rule Claude suggested", by="claude", detail=text)
+            return f"Added to {p['name']}'s rules."
+        if target == "global":
+            self.store.set_setting("global_rules", joined(self.store.get_setting("global_rules", "")))
+            return "Added to your global rules."
+        if target == "rule_set":
+            if rule_set_id:
+                rs = self.store.rule_set(int(rule_set_id))
+                if rs is None:
+                    raise RoomError("That rule set is gone.")
+                self.store.update_rule_set(rs["id"], rs["name"], joined(rs["body"]))
+                if pid is not None:
+                    self.store.log_project_event(int(pid), "rule", f"added a rule to the rule set {rs['name']}",
+                                                 by="claude", detail=text)
+                return f"Added to the rule set {rs['name']}."
+            name = new_rule_set.strip()
+            if not name:
+                raise RoomError("Name the new rule set.")
+            rid = self.store.add_rule_set(name, text)
+            if pid is not None:
+                self._project(int(pid))
+                self.store.set_project_rule_sets(int(pid), [*self.store.project_rule_set_ids(int(pid)), rid])
+                self.store.log_project_event(int(pid), "rule", f"created the rule set {name}", by="claude",
+                                             detail=text)
+                return f"Created the rule set {name} and attached it to this project."
+            return f"Created the rule set {name}."
+        raise RoomError(f"Unknown place for a rule: {target}")
+
     def delete_rule_set(self, rid: int) -> list[dict[str, Any]]:
         self.store.delete_rule_set(rid)
         ids = [i for i in self.store.get_setting("global_rule_sets", []) if i != rid]
@@ -471,12 +744,14 @@ class ReadyRoom:
 
     def save_template(self, name: str, goal: str = "", rules: str = "", rule_set_ids: list[int] | None = None,
                       tags: list[str] | str | None = None, first_task: str = "", preset_id: int | None = None,
-                      tid: int | None = None) -> list[dict[str, Any]]:
+                      tid: int | None = None, extras: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         if not name.strip():
             raise RoomError("A template needs a name.")
         fields = {"name": name.strip(), "goal": goal.strip(), "rules": rules.strip(),
                   "rule_set_ids": [int(i) for i in rule_set_ids or []], "tags": clean_tags(tags),
                   "first_task": first_task.strip(), "preset_id": preset_id or None}
+        if extras is not None:
+            fields["extras"] = extras
         if tid is None:
             self.store.add_template(**fields)
         else:
@@ -487,7 +762,49 @@ class ReadyRoom:
         p = self._project(pid)
         return self.save_template(name or f"{p['name']} template", goal=p["goal"], rules=p["rules"],
                                   rule_set_ids=self.store.project_rule_set_ids(pid), tags=p["tags"],
-                                  preset_id=p["preset_id"])
+                                  preset_id=p["preset_id"], extras=self._template_extras(pid))
+
+    def _template_extras(self, pid: int) -> dict[str, Any]:
+        """What else a template copies from a project: task groups, routines, skills, review agents."""
+        from carrier.core import skills
+
+        p = self._project(pid)
+        groups = {g["id"]: g for g in self.store.task_groups(pid)}
+        return {
+            "groups": [{"name": g["name"], "priority": g["priority"], "tags": g["tags"]} for g in groups.values()],
+            "routines": [{k: r.get(k) for k in ("name", "instructions", "trigger", "gate", "enabled", "mode")}
+                         | {"group": groups[r["group_id"]]["name"] if r.get("group_id") in groups else ""}
+                         for r in self.store.routines(pid)],
+            "skills": [{k: sk[k] for k in ("name", "description", "body")}
+                       for sk in skills.list_skills(p["path"])["project"]],
+            "agents": [{k: a.get(k) for k in self.store.AGENT_FIELDS if k != "project_id"}
+                       for a in self.store.review_agents(pid)],
+        }
+
+    def _apply_template_extras(self, pid: int, extras: dict[str, Any]) -> list[str]:
+        """Recreate a template's groups, routines, skills and review agents in a new project.
+        Skills that already exist in the folder are left as they are. Returns notes."""
+        from carrier.core import skills
+        from carrier.readyroom import routines
+
+        notes = []
+        ids: dict[str, int] = {}
+        for g in extras.get("groups") or []:
+            self.save_group(pid, g["name"], g.get("priority", "normal"), g.get("tags"))
+            ids[g["name"]] = max(x["id"] for x in self.store.task_groups(pid) if x["name"] == g["name"])
+        for r in extras.get("routines") or []:
+            routines.save(self, pid, r["name"], r["instructions"], r.get("trigger") or "manual",
+                          r.get("gate") or "none", bool(r.get("enabled", True)), None, ids.get(r.get("group") or ""),
+                          r.get("mode") or "")
+        main = self._project(pid)["path"]
+        for sk in extras.get("skills") or []:
+            if skills.exists(main, sk["name"]):
+                notes.append(f"Kept the existing skill {sk['name']}.")
+            else:
+                skills.save(main, sk["name"], sk["description"], sk["body"])
+        for a in extras.get("agents") or []:
+            self.store.add_review_agent(project_id=pid, **a)
+        return notes
 
     def delete_template(self, tid: int) -> list[dict[str, Any]]:
         self.store.delete_template(tid)

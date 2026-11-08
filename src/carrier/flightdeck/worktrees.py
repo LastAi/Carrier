@@ -43,18 +43,26 @@ def can_isolate(project_path: Path) -> bool:
 
 
 def create(project_path: Path, project_name: str, session_id: int, task: str) -> tuple[Path, str]:
-    """Create the worktree; returns ``(folder, branch)``."""
-    repo = gitutil.repo_root(project_path)
+    """Create the worktree; returns ``(folder, branch)``.
+
+    When the project's folder is a subfolder of its repository, the whole
+    repository is copied and ``folder`` is that subfolder inside the copy.
+    """
+    repo, sub = gitutil.locate(project_path)
     branch = f"carrier/{session_id}-{slug(task)}"
     folder = worktrees_root() / slug(project_name) / str(session_id)
     folder.parent.mkdir(parents=True, exist_ok=True)
     gitutil.git(repo, "worktree", "add", "-b", branch, str(folder), "HEAD")
-    return folder, branch
+    return (folder / sub if sub else folder), branch
 
 
 def remove(project_path: Path, folder: Path, force: bool = False) -> None:
     """Remove a worktree folder (the branch is kept, so no work is lost)."""
     repo = gitutil.repo_root(project_path)
+    try:  # the session may run in a subfolder of the copy
+        folder = gitutil.repo_root(folder)
+    except gitutil.GitError:
+        pass
     args = ["worktree", "remove", str(folder)]
     if force:
         args.insert(2, "--force")

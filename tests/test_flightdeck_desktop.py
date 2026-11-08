@@ -40,6 +40,7 @@ def fdpage(tmp_path: Path):
         html = build_html()
         pg.route("http://carrier.test/", lambda r: r.fulfill(body=html, content_type="text/html"))
         pg.goto("http://carrier.test/")
+        pg.carrier_api = api  # for tests that drive the session from Python
         yield pg, srv
         api._shutdown()
         browser.close()
@@ -203,3 +204,234 @@ def test_standalone_task_flow(fdpage):
     page.click("#rrp-preview")
     preview = page.inner_text("#preview-text")
     assert "A small API server." in preview and "Integrate standalone work" in preview
+
+
+def test_question_and_rule_cards(fdpage):
+    from carrier.flightdeck import sdk
+
+    page, srv = fdpage
+    page.click(".tool[data-tool='readyroom']")
+    page.wait_for_selector("#rr-pane-intro:not(.hidden)")
+    rr_new_project(page, "ApiServer", "A small API server.", "ask")
+    page.click(".tool[data-tool='flightdeck']")
+    page.click(".fd-project:has(.name:text-is('ApiServer')) >> text=▶ Start")
+    page.click("#fdn-start")
+    page.wait_for_selector(".qcard .qopt")
+    page.click(".qcard .qopt >> text=Reorganise")
+    page.click(".qcard .pactions >> text=Send answers")
+    page.wait_for_selector(".qcard.done >> text=Answered: Which layout? → Reorganise")
+    assert ALL_CLIENTS[-1].answers == [{"Which layout?": "Reorganise"}]
+    # Claude proposes a rule: an editable card; the edited text is what's saved.
+    deck = page.carrier_api._fd()
+    sid = next(iter(deck.runners))
+    tool = sdk.propose_rule_tool(deck.runners[sid]._on_propose_rule)
+    deck._run(tool.handler({"text": "- Keep the API <b>stable</b>.", "scope": "project", "why": "You asked"}),
+              timeout=10)
+    page.wait_for_selector(".rcard textarea")
+    assert page.locator(".rcard b").count() == 0  # shown as text
+    assert page.locator(".rcard select").input_value() == "project"
+    page.fill(".rcard textarea", "- Keep the public API stable.")
+    page.click(".rcard >> text=Add rule")
+    page.wait_for_selector(".rcard.done >> text=Added to ApiServer's rules.")
+    project = deck.store.session(sid)["project_id"]
+    assert deck.room.project(project)["rules"] == "- Keep the public API stable."
+
+
+def test_images_and_skills_in_the_page(fdpage, tmp_path):
+    import base64
+
+    page, srv = fdpage
+    png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(png)
+    page.click(".tool[data-tool='readyroom']")
+    page.wait_for_selector("#rr-pane-intro:not(.hidden)")
+    rr_new_project(page, "ApiServer", "A small API server.", "look at this")
+    # Skills pane: write one by hand and save it into the project.
+    page.click(".rr-navbtn[data-pane='skills']")
+    page.click("#sk-new")
+    page.fill("#sk-name", "Release API")
+    page.fill("#sk-desc", "Use when releasing the API.")
+    page.fill("#sk-body", "1. Run the tests.\n2. Tag the release.")
+    page.click("#sk-save")
+    page.wait_for_selector(".sk-item >> text=release-api")
+    assert (srv / ".claude/skills/release-api/SKILL.md").exists()
+    # Flight Deck: add an image with a note, send it.
+    page.click(".tool[data-tool='flightdeck']")
+    page.click(".fd-project:has(.name:text-is('ApiServer')) >> text=▶ Start")
+    page.click("#fdn-start")
+    page.wait_for_selector(".turn-end")
+    page.set_input_files("#fd-image-file", str(shot))
+    page.wait_for_selector("#fd-attach .attach-thumb img")
+    page.click("#fd-attach img")
+    page.wait_for_selector("#modal-image:not(.hidden)")
+    box = page.locator("#img-canvas").bounding_box()
+    page.mouse.move(box["x"] + 1, box["y"] + 1)
+    page.mouse.down()
+    page.mouse.move(box["x"] + box["width"] - 1, box["y"] + box["height"] - 1)
+    page.mouse.up()
+    page.fill("#img-note", "this <b>pixel</b>")
+    page.click("#img-done")
+    page.fill("#fd-input", "what is this?")
+    page.click("#fd-send")
+    page.wait_for_selector(".msg-user .msg-images img")
+    assert page.locator(".msg-user figcaption b").count() == 0  # the note is text
+    client = ALL_CLIENTS[-1]
+    page.wait_for_selector(".turn-end >> nth=1")
+    assert client.images and "this <b>pixel</b>" in client.prompts[-1]
+    # Claude shows an image and proposes a skill.
+    deck = page.carrier_api._fd()
+    sid = next(iter(deck.runners))
+    runner = deck.runners[sid]
+    deck._run(runner._call_tool("show_image", {"path": str(shot), "caption": "the login screen"}), timeout=10)
+    page.wait_for_selector(".msg-image img")
+    assert page.inner_text(".msg-image figcaption") == "the login screen"
+    deck._run(runner._call_tool("propose_skill", {"name": "deploy-api", "description": "Use when deploying.",
+                                                   "body": "1. Deploy."}), timeout=10)
+    card = page.locator(".rcard:has-text('suggests a skill')")
+    card.wait_for()
+    card.locator("textarea").fill("1. Deploy carefully.")
+    card.locator("text=Add skill").click()
+    page.wait_for_selector(".rcard.done >> text=Saved deploy-api to this project's skills.")
+    assert "Deploy carefully" in (srv / ".claude/skills/deploy-api/SKILL.md").read_text()
+
+
+def test_routines_and_gate_in_the_page(fdpage):
+    page, srv = fdpage
+    page.click(".tool[data-tool='readyroom']")
+    page.wait_for_selector("#rr-pane-intro:not(.hidden)")
+    rr_new_project(page, "ApiServer", "A small API server.", "first task")
+    page.click("#rrp-routine-form summary")
+    page.fill("#rro-name", "Push to GitHub")
+    page.fill("#rro-text", "Commit and push the reviewed work.")
+    page.select_option("#rro-gate", "reviewed")
+    page.click("#rro-save")
+    page.wait_for_selector(".routine-row >> text=Push to GitHub")
+    assert "Review not clear yet" in page.inner_text("#rrp-review-state")
+    page.click(".routine-row >> text=▶ Run")
+    page.wait_for_selector("#rrp-tasks .routine-tag")
+    assert page.locator("#rrp-tasks .task-row").first.inner_text().startswith("CURRENT")
+    # Starting it from Flight Deck is refused while the review isn't clear.
+    page.click(".tool[data-tool='flightdeck']")
+    page.click(".fd-project:has(.name:text-is('ApiServer')) >> text=▶ Start")
+    page.click("#fdn-start")
+    page.wait_for_selector("#banner:not(.hidden)")
+    assert "waits until the project's review is clear" in page.inner_text("#banner")
+
+
+def test_task_groups_and_takeoff_in_the_page(fdpage):
+    page, srv = fdpage
+    page.click(".tool[data-tool='readyroom']")
+    page.wait_for_selector("#rr-pane-intro:not(.hidden)")
+    rr_new_project(page, "ApiServer", "A small API server.", "main work")
+    page.click("#rrp-group-form summary")
+    page.fill("#tgf-name", "Documents")
+    page.fill("#tgf-tags", "docs, writing")
+    page.click("#tgf-save")
+    page.wait_for_selector(".task-group >> text=Documents")
+    page.fill("#rrp-task-title", "Draft the guide")
+    page.select_option("#rrp-task-group", label="Documents")
+    page.click("#rrp-task-add")
+    page.wait_for_selector(".task-group .task-row >> text=Draft the guide")
+    assert "Draft the guide" not in page.inner_text("#rrp-tasks")  # not in the main queue
+    # A routine tied to the group, queued now with Run.
+    page.click("#rrp-routine-form summary")
+    page.fill("#rro-name", "Tidy docs")
+    page.fill("#rro-text", "Tidy the docs.")
+    page.select_option("#rro-group", label="Documents")
+    page.click("#rro-save")
+    page.wait_for_selector(".routine-row >> text=group: Documents")
+    page.click(".routine-row >> text=▶ Run")
+    page.wait_for_selector(".task-group .routine-tag")
+    # Flight Deck: the group's current task has its own Start, and the routine waits for take-off.
+    page.click(".tool[data-tool='flightdeck']")
+    page.wait_for_selector(".fd-task-line.group >> text=Documents: Tidy docs")
+    page.wait_for_selector("#fd-takeoff-list .takeoff-row >> text=Tidy docs")
+    page.check("#fd-auto-takeoff")
+    page.wait_for_selector("#prompt-line:visible")
+    page.fill("#prompt-line", "yes")
+    page.press("#prompt-line", "Enter")
+    deck = page.carrier_api._fd()
+    import time
+    end = time.time() + 10
+    while time.time() < end and not any(s["task"] == "Tidy docs" for s in deck.store.sessions()):
+        time.sleep(0.2)
+    assert any(s["task"] == "Tidy docs" for s in deck.store.sessions())
+
+
+def test_work_and_change_cards_in_the_page(fdpage):
+    import asyncio
+
+    page, srv = fdpage
+    page.click(".tool[data-tool='readyroom']")
+    page.wait_for_selector("#rr-pane-intro:not(.hidden)")
+    rr_new_project(page, "ApiServer", "A small API server.", "build the api")
+    page.fill("#rrp-task-title", "write the manual")
+    page.click("#rrp-task-add")
+    page.wait_for_selector("#rrp-tasks >> text=write the manual")
+    page.click(".tool[data-tool='flightdeck']")
+    page.click(".fd-project:has(.name:text-is('ApiServer')) >> text=▶ Start")
+    page.click("#fdn-start")
+    page.wait_for_selector(".turn-end")
+    deck = page.carrier_api._fd()
+    sid = next(iter(deck.runners))
+    runner = deck.runners[sid]
+    # New work: Claude suggests a new group; the user keeps that and names it.
+    fut = asyncio.run_coroutine_threadsafe(runner._call_tool("propose_work", {
+        "title": "Rate limiting", "details": "- limit login attempts", "suggest": "new_group",
+        "new_group": "Security", "reasoning": "Separate from the API work."}), deck._loop)
+    card = page.locator(".rcard:has-text('New work came up')")
+    card.wait_for()
+    assert "Claude suggests: a new group “Security”" in card.inner_text()
+    card.locator("button:text('Add')").click()
+    assert "Security" in fut.result(timeout=10)
+    page.wait_for_selector(".rcard.done >> text=Added as task")
+    pid = deck.store.session(sid)["project_id"]
+    assert deck.store.task_groups(pid)[0]["name"] == "Security"
+    # Pull another task in, part of it.
+    manual = next(t for t in deck.store.tasks(pid) if t["title"] == "write the manual")
+    fut = asyncio.run_coroutine_threadsafe(runner._call_tool("propose_task_change", {
+        "kind": "pull_part", "task_id": manual["id"], "part": "- API reference page", "remaining": "- intro",
+        "why": "The API needs its reference page now."}), deck._loop)
+    card = page.locator(".rcard:has-text('Pull part of')")
+    card.wait_for()
+    card.locator("textarea").first.fill("- API reference page (endpoints only)")
+    card.locator("button:text('Change the tasks')").click()
+    assert "rest stays there" in fut.result(timeout=10)
+    cur = deck.store.task(deck.store.session(sid)["task_id"])
+    assert "API reference page (endpoints only)" in cur["details"]
+    # The Ready Room shows each task's history of changes.
+    page.click(".tool[data-tool='readyroom']")
+    page.click("#rr-list .rr-item >> text=ApiServer")
+    page.click("#rrp-tasks .task-row:has-text('build the api') >> text=Changes")
+    page.wait_for_selector("#modal-history:not(.hidden)")
+    text = page.inner_text("#history-list")
+    assert "Pulled in work" in text and "by claude" in text
+
+
+def test_alerts_when_claude_needs_you(fdpage):
+    page, srv = fdpage
+    page.click(".tool[data-tool='readyroom']")
+    page.wait_for_selector("#rr-pane-intro:not(.hidden)")
+    rr_new_project(page, "ApiServer", "A small API server.", "write notes.txt hello")
+    page.click(".tool[data-tool='flightdeck']")
+    page.click(".fd-project:has(.name:text-is('ApiServer')) >> text=▶ Start")
+    page.click("#fdn-start")
+    page.wait_for_selector(".perm .pactions >> text=Allow")
+    page.wait_for_selector(".fd-sess.needs")  # highlighted in Flight Deck
+    # On another tab: a pulsing badge and a banner that leads back.
+    page.click(".tool[data-tool='readyroom']")
+    page.wait_for_selector(".tool[data-tool=flightdeck].alerting")
+    page.wait_for_selector("#alert-strip:not(.hidden)")
+    assert "needs you" in page.inner_text("#alert-text") and page.inner_text("#fd-badge") == "1"
+    page.click("#alert-go")
+    page.wait_for_selector("#fd-session:not(.hidden)")
+    assert page.locator("#alert-strip.hidden").count() == 1
+    assert page.locator(".tool[data-tool=flightdeck].alerting").count() == 0
+    # Do not disturb: no banner on other tabs, the badge stays.
+    page.click("#btn-settings")
+    page.check("#alerts-dnd")
+    page.click("#settings-close")
+    page.click(".tool[data-tool='readyroom']")
+    page.wait_for_timeout(600)
+    assert page.locator("#alert-strip.hidden").count() == 1 and page.inner_text("#fd-badge") == "1"

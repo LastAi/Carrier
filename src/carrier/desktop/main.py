@@ -191,7 +191,34 @@ def main() -> int:
         result = window.create_file_dialog(kind)
         return result[0] if result else None
 
-    api._bind(emit, pick_folder)
+    def pick_file(description: str, patterns: str) -> str | None:
+        dialog = getattr(webview, "FileDialog", None)
+        kind = dialog.OPEN if dialog else webview.OPEN_DIALOG  # pywebview 5 vs 6
+        result = window.create_file_dialog(kind, file_types=(f"{description} ({patterns})", "All files (*.*)"))
+        return result[0] if result else None
+
+    def attention() -> None:
+        """Flash the window's taskbar button until it's focused (Windows; elsewhere nothing)."""
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            hwnd = int(window.native.Handle.ToInt64())
+
+            class FLASHWINFO(ctypes.Structure):
+                _fields_ = [("cbSize", wintypes.UINT), ("hwnd", wintypes.HWND), ("dwFlags", wintypes.DWORD),
+                            ("uCount", wintypes.UINT), ("dwTimeout", wintypes.DWORD)]
+
+            # FLASHW_ALL | FLASHW_TIMERNOFG: flash until the window comes to the front.
+            info = FLASHWINFO(ctypes.sizeof(FLASHWINFO), hwnd, 0x3 | 0xC, 0, 0)
+            ctypes.windll.user32.FlashWindowEx(ctypes.byref(info))
+        except Exception:
+            pass  # a flash is a nicety; never fail because of it
+
+    api._bind(emit, pick_folder, pick_file)
+    api._attention = attention
     window.events.closed += api._shutdown
     # Right-click menu for text boxes (spelling suggestions, copy/paste); Windows only.
     from carrier.desktop import editmenu

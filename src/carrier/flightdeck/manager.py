@@ -28,7 +28,9 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import os
+import subprocess
 import threading
+import traceback
 import time
 from collections import deque
 from pathlib import Path
@@ -56,6 +58,10 @@ def _norm(p: str | Path) -> str:
     return os.path.normcase(os.path.realpath(str(p)))
 
 
+MAX_IMAGES = 6  # pasted images per message
+TAKEOFF_RETRY_SECONDS = 300  # after a failed auto take-off, wait this long before trying that run again
+
+
 class FlightDeck:
     def __init__(self, db_path: Path | None = None, client_factory: ClientFactory | None = None,
                  policy: str = "warn") -> None:
@@ -67,6 +73,10 @@ class FlightDeck:
         self.client_factory = client_factory or default_client_factory
         self.policy = policy if policy in POLICIES else "warn"
         self.runners: dict[int, SessionRunner] = {}
+        self._last_takeoff = 0.0
+        self._takeoff_lock = threading.Lock()
+        self._takeoff_errors: dict[int, str] = {}  # task id -> why auto take-off couldn't start it
+        self._takeoff_failed: dict[int, float] = {}  # task id -> when it last failed to start
         self._events: deque[dict[str, Any]] = deque(maxlen=MAX_EVENTS)
         self._seq = 0
         self._ev_lock = threading.Lock()
@@ -166,6 +176,88 @@ class FlightDeck:
             return None
         return next((f for f in project["folders"] if folder_kind(f) == "reference" and inside(f["path"])), None)
 
+    def workspace_target(self, session: dict[str, Any], file_path: str) -> tuple[dict[str, Any], Path | None] | None:
+        """For a file outside the session's work folders but inside one of its workspace
+        folders: ``(workspace, new folder)``, where the new folder is the first folder
+        on the way to the file that doesn't exist yet (None: the file would go into an
+        existing folder, which stays read only). None when no workspace is involved."""
+        project = self.store.project(session["project_id"]) if session["project_id"] is not None else None
+        if project is None:
+            return None
+        target = _norm(file_path)
+        inside = lambda root: target == _norm(root) or target.startswith(_norm(root).rstrip(os.sep) + os.sep)  # noqa: E731
+        if inside(session["cwd"]) or any(inside(r) for _, r in self.store.project_roots(project)):
+            return None
+        spaces = [f for f in project["folders"] if folder_kind(f) == "workspace" and inside(f["path"])]
+        if not spaces:
+            return None
+        ws = max(spaces, key=lambda f: len(f["path"]))
+        rel = Path(os.path.relpath(os.path.realpath(file_path), os.path.realpath(ws["path"])))
+        current = Path(ws["path"])
+        for part in rel.parts[:-1]:  # the folders on the way to the file
+            current = current / part
+            if not current.exists():
+                return ws, current
+        return ws, None
+
+    def claim_folder(self, session: dict[str, Any], folder: Path) -> dict[str, Any]:
+        """Create ``folder`` (new, inside a workspace folder) and add it to the session's project as a work folder."""
+        project = self.store.project(session["project_id"]) if session["project_id"] is not None else None
+        if project is None:
+            raise DeckError("This session has no project.")
+        if folder.exists():
+            raise DeckError(f"{folder} already exists; only new folders can be added from a workspace.")
+        folder.mkdir(parents=True)
+        try:
+            p = self.room.add_folder(project["id"], str(folder), kind="work")
+        except Exception:
+            try:
+                folder.rmdir()
+            except OSError:
+                pass
+            raise
+        return next(f for f in p["folders"] if Path(f["path"]) == folder.resolve())
+
+    # -- what Claude can read about other projects (Carrier's get_project tool) -------
+
+    def projects_text(self) -> str:
+        lines = []
+        for p in self.store.projects():
+            tasks = self.store.tasks(p["id"])
+            done = sum(1 for t in tasks if t["status"] == "done")
+            goal = (p["goal"] or "").strip().splitlines()
+            lines.append(f"- {p['name']} — {p['path']} — {done}/{len(tasks)} tasks done"
+                         + (f" — {goal[0][:160]}" if goal else ""))
+        return "\n".join(lines) or "No projects yet."
+
+    def project_text(self, name: str) -> str:
+        from carrier.core import skills
+
+        wanted = (name or "").strip().lower()
+        p = next((x for x in self.store.projects() if x["name"].lower() == wanted), None)
+        if p is None:
+            raise DeckError(f"No project called {name}. Projects: "
+                            + ", ".join(x["name"] for x in self.store.projects()))
+        out = [f"# {p['name']}", f"Main folder: {p['path']}", f"\n## Goal\n{p['goal'] or '(none)'}",
+               f"\n## Rules\n{p['rules'] or '(none)'}"]
+        for rid in self.store.project_rule_set_ids(p["id"]):
+            rs = self.store.rule_set(rid)
+            if rs:
+                out.append(f"\n## Rule set: {rs['name']}\n{rs['body']}")
+        if p["folders"]:
+            out.append("\n## Extra folders")
+            out += [f"- {f['label']} ({folder_kind(f)}): {f['path']}" for f in p["folders"]]
+        tasks = self.store.tasks(p["id"], statuses=("planned", "active"))
+        if tasks:
+            out.append("\n## Open tasks")
+            out += [f"- {t['title']}" for t in tasks]
+        found = skills.list_skills(p["path"])["project"]
+        if found:
+            out.append("\n## Skills (in .claude/skills)")
+            for sk in found:
+                out.append(f"### {sk['name']} — {sk['description']}\n{sk['body'][:4000]}")
+        return "\n".join(out)
+
     def extra_dirs(self, session: dict[str, Any]) -> list[str]:
         """The session's project's extra folders that exist, work and reference
         (passed to Claude Code so it can read them; reference edits are blocked)."""
@@ -188,9 +280,15 @@ class FlightDeck:
         for p in projects:
             sessions = self.store.sessions(p["id"])
             open_tasks = self.store.tasks(p["id"], statuses=("planned", "active"))
+            main_queue = [t for t in open_tasks if not t.get("group_id")]
+            groups = []
+            for g in self.store.task_groups(p["id"]):
+                q = [t for t in open_tasks if t.get("group_id") == g["id"]]
+                groups.append({**g, "current_task": q[0] if q else None, "open": len(q)})
             out.append({
                 **p,
-                "current_task": open_tasks[0] if open_tasks else None,
+                "current_task": main_queue[0] if main_queue else None,
+                "groups": groups,
                 "open_tasks": open_tasks,
                 "is_repo": worktrees.can_isolate(Path(p["path"])),
                 "links": [{"id": l["id"], "with": names.get(l["project_b"] if l["project_a"] == p["id"]
@@ -206,7 +304,12 @@ class FlightDeck:
                 continue  # finished more than a week ago and never assigned: hide
             standalone.append({**t, "sessions": ss})
         all_sessions = [s for p in out for s in p["sessions"]] + [s for t in standalone for s in t["sessions"]]
+        from carrier.readyroom import routines
+
         return {"projects": out, "standalone": standalone, "links": [self._link_view(l, names) for l in links],
+                "takeoff": [{**q, "error": self._takeoff_errors.get(q["task_id"], "")}
+                            for q in routines.takeoff_queue(self.store)],
+                "auto_takeoff": self.auto_takeoff,
                 "needs_you": sum(1 for s in all_sessions if s["status"] == "needs_you"), "policy": self.policy,
                 "active": sum(1 for s in all_sessions if s["status"] in ACTIVE),
                 "presets": self.store.presets()}
@@ -306,7 +409,7 @@ class FlightDeck:
 
     def start_task(self, task_id: int, isolation: str = "shared", preset_id: int | None = None,
                    model: str | None = None, mode: str | None = None, send_task: bool = True,
-                   effort: str | None = None) -> dict[str, Any]:
+                   effort: str | None = None, auto: bool = False) -> dict[str, Any]:
         """Start a Flight Deck session working on a task (project or standalone).
 
         Settings come from, in order: explicit arguments, the chosen preset,
@@ -317,6 +420,12 @@ class FlightDeck:
             raise DeckError("Unknown task.")
         if task["status"] == "done":
             raise DeckError("This task is done. Reopen it in the Ready Room to work on it again.")
+        from carrier.readyroom import routines
+
+        try:
+            routines.check_gate(self.store, task)  # e.g. "push" only once everything is reviewed
+        except routines.RoutineError as exc:
+            raise DeckError(str(exc)) from exc
         pid = task["project_id"]
         project = self.store.project(pid) if pid is not None else None
         if project is None and not task["cwd"]:
@@ -328,7 +437,10 @@ class FlightDeck:
             raise DeckError(f"Unknown model: {model}")
         if effort and effort not in EFFORTS:
             raise DeckError(f"Unknown effort: {effort}")
-        mode = mode or (preset["mode"] if preset else "default")
+        routine = self.store.routine(task["routine_id"]) if task.get("routine_id") else None
+        mode = mode or (routine or {}).get("mode") or (preset["mode"] if preset else "default")
+        if (auto or routine) and mode == "bypassPermissions":
+            mode = "default"  # a routine (and anything started on its own) never skips asking
         if mode not in MODES:
             raise DeckError(f"Unknown permission mode: {mode}")
         cwd = Path(project["path"] if project else task["cwd"])
@@ -485,22 +597,32 @@ class FlightDeck:
                         "Resumed as a new conversation (the previous one never got a Claude Code session id)."})
         return self._session_summary(self.store.session(sid))
 
-    def send(self, sid: int, text: str) -> bool:
+    def send(self, sid: int, text: str, images: list[dict[str, Any]] | None = None) -> bool:
+        """Send a message; ``images`` are pasted pictures ``{"mime", "data" (base64), "note"}``."""
+        from carrier.core import images as I
+
         text = text.strip()
-        if not text:
+        clean = []
+        for img in (images or [])[:MAX_IMAGES]:
+            I.check_pasted(str(img.get("mime", "")), str(img.get("data", "")))  # raises ValueError
+            clean.append({"mime": img["mime"], "data": img["data"], "note": str(img.get("note", "")).strip()[:2000]})
+        if not text and not clean:
             raise DeckError("Type a message first.")
+        row = self.store.session(sid)
+        if clean and row and not self.room.images_allowed(row["project_id"]):
+            raise DeckError("Images are turned off for this project (Ready Room → the project → Images).")
         runner = self._runner(sid)
         if not runner.claim():
             raise DeckError("Claude is still working. Wait for it, or press Stop.")
-        self._spawn(runner.send(text))
+        self._spawn(runner.send(text or "(see the attached image)", images=clean))
         return True
 
     def interrupt(self, sid: int) -> bool:
         self._run(self._runner(sid).interrupt(), timeout=30)
         return True
 
-    def answer(self, sid: int, req_id: str, decision: str, message: str = "") -> bool:
-        if decision not in ("allow", "allow_always", "deny"):
+    def answer(self, sid: int, req_id: str, decision: str, message: Any = "") -> bool:
+        if decision not in ("allow", "allow_always", "deny", "answers", "skip", "work", "change", "decline"):
             raise DeckError(f"Unknown decision: {decision}")
         runner = self._runner(sid)
 
@@ -582,6 +704,95 @@ class FlightDeck:
             self.store.update_session(sid, status="paused")
             raise DeckError(f"Could not reconnect with the new settings: {exc}. Press Resume.") from exc
 
+    # -- the user changed a task a session is working on ----------------------------------
+
+    def notify_task_change(self, task_id: int, before: dict[str, Any], after: dict[str, Any]) -> list[int]:
+        """Pause the running sessions on ``task_id`` (if mid-turn) and tell them how the task
+        changed, so the work — and later the review — follow the task as it now reads."""
+        from carrier.readyroom.manager import _diff_lines
+
+        lines = []
+        if before.get("title") != after.get("title"):
+            lines.append(f"Title: “{before.get('title')}” → “{after.get('title')}”")
+        diff = _diff_lines(str(before.get("details") or ""), str(after.get("details") or ""))
+        if diff:
+            lines.append("Details changed (- removed, + added):\n" + diff)
+        if not lines:
+            return []
+        message = ("[Carrier Ready Room] The user just changed the task you are working on. Pause: re-read it "
+                   "below, say briefly how this changes your plan (and anything already done that no longer "
+                   "fits), then continue with the task as it now reads.\n\n" + "\n".join(lines)
+                   + f"\n\nThe task now reads:\n{after.get('title')}\n{after.get('details') or ''}")
+        touched = []
+        for sid, runner in list(self.runners.items()):
+            if runner.row.get("task_id") != task_id or runner.row["status"] == "ended":
+                continue
+            touched.append(sid)
+            self.emit(sid, {"type": "notice", "kind": "task_changed",
+                            "text": "You changed this task; Claude is pausing to take it in."})
+
+            async def deliver(r: SessionRunner = runner) -> None:
+                if r.busy:
+                    await r.interrupt()
+                    for _ in range(300):  # let the interrupted turn wind down (≤ 30 s)
+                        if not r.busy:
+                            break
+                        await asyncio.sleep(0.1)
+                if r.claim():
+                    await r.send(message)
+                else:
+                    self.emit(r.sid, {"type": "notice", "kind": "task_changed",
+                                      "text": "Claude was still busy, so the task change wasn't sent. Tell Claude about "
+                                              "it in your next message."})
+
+            self._spawn(deliver())
+        return touched
+
+    # -- take-off: queued routines, started automatically if the user lets them --------
+
+    @property
+    def auto_takeoff(self) -> bool:
+        return bool(self.store.get_setting("fd_auto_takeoff", False))
+
+    def set_auto_takeoff(self, on: bool) -> bool:
+        self.store.set_setting("fd_auto_takeoff", bool(on))
+        self._last_takeoff = 0.0
+        if on:
+            self.takeoff_tick()
+        return bool(on)
+
+    def takeoff_tick(self, every: float = 5.0) -> list[int]:
+        """With auto take-off on, start queued routine runs whose gate is clear (not backlog
+        ones). Called as the page polls, at most every ``every`` seconds. Returns started session ids."""
+        if not self.auto_takeoff or time.time() - self._last_takeoff < every:
+            return []
+        if not self._takeoff_lock.acquire(blocking=False):
+            return []
+        try:
+            self._last_takeoff = time.time()
+            from carrier.readyroom import routines
+
+            started = []
+            busy_projects: set[int] = set()
+            now = time.time()
+            for q in routines.takeoff_queue(self.store):
+                if q["backlog"] or q["blockers"] or q["project_id"] in busy_projects:
+                    continue
+                failed_at = self._takeoff_failed.get(q["task_id"], 0.0)
+                if now - failed_at < TAKEOFF_RETRY_SECONDS:
+                    continue  # it failed recently: don't pile up failing sessions
+                busy_projects.add(q["project_id"])  # one start per project per check
+                try:
+                    started.append(self.start_task(q["task_id"], auto=True)["id"])
+                    self._takeoff_errors.pop(q["task_id"], None)
+                    self._takeoff_failed.pop(q["task_id"], None)
+                except Exception as exc:  # shown in the take-off list; tried again later
+                    self._takeoff_errors[q["task_id"]] = str(exc)
+                    self._takeoff_failed[q["task_id"]] = now
+            return started
+        finally:
+            self._takeoff_lock.release()
+
     def set_policy(self, policy: str) -> str:
         if policy not in POLICIES:
             raise DeckError(f"Unknown policy: {policy}")
@@ -614,6 +825,76 @@ class FlightDeck:
         self.store.update_session(sid, worktree=0)
         return self._session_summary(self.store.session(sid))
 
+    def bring_back(self, sid: int, action: str) -> dict[str, Any]:
+        """Finish with a session's own copy (worktree): "merge" its branch into the main
+        folder's branch, "keep" the branch (remove just the copy), or "discard" both."""
+        s = self.store.session(sid)
+        if s is None or not s.get("branch"):
+            raise DeckError("This session has no own copy.")
+        if sid in self.runners and self.runners[sid].row["status"] != "ended":
+            raise DeckError("End the session first.")
+        project = self.store.project(s["project_id"]) if s["project_id"] is not None else None
+        if project is None:
+            raise DeckError("Only project sessions can be brought back.")
+        main = gitutil.repo_root(Path(project["path"]))
+        branch = s["branch"]
+        copy = Path(s["cwd"])
+        if action == "keep":
+            if s["worktree"] and copy.exists():
+                self.remove_worktree(sid, force=False)
+            text = f"Copy removed; the branch {branch} is kept."
+        elif action == "discard":
+            if s["worktree"] and copy.exists():
+                self.remove_worktree(sid, force=True)
+            gitutil.git(main, "branch", "-D", branch, check=False)
+            self.store.update_session(sid, worktree=0)
+            text = f"Copy and branch {branch} deleted."
+        elif action == "merge":
+            if s["worktree"] and copy.exists() and worktrees.has_uncommitted(copy):
+                raise DeckError("The copy has changes that aren't committed. Commit them first (ask Claude to), "
+                                "then bring it back.")
+            target = gitutil.git(main, "symbolic-ref", "-q", "--short", "HEAD", check=False).strip()
+            if not target:
+                raise DeckError("The main folder isn't on a branch (detached HEAD). Check out a branch first.")
+            gitdir = Path(gitutil.git(main, "rev-parse", "--absolute-git-dir").strip())
+            if any((gitdir / n).exists() for n in ("MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD")):
+                raise DeckError("The main folder is in the middle of a merge or rebase. Finish or abort it first.")
+            if gitutil.git(main, "status", "--porcelain", "--untracked-files=no", check=False).strip():
+                raise DeckError("The main folder has uncommitted changes. Commit or stash them first, so the merge "
+                                "can't mix with them.")
+            ok = False
+            try:
+                out = gitutil.git(main, "merge", "--no-ff", "--no-edit", "-m",
+                                  f"Merge Carrier session #{sid}: {s['task']}", branch, check=False)
+                # Merged = no merge left open, and the copy's branch is now part of HEAD.
+                ok = not (gitdir / "MERGE_HEAD").exists() and subprocess.run(
+                    ["git", "merge-base", "--is-ancestor", branch, "HEAD"], cwd=main, capture_output=True).returncode == 0
+                if not ok:
+                    conflicts = gitutil.git(main, "diff", "--name-only", "--diff-filter=U", check=False).split()
+                    reason = (f"The merge has conflicts (in {', '.join(conflicts[:8])})" if conflicts else
+                              "Git couldn't merge: " + (out.strip().splitlines() or ["unknown error"])[-1])
+                    raise DeckError(reason + ", so nothing was changed. Start a task to resolve it, or merge by hand.")
+            finally:
+                if not ok and (gitdir / "MERGE_HEAD").exists():
+                    gitutil.git(main, "merge", "--abort", check=False)
+            if s["worktree"] and copy.exists():
+                self.remove_worktree(sid, force=False)
+            gitutil.git(main, "branch", "-d", branch, check=False)
+            text = f"Merged {branch} into {target}; the copy is removed."
+        else:
+            raise DeckError(f"Unknown action: {action}")
+        self.store.update_session(sid, worktree=0, branch=None if action in ("merge", "discard") else branch)
+        self.emit(sid, {"type": "notice", "kind": "copy", "text": text})
+        if project:
+            self.store.log_project_event(project["id"], "copy", text, session_id=sid)
+        return {"text": text, **self._session_summary(self.store.session(sid))}
+
+    def leftover_copies(self, pid: int) -> list[dict[str, Any]]:
+        """Sessions of a project whose own copy (or its branch) hasn't been dealt with."""
+        return [{"id": s["id"], "task": s["task"], "branch": s["branch"], "status": s["status"],
+                 "folder": s["cwd"] if s["worktree"] else ""}
+                for s in self.store.sessions(pid) if s.get("branch")]
+
     # -- reading ---------------------------------------------------------------
 
     def session(self, sid: int) -> dict[str, Any]:
@@ -634,6 +915,7 @@ class FlightDeck:
         task = self.store.task(s["task_id"]) if s.get("task_id") else None
         project = self.store.project(s["project_id"]) if s["project_id"] is not None else None
         return {**self._session_summary(s), "project": project, "task_row": task, "seq": seq,
+                "images": self.room.images_allowed(s["project_id"]),
                 "transcript": self.store.messages(sid), "pending": pending, "busy": bool(runner and runner.busy),
                 "files": self.store.session_files(sid), "awareness": self.awareness(sid)}
 
@@ -654,6 +936,10 @@ class FlightDeck:
                            for e in self.store.recent_events(sid, limit=10)]}
 
     def poll(self, since: int = 0) -> dict[str, Any]:
+        try:
+            self.takeoff_tick()
+        except Exception:  # never break polling
+            traceback.print_exc()
         with self._ev_lock:
             events = [e for e in self._events if e["seq"] > since]
             seq = self._seq

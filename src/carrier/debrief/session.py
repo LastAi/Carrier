@@ -96,7 +96,7 @@ def inspect_folder(path: str, ns: str | None = None) -> dict[str, Any]:
     except gitutil.GitError:
         return {"path": str(p), "is_repo": False}
     cfg = load_config(root)
-    review = open_review(cfg)
+    review = open_review(cfg, ns=ns)
     cp = gitutil.get_checkpoint(root, ns)
     return {
         "path": str(root),
@@ -128,6 +128,10 @@ def start_tracking(path: str) -> dict[str, Any]:
     it works on a fresh machine.
     """
     p = Path(path).expanduser()
+    if gitutil.in_repo(p) and not (p / ".git").exists():
+        # Already inside a repository (e.g. one folder of a workspace): it's
+        # tracked; a second repository nested in the first would hide its files.
+        return inspect_folder(str(p))
     if not (p / ".git").exists():
         gitutil.git(p, "init", "-q")
     gitutil.git(p, "add", "-A")
@@ -165,7 +169,7 @@ class ReviewSession:
         self.project = project
         if project is not None:
             repo = project.path
-            untracked = [lbl for lbl, path in project.extras if not gitutil.is_repo(path)]
+            untracked = [lbl for lbl, path in project.extras if not gitutil.in_repo(path)]
             if untracked:
                 raise SessionError("These folders aren't tracked by git yet: " + ", ".join(untracked)
                                    + ". Start tracking them first.")
@@ -173,6 +177,13 @@ class ReviewSession:
             self.repo = gitutil.repo_root(Path(repo).expanduser())
         except gitutil.GitError as exc:
             raise SessionError(f"{repo} is not tracked by git yet.") from exc
+        # A project's main folder may be a subfolder of a bigger repository
+        # (several projects split out of one workspace): review only it.
+        self.scope: Path | None = None
+        if project is not None:
+            main = Path(project.path).expanduser().resolve()
+            if main != self.repo.resolve():
+                self.scope = main
         self.cfg: Config = load_config(self.repo)
         if backend == "auto":
             backend = AgentSDKBackend(concurrency=int(self.cfg.get("agents", "concurrency")))
@@ -248,15 +259,23 @@ class ReviewSession:
     # -- starting ----------------------------------------------------------
 
     def start(self, from_ref: str | None = None, fresh: bool = False,
-              progress: Progress = lambda _m: None) -> dict[str, Any]:
-        """Resume the open review, or prepare a new one. Returns the overview."""
+              progress: Progress = lambda _m: None, scan: bool = False,
+              agents: list[str] | None = None) -> dict[str, Any]:
+        """Resume the open review, or prepare a new one. Returns the overview.
+
+        ``scan`` reviews the whole project as it is now (no history) with only
+        the ``agents`` named (e.g. a security check); it moves no checkpoint.
+        """
         if not fresh and not from_ref:
-            existing = open_review(self.cfg, status="in_progress")
+            existing = open_review(self.cfg, status="in_progress",
+                                   ns=None if self.project is None else str(self.project.id))
+            if existing and existing.scan != scan:
+                existing = None  # a scan and a change review don't resume each other
             if existing and self.project is not None and not review_matches(
                     existing, self.project.id, self.project.extras):
                 existing = None  # prepared for other folders: prepare a full one
             if existing and is_stale(self.cfg, existing):
-                supersede(self.cfg, keep_id="", statuses=("in_progress",))
+                supersede(self.cfg, keep_id="", statuses=("in_progress",), ns=existing.checkpoint_ns)
                 existing = None
             if existing:
                 progress(f"Resuming review {existing.id}.")
@@ -267,7 +286,15 @@ class ReviewSession:
         p = self.project
         extra_args: dict[str, Any] = {} if p is None else {
             "extras": p.extras, "project": {"id": p.id, "name": p.name}, "context": p.context,
-            "criteria": p.criteria, "task_lookup": p.task_lookup}
+            "criteria": p.criteria, "task_lookup": p.task_lookup, "scope": self.scope}
+        if scan:
+            from carrier.debrief.criteria import load_criteria
+
+            pool = p.criteria if p is not None and p.criteria is not None else load_criteria(self.cfg)
+            chosen = [c for c in pool if c.name in set(agents or [])]
+            if not chosen:
+                raise SessionError("Pick at least one review agent for the scan.")
+            extra_args.update(scan=True, criteria=chosen)
         future = asyncio.run_coroutine_threadsafe(
             prepare(self.repo, self.backend, from_ref, reuse=not fresh, progress=progress, **extra_args),
             self._loop)
@@ -446,7 +473,7 @@ class ReviewSession:
             # Project reviews hand the fixes back as the next task in the queue.
             n = sum(1 for i in r.items if i.decision and i.decision.action in ("fix", "revert"))
             fix_task = self.project.add_fix_task(f"Fix review findings ({n}) — review {r.id}",
-                                                 render_fixes(r) or "")
+                                                 render_fixes(r) or "", r.id)
         return {
             "fix_task": fix_task,
             "project": self.project.name if self.project else None,

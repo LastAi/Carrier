@@ -48,6 +48,14 @@ The first start sets everything up (about a minute). Then:
   sensitive code, Sonnet at low effort for a throwaway tool.
 - **✨ Draft with Claude.** Describe your rules or a review agent in plain
   words; Claude writes it up for you to edit and save.
+- **Bring your existing work.** Point Carrier at a folder you've used with
+  plain Claude Code or the Claude app; Claude reads its history and helps you
+  turn it into one project or several — in place, or reorganised.
+- **Organised work.** Task groups that run in parallel, routines (update the
+  docs after each task, push once everything is reviewed) with an optional
+  review gate, and a full history of every change to a task.
+- **Safety nets.** A local secrets scan before anything is published, alerts
+  when Claude needs you, and a backup of your data before every upgrade.
 - **Private by default.** No network code in Carrier itself, no open ports,
   read-only review agents. Only Claude Code talks to the internet.
 - **Accessible.** Colour-blind-safe themes, high contrast and monochrome,
@@ -64,6 +72,10 @@ The first start sets everything up (about a minute). Then:
 
 Alpha — usable day to day, still changing. Bug reports and ideas are
 welcome in Issues.
+
+**Tested on Windows 11**, which is where Carrier is used day to day. It is
+built to run on macOS and Linux too, and the automated tests run there, but
+those platforms haven't been tried by hand yet — reports are very welcome.
 
 ## License
 

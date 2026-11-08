@@ -60,10 +60,17 @@ def all_reviews(cfg: Config) -> list[Review]:
 OPEN_STATUSES = ("prepared", "in_progress")
 
 
-def open_review(cfg: Config, status: str | None = None) -> Review | None:
-    """The most recent open review (optionally with a specific status)."""
+_ANY = object()
+
+
+def open_review(cfg: Config, status: str | None = None, ns: object = _ANY) -> Review | None:
+    """The most recent open review (optionally with a specific status).
+
+    ``ns`` limits it to one project's reviews (its checkpoint namespace; None
+    = plain folder reviews), for projects that share a repository.
+    """
     wanted = (status,) if status else OPEN_STATUSES
-    pending = [r for r in all_reviews(cfg) if r.status in wanted]
+    pending = [r for r in all_reviews(cfg) if r.status in wanted and (ns is _ANY or r.checkpoint_ns == ns)]
     return pending[-1] if pending else None
 
 
@@ -74,7 +81,8 @@ def find_by_fingerprint(cfg: Config, fingerprint: str) -> Review | None:
     return None
 
 
-def supersede(cfg: Config, keep_id: str, statuses: tuple[str, ...] = ("prepared",)) -> None:
+def supersede(cfg: Config, keep_id: str, statuses: tuple[str, ...] = ("prepared",),
+              ns: object = _ANY) -> None:
     """Mark other reviews in ``statuses`` as superseded and unpin their snapshots.
 
     After a prepare only never-opened reviews are superseded; after a finish
@@ -82,7 +90,13 @@ def supersede(cfg: Config, keep_id: str, statuses: tuple[str, ...] = ("prepared"
     """
     from carrier.core.gitutil import GitError, drop_snapshot  # local import: store stays git-free otherwise
 
+    kept = next((r for r in all_reviews(cfg) if r.id == keep_id), None) if keep_id else None
     for r in all_reviews(cfg):
+        # Projects that share one repository keep separate reviews: only
+        # reviews with the same checkpoints (same project) are replaced.
+        scope = kept.checkpoint_ns if kept is not None else ns
+        if scope is not _ANY and r.checkpoint_ns != scope:
+            continue
         if r.id != keep_id and r.status in statuses:
             r.status = "superseded"
             save_review(cfg, r)

@@ -370,3 +370,106 @@ def test_projects_keep_their_own_checkpoints(repo: Path, claude_home: Path, tmp_
     sa = ReviewSession(repo, backend=None, project=project_spec(store, a))
     assert sa.start()["items"]  # A still has everything to review
     sa.close()
+
+
+def test_projects_split_from_one_repository(tmp_path: Path, claude_home: Path):
+    """Two projects whose folders are subfolders of one repository (a workspace
+    split in place) review only their own folders, with their own checkpoints."""
+    import subprocess
+
+    from carrier.core import gitutil
+    from carrier.core.db import Store
+    from carrier.debrief.projects import project_spec
+    from carrier.readyroom.manager import ReadyRoom
+
+    ws = tmp_path / "workspace"
+    for d in ("mods/anim", "mods/demo", "tools/editor"):
+        (ws / d).mkdir(parents=True)
+        (ws / d / "main.txt").write_text("one\n")
+    for args in (["init", "-q"], ["config", "user.email", "t@e.com"], ["config", "user.name", "T"],
+                 ["add", "-A"], ["commit", "-qm", "start"]):
+        subprocess.run(["git", *args], cwd=ws, check=True)
+    for d in ("mods/anim", "mods/demo", "tools/editor"):
+        (ws / d / "main.txt").write_text("one\ntwo\n")
+
+    store = Store(tmp_path / "c.db")
+    room = ReadyRoom(store)
+    anim = room.create_project("Animation", str(ws / "mods" / "anim"))["id"]
+    room.add_folder(anim, str(ws / "mods" / "demo"), label="demo")  # same repository, as work
+    editor = room.create_project("Editor", str(ws / "tools" / "editor"))["id"]
+
+    sa = ReviewSession(ws / "mods" / "anim", backend=None, project=project_spec(store, anim))
+    paths = sorted(p for it in sa.start(from_ref="HEAD")["items"] for p in it["paths"])
+    assert paths == ["demo/main.txt", "main.txt"]  # relative to each folder; editor not included
+    sa.finish()
+    sa.close()
+    assert gitutil.get_checkpoint(ws, str(anim))
+    assert gitutil.get_checkpoint(ws, str(editor)) is None
+
+    se = ReviewSession(ws / "tools" / "editor", backend=None, project=project_spec(store, editor))
+    ov = se.start(from_ref="HEAD")
+    assert [p for it in ov["items"] for p in it["paths"]] == ["main.txt"]
+    se.close()
+    # The animation review is finished; nothing new there since.
+    sa2 = ReviewSession(ws / "mods" / "anim", backend=None, project=project_spec(store, anim))
+    with pytest.raises(SessionError, match="Nothing to review"):
+        sa2.start()
+    sa2.close()
+
+
+def test_worktree_of_a_subfolder_project(tmp_path: Path, monkeypatch):
+    import subprocess
+
+    from carrier.flightdeck import worktrees
+
+    ws = tmp_path / "ws"
+    (ws / "mods" / "anim").mkdir(parents=True)
+    (ws / "mods" / "anim" / "a.txt").write_text("x\n")
+    for args in (["init", "-q"], ["config", "user.email", "t@e.com"], ["config", "user.name", "T"],
+                 ["add", "-A"], ["commit", "-qm", "start"]):
+        subprocess.run(["git", *args], cwd=ws, check=True)
+    monkeypatch.setattr(worktrees, "worktrees_root", lambda: tmp_path / "copies")
+    folder, branch = worktrees.create(ws / "mods" / "anim", "Animation", 7, "Do it")
+    assert folder == tmp_path / "copies" / "animation" / "7" / "mods" / "anim"
+    assert (folder / "a.txt").exists()
+    worktrees.remove(ws / "mods" / "anim", folder)
+    assert not (tmp_path / "copies" / "animation" / "7").exists()
+
+
+def test_whole_project_scan(tmp_path: Path, claude_home: Path):
+    """A scan reviews every file as it is now with the chosen agents, and moves no checkpoint."""
+    import json
+    import subprocess
+
+    from carrier.core import gitutil
+    from carrier.core.db import Store
+    from carrier.debrief.projects import project_spec
+    from carrier.readyroom.manager import ReadyRoom
+
+    proj = tmp_path / "proj"
+    (proj / "src").mkdir(parents=True)
+    (proj / "src" / "app.py").write_text("TIMEOUT = 37\n")
+    (proj / "package-lock.json").write_text("{}\n")
+    for args in (["init", "-q"], ["config", "user.email", "t@e.com"], ["config", "user.name", "T"],
+                 ["add", "-A"], ["commit", "-qm", "start"]):
+        subprocess.run(["git", *args], cwd=proj, check=True)
+    store = Store(tmp_path / "c.db")
+    room = ReadyRoom(store)
+    pid = room.create_project("P", str(proj))["id"]
+    seen: list[str] = []
+
+    def handler(system: str, prompt: str) -> str:
+        seen.append(system + prompt)
+        return json.dumps({"flags": []})
+
+    s = ReviewSession(proj, backend=FakeBackend(handler), project=project_spec(store, pid))
+    with pytest.raises(SessionError, match="Pick at least one"):
+        s.start(scan=True, agents=[])
+    ov = s.start(scan=True, agents=["security"])
+    paths = [p for it in ov["items"] for p in it["paths"]]
+    assert paths == ["src/app.py"]  # the whole project, lock files left out, with no history needed
+    assert s.review.scan and "whole-project scan" in "".join(seen)
+    assert s.review.criteria_used == ["security"]
+    s.finish()
+    s.close()
+    assert gitutil.get_checkpoint(proj, str(pid)) is None  # a scan doesn't mark anything reviewed

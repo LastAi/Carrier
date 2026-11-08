@@ -13,18 +13,19 @@ This is the complete guide. For a quick start, see the [README](../README.md).
 2. [Getting started](#getting-started)
 3. [Ready Room — setting projects up](#ready-room--setting-projects-up)
 4. [Project folders](#project-folders)
-5. [Flight Deck — launching work](#flight-deck--launching-work)
-6. [Debrief — reviewing what came back](#debrief--reviewing-what-came-back)
-7. [Review agents](#review-agents)
-8. [Models and effort](#models-and-effort)
-9. [Draft with Claude](#draft-with-claude)
-10. [Terminal and command line](#terminal-and-command-line)
-11. [Accessibility](#accessibility)
-12. [Privacy and security](#privacy-and-security)
-13. [Files Carrier writes](#files-carrier-writes)
-14. [Building a standalone app](#building-a-standalone-app)
-15. [Troubleshooting](#troubleshooting)
-16. [Planned features and known issues](#planned-features-and-known-issues)
+5. [Importing existing work](#importing-existing-work)
+6. [Flight Deck — launching work](#flight-deck--launching-work)
+7. [Debrief — reviewing what came back](#debrief--reviewing-what-came-back)
+8. [Review agents](#review-agents)
+9. [Models and effort](#models-and-effort)
+10. [Draft with Claude](#draft-with-claude)
+11. [Terminal and command line](#terminal-and-command-line)
+12. [Accessibility](#accessibility)
+13. [Privacy and security](#privacy-and-security)
+14. [Files Carrier writes](#files-carrier-writes)
+15. [Building a standalone app](#building-a-standalone-app)
+16. [Troubleshooting](#troubleshooting)
+17. [Planned features and known issues](#planned-features-and-known-issues)
 
 ---
 
@@ -131,6 +132,98 @@ The sidebar holds settings shared by all projects:
   template** on a project makes one from it.
 * **Review agents** set up Debrief's reviewers ([Review agents](#review-agents)).
 
+### Task groups
+
+A **task group** is a separate queue inside a project that runs alongside the
+main one — for example *Documents*, so drafting docs never holds up code work.
+Each group has its own current task; Flight Deck shows it under the project
+with its own **▶ Start**, and sessions from different groups are aware of each
+other's edits just like sessions in linked projects.
+
+* Make one with **＋ New task group** in the Tasks card: a name, a priority —
+  High, Normal, Low, or **Backlog** for ideas with no priority yet — and tags
+  (just for you).
+* Add a task to a group with the queue selector next to *Add task*, or move
+  one with its **Move to…** menu. Deleting a group moves its tasks to the
+  main queue.
+* Backlog groups never start anything on their own.
+
+### Images, activity log and secrets
+
+* **Images:** a project switch allows or blocks pictures in its sessions.
+  Pictures you paste, and pictures Claude shows or opens, are sent to
+  Anthropic as part of the conversation, like your messages; with the switch
+  off, sessions are text only and Claude can't open image files.
+* **Activity log** (on the project page) lists everything recorded for the
+  project, newest first: every task change, and changes to its goal, rules,
+  rule sets, folders, task groups, routines and skills, the images switch,
+  rules and skills Claude suggested that you added, and finished reviews.
+* **Secrets:** the Routines card warns about likely secrets in the project's
+  files (keys, tokens, passwords, private keys) and about key or `.env` files
+  git would publish. Remove a secret, or **Mark safe** a line that isn't one
+  (any change to it is reported again); **Add secret-file patterns to
+  .gitignore** fixes the files. Routines that need a clear review wait while
+  a likely secret is there. Flight Deck also warns before sending a message
+  that looks like it contains a key. The checks run on your computer, with
+  patterns — no AI, nothing sent. A "Secrets and credentials" review agent is
+  available too (off by default, as *Security-sensitive* covers most of it).
+* **Starting review history:** a project whose work predates Carrier can
+  **Start review history from now** (Routines card), so reviews and the review
+  gate look only at new work.
+
+### Task history
+
+Every change to a task is recorded: created, edited, scope added, work
+pulled in or moved out, split, moved between queues, finished, reopened,
+deleted — when, by whom (you, Claude with your approval, a routine or a
+review), and why. **Changes** on a task shows it; text that left a task is
+listed under *Removed from the task*, so anything descoped by accident is
+easy to spot. Debrief's agents get the tasks worked on since the last review
+as they finally read, with these changes, and are told to treat removed work
+as something that shouldn't silently go missing.
+
+### Routines
+
+A **routine** is a task a project runs again and again. Set them up in the
+project's **Routines** card: a name, what Claude should do, when it runs, and
+whether it needs a clear review.
+
+| When | What happens |
+|---|---|
+| When I press Run | **▶ Run** puts it next in the task queue |
+| After each task is finished | It queues itself as the next task whenever another task is marked done |
+| When its task group is finished | It queues itself when the last open task of its group is done |
+
+A routine can be tied to a **task group**: it then goes into that group's
+queue, and "after each task" reacts only to that group's tasks. Each routine
+has its own **permission mode** — ask before acting, auto-accept edits, or
+plan only — and routines never run with "Never ask", whatever the project's
+default preset is.
+
+**Ready for take-off** (in Flight Deck's sidebar) lists every queued routine,
+with whether it's waiting for a clear review. Turn on **Auto take-off** to
+start them automatically as soon as their gate is clear — each one is a
+normal Flight Deck session using its project's default preset. Backlog groups
+are left alone.
+
+| Review gate | Meaning |
+|---|---|
+| None | It can start any time |
+| Only when the review is clear | Flight Deck won't start it while a review is open in Debrief, any work folder has changes since its last review, or a fix task from a review is still open — it says which |
+
+For example, "Update the documentation" after each task, and "Push to
+GitHub" when the review is clear. **Pause** stops an after-each-task routine
+from queueing itself. Routine tasks are marked *routine* in the queue.
+
+### Skills
+
+**Skills** (in the sidebar) lists the Claude Code skills of a project — kept
+in `.claude/skills` in its main folder — and your personal skills, which
+apply everywhere. Open one to edit it, or **＋ New skill**: give it a name, a
+sentence saying when to use it (Claude Code decides from that sentence), and
+the instructions. **✨ Draft with Claude** writes one from a description.
+Flight Deck sessions load these skills, as Claude Code does in a terminal.
+
 ### Finding and checking projects
 
 * Search by name and filter by tag from the sidebar.
@@ -156,9 +249,16 @@ extra folders of two kinds.
 | Main folder | Read and edit | Yes | No — each main folder belongs to one project |
 | Work folder | Read and edit | Yes, with the main folder | Yes |
 | Reference folder | Read only; edits are blocked | No | Yes |
+| Workspace folder | Read only, except new folders it creates there — those join the project as work folders | Only the new folders, as work folders | Yes |
 
-* Add extra folders with **＋ work folder** or **＋ reference folder**, and
-  switch a folder's type later from its card.
+* Add extra folders with **＋ work folder**, **＋ reference folder** or
+  **＋ workspace folder**, and switch a folder's type later from its card.
+* **Workspace folders** suit a shared parent such as a modding workspace that
+  holds several projects. The project can read everything there but change
+  nothing that exists; when its work needs a new folder outside the main
+  folder — a release tool, a publish folder — Claude creates it there and
+  Carrier adds it to the project as a work folder (a notice says so). A
+  workspace folder may contain the project's main folder.
 * **Sharing:** a project can use another project's main folder as a work or
   reference folder. An edit there is recorded for both projects, so their
   sessions warn each other.
@@ -169,9 +269,76 @@ extra folders of two kinds.
   everywhere — in Flight Deck, in shared-file patterns and in reviews. If the
   name clashes with a top-level item in the main folder, Carrier adds a
   number, such as `lib-2`.
-* **Git:** a work folder must be the top folder of its own git repository,
-  or not in git yet (Debrief offers to start tracking it). Reference folders
-  can be anywhere.
+* **Git:** a main or work folder can be a whole git repository or a folder
+  inside a bigger one; then Debrief reviews only that folder (this is how one
+  workspace can hold several projects). A folder not in git yet is fine too:
+  Debrief offers to start tracking it. Reference folders can be anywhere.
+
+---
+
+## Importing existing work
+
+Already working on something with plain Claude Code or the Claude app?
+**Ready Room → Import existing work** turns that folder into one Carrier
+project, or splits it into several, without losing what you've done.
+
+1. **Choose the folder.** Optionally add a **claude.ai data export** (the
+   .zip from claude.ai *Settings → Privacy → Export data*) so Claude can use
+   your chats about this work.
+2. **Look at it.** Carrier reads — and changes nothing — the folder layout,
+   README files, every CLAUDE.md, the permissions in `.claude` settings (never
+   their environment values), the recent git history, and the Claude Code
+   sessions that ran there. From an export it ticks the chats that mention
+   the folder or its parts; untick or tick others.
+3. **Choose how to organise it:**
+   * **In place** — nothing moves. Each project uses existing folders, for
+     example `mods/Animation` as one project's main folder and
+     `tools/editor` as another's, while the workspace stays one git
+     repository. A workspace-wide CLAUDE.md keeps applying, because Claude
+     Code reads CLAUDE.md files from the main folder's parent folders too.
+   * **Reorganise** — Claude may propose moving folders into a cleaner
+     layout. You approve each move.
+   * **Decide with Claude** — Claude recommends one.
+4. **Talk it through.** Claude says what it found — the separate strands of
+   work, what you kept asking for, what looks unfinished or abandoned — and
+   proposes projects. Answer its questions, or ask for changes ("put the
+   demo mod in the animation project", "drop the scratch folder").
+   Claude asks its questions as clickable option cards, like in a session.
+   If you state a lasting rule along the way, it appears as a rule card: edit
+   it and add it to a project in the plan or to one of the plan's rule sets.
+5. **Edit the plan.** Every project's name, main folder, goal, rules, rule
+   sets, tags, extra folders and tasks can be edited on the page; Claude
+   builds on your edits when you send your next message. **Check the plan**
+   lists anything that can't work (a missing folder, two projects with the
+   same main folder, …).
+6. **Create projects.** Carrier makes the rule sets, projects, folders and
+   tasks. With moves, it moves the folders first (git keeps their history;
+   untracked and ignored files move with them). If anything fails, what was
+   made is removed and the moves are undone.
+
+If the folder has no git history yet, Carrier offers to **start it here**: a
+first commit of the workspace as it is, after adding suggested lines to
+`.gitignore` (build output, caches, downloads and key files found there —
+edit them first).
+
+By default the current state counts as **already reviewed**, so each new
+project's first Debrief review shows only work done from now on. Untick
+*Treat the current state as already reviewed* to review everything.
+
+An unfinished import is saved, so you can close the app and pick it up from
+the Import page later. Claude gets no tools while importing: it sees only
+the summary Carrier gives it and can't read or change files itself.
+
+**Good to know**
+
+* Moving folders breaks links that point into them from elsewhere
+  (shortcuts, symlinks, Windows junctions) and paths written in scripts or
+  CLAUDE.md. Claude adds a task to fix those when it proposes moves.
+* Projects in one repository each keep their own Debrief checkpoints and
+  reviews. Flight Deck's **own copy** of such a project copies the whole
+  repository and runs in the project's folder inside the copy.
+* Your old Claude Code conversations stay where they are; resume them with
+  `claude --resume` in that folder.
 
 ---
 
@@ -205,6 +372,52 @@ task.
   session**, or **Deny** with a reason. The header's **Permissions** setting
   can also be *Ask before acting*, *Auto-accept edits*, *Plan only (no
   changes)*, or *Never ask* (which needs confirming).
+* **Questions:** when Claude needs you to choose, its questions appear as a
+  card of options (one or several per question, with a recommended one
+  first). Click your answers — or type your own — and **Send answers**, or
+  **Skip** to let Claude carry on with its best judgement.
+* **Suggested rules:** when you say something that should hold for future
+  work ("never…", "always…", "from now on…"), Claude suggests it as a rule.
+  The card lets you edit the wording and choose where it goes — this
+  project's rules, your global rules, an existing rule set, or a new rule set
+  attached to the project — then **Add rule** or **Dismiss**. Nothing is
+  saved until you add it; new sessions use it.
+* **Images:** paste a screenshot into the message box, drop one on the chat,
+  or use 🖼. Click a picture before sending to draw on it (pen, box, arrow)
+  and add a note for Claude. Claude can show you pictures too — a screenshot
+  it took or a diagram it drew — and images it opens appear in the chat.
+  Click any picture to see it full size.
+* **Suggested skills:** when Claude works out a procedure worth reusing, or
+  you ask for one, it suggests a skill. Edit the name, when-to-use sentence
+  and instructions, then save it to the project or to your personal skills.
+* **Other projects:** Claude can read your other projects' setup — goal,
+  rules, rule sets, folders, open tasks and skills — for example "look at how
+  Read Aloud is set up for releases and suggest rules for this project". It
+  then suggests rules and skills for you to approve; it never changes the
+  other project.
+* **New work that comes up:** when something outside the task turns up,
+  Claude doesn't just do it or drop it. It reads the project's queues and
+  routines and asks where it belongs, with a suggestion: add it to the
+  current task, or make it a new task in the main queue, an existing task
+  group or a new group — and where in that queue (next, at the end, or after
+  a given task). Edit the title and details, pick the place, then **Add**, or
+  **Leave it out**. Claude waits for your answer and only does the work now
+  if you added it to the current task.
+* **Changing tasks to match the work:** if this task turns out to need work
+  planned in another task, Claude asks to **pull it in** (whole — the other
+  task is closed as merged — or just a part), or to **split** part of this
+  task out into a new one. You can edit every text before **Change the
+  tasks**, so the record matches what was actually done.
+* **Alerts:** when a session needs you, the Flight Deck tab shows a pulsing
+  badge, the other tabs show a banner with **Go there**, the session and its
+  waiting card pulse gently, and (in ⚙ Settings → Alerts) the taskbar button
+  can flash and a short chime can play. **Do not disturb** keeps just the
+  badge. A dot on the tab means a routine is ready for take-off.
+* **Own copies:** when a session that worked in its own copy ends, **Bring it
+  back…** merges its branch into the main folder (if there are conflicts,
+  nothing changes and you're told where), lets you review it first, keeps
+  only the branch, or discards it. The project page lists copies not brought
+  back yet.
 * **Model and effort** can be changed in the header while Claude is waiting
   for you. A new model applies from the next message; a new effort reconnects
   the session and continues the same conversation.
@@ -272,6 +485,17 @@ reviews the main folder and all work folders together.
    it off for a plain diff review.
 4. **Start review.** **Cancel** stops preparing, and nothing is saved. A
    review in progress can be resumed later.
+
+### Scanning the whole project
+
+Some checks don't need history — a security check, or a custom agent that
+looks for unexplained "magic numbers". **Scan the whole project instead**
+(under *Start review*) checks every file in the project's folders as it is
+now, with only the agents you tick (your choice is remembered per project).
+Lock files, minified and very long files are left out. A scan is reviewed
+like any other — approve, request fixes — but it doesn't change what counts
+as reviewed, and it sits beside an open change review rather than replacing
+it.
 
 ### How a review is prepared
 
@@ -427,7 +651,13 @@ for".
 3. **Write draft.** Edit the result freely, or **Write again**.
 4. **Use this draft** puts it in the field. Review it there, then **Save**.
 
-For project rules, the project's goal is given to Claude as context. For
+It's also next to **Tasks** (Claude writes a title and details — what to do
+and what "done" means; you then **Add task**), **Routines** (name,
+instructions, and a suggested trigger and review gate; you then **Save
+routine**) and the **Skills** editor.
+
+For project rules, the project's goal is given to Claude as context; for
+tasks and routines, the goal and the tasks already queued. For
 review agents, the draft also suggests a name and a severity. Each draft is
 one short request to Claude with no tools, so it can't read or change files.
 
@@ -486,6 +716,10 @@ badges always show their name.
 * The review is fully usable from the keyboard; Esc closes dialogs.
 * Text boxes underline misspelled words. On Windows, right-click a word for
   suggestions, plus undo, cut, copy, paste and select all.
+* **Wide screens:** ⚙ Settings → Layout sets how wide the work area may
+  grow — Normal (about 960 px), Wide (about a 16:9 screen), Wider, or the
+  full window — and can centre it. This covers Ready Room pages and Flight
+  Deck conversations; Debrief's diffs always use the full width.
 
 ---
 
@@ -502,7 +736,8 @@ always does.
   straight into the window, talks to Python through an in-process bridge,
   and a Content-Security-Policy blocks all network requests.
 * **Review agents and drafts can't change anything.** Debrief's agents get
-  read-only tools; "Draft with Claude" gets no tools at all. Debrief never
+  read-only tools; "Draft with Claude" and the import conversation get no
+  tools at all. Debrief never
   edits your code — fixes go back to you as a task.
 * **Flight Deck sessions are normal Claude Code:** they ask before acting
   unless you choose otherwise, exactly as in the terminal.
@@ -518,7 +753,8 @@ always does.
 
 ## Files Carrier writes
 
-**In each project's main folder:**
+**In each project's main folder** (for a project inside a bigger
+repository, in that repository's top folder):
 
 ```
 .carrier/
@@ -543,6 +779,8 @@ Linux:
 | `settings.json` | Theme, colours, overlap setting |
 | `desktop.log` | Errors and diagnostics from the desktop app |
 | `worktrees/`, `scratch/` | Own-copy worktrees and standalone scratch folders |
+| `backups/` | A copy of `carrier.db` taken before a new version upgrades it (the newest five are kept) |
+| `imports/` | Unfinished imports (the conversation and plan); removed once the projects are created or the import is discarded |
 
 ---
 
@@ -591,12 +829,18 @@ should yet.
 
 | Feature | What it adds |
 |---|---|
+| Usage and limits | See tokens and cost per session, project, day and week; set limits; recognise Claude's usage-limit stops, pause instead of failing, and resume when the limit resets |
 | Local network access | Use Carrier from other devices on your network. An optional build that can be left out entirely |
 | Right-click menu on macOS and Linux | Spelling suggestions and copy/paste in text boxes, as on Windows |
 
 ### Known issues
 
-None reported yet. Found one? Please [open an issue](../../../issues).
+* Carrier is used and tested by hand on **Windows 11**; macOS and Linux run the
+  automated tests but haven't been tried by hand yet.
+* Questions only appear as option cards when Claude Code passes them to
+  Carrier; if it doesn't, they appear in the chat to answer as a message.
+
+Found something else? Please [open an issue](../../../issues).
 
 ### License
 

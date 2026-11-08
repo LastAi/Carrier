@@ -18,7 +18,7 @@ from typing import Any
 from carrier.core.jsonutil import extract_json
 from carrier.core.llm import Backend, BackendError
 
-KINDS = ("project_rules", "global_rules", "rule_set", "agent")
+KINDS = ("project_rules", "global_rules", "rule_set", "agent", "skill", "task", "routine")
 
 RULES_SYSTEM = """You turn a user's description into clear working rules for Claude Code, an AI coding agent.
 Write rules Claude can follow and check itself against:
@@ -52,6 +52,40 @@ AGENT_PROMPT = """## What the user wants this review agent to catch
 {context}{current}"""
 
 
+SKILL_SYSTEM = """You write Claude Code skills. A skill is a reusable procedure Claude Code loads when its
+description matches the work at hand: e.g. "release a mod", "run the build and tests", "write a forum post".
+
+From the user's description, write:
+- name: kebab-case, 2-4 words;
+- description: ONE sentence saying when to use it (Claude Code decides from this alone), starting "Use when";
+- body: markdown instructions Claude can follow step by step: numbered steps, exact commands in code
+  blocks, checks to run, what to report back. Keep every requirement the user gave; invent no paths or
+  commands they didn't give — write <placeholders> instead.
+
+Reply with JSON only: {"name": "...", "description": "...", "body": "..."}"""
+
+
+TASK_SYSTEM = """You write tasks for Claude Code, an AI coding agent, from the user's rough description.
+A task is one piece of work a single session can finish. Write:
+- title: short and specific, imperative, under 80 characters ("Add retry to save loading");
+- details: what to do and what "done" means — the concrete steps or requirements the user gave, files or
+  areas involved if they named them, and how to check it works. Markdown bullets; no filler.
+Keep every requirement the user gave; invent no file names, paths or commands they didn't give.
+Reply with JSON only: {"title": "...", "details": "..."}"""
+
+ROUTINE_SYSTEM = """You write routines for Carrier: repeatable tasks a project runs again and again, done by
+Claude Code (an AI coding agent) — e.g. "update the documentation after each task", "push to GitHub once
+everything is reviewed". From the user's description, write:
+- name: short, under 50 characters;
+- instructions: what Claude should do each time, as steps it can follow on its own; say what to check and
+  what to leave alone; markdown bullets;
+- trigger: "after_task" if it should run after every finished task, else "manual";
+- gate: "reviewed" if it should only run once all changes have been reviewed (anything that publishes,
+  pushes, releases or deploys), else "none".
+Keep every requirement the user gave; invent no paths or commands they didn't give.
+Reply with JSON only: {"name": "...", "instructions": "...", "trigger": "manual|after_task", "gate": "none|reviewed"}"""
+
+
 def _current_block(current: str) -> str:
     current = (current or "").strip()
     if not current:
@@ -73,6 +107,37 @@ async def draft_async(kind: str, description: str, backend: Backend, current: st
     description = (description or "").strip()
     if not description:
         raise ValueError("Describe what you want first.")
+    if kind in ("task", "routine"):
+        system = TASK_SYSTEM if kind == "task" else ROUTINE_SYSTEM
+        reply = await backend.ask(system=system, model=model,
+                                  prompt=f"## What the user wants\n{description[:6000]}\n"
+                                         f"{_context_block(goal)}{_current_block(current)}")
+        try:
+            data = extract_json(reply)
+        except ValueError:
+            data = None
+        if kind == "task":
+            if not isinstance(data, dict) or not str(data.get("title", "")).strip():
+                return {"title": description.strip().splitlines()[0][:80], "details": reply.strip()}
+            return {"title": str(data["title"]).strip()[:200], "details": str(data.get("details", "")).strip()}
+        if not isinstance(data, dict) or not str(data.get("instructions", "")).strip():
+            return {"name": "", "instructions": reply.strip(), "trigger": "manual", "gate": "none"}
+        trigger, gate = str(data.get("trigger", "")), str(data.get("gate", ""))
+        return {"name": str(data.get("name", "")).strip()[:80], "instructions": str(data["instructions"]).strip(),
+                "trigger": trigger if trigger in ("manual", "after_task") else "manual",
+                "gate": gate if gate in ("none", "reviewed") else "none"}
+    if kind == "skill":
+        reply = await backend.ask(system=SKILL_SYSTEM, model=model,
+                                  prompt=f"## What the user wants this skill to do\n{description[:6000]}\n"
+                                         f"{_context_block(goal)}{_current_block(current)}")
+        try:
+            data = extract_json(reply)
+        except ValueError:
+            data = None
+        if not isinstance(data, dict) or not str(data.get("body", "")).strip():
+            return {"name": "", "description": "", "body": reply.strip()}
+        return {"name": str(data.get("name", "")).strip()[:64], "description": str(data.get("description", "")).strip(),
+                "body": str(data["body"]).strip()}
     if kind == "agent":
         reply = await backend.ask(system=AGENT_SYSTEM, model=model,
                                   prompt=AGENT_PROMPT.format(description=description[:6000],

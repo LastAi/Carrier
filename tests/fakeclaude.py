@@ -10,6 +10,7 @@ runner, the hooks and ``sdk.normalize`` are all exercised for real.
 The "model" follows commands in the prompt, one per line::
 
     write <path> <text>     use the Write tool on <path> (relative to cwd)
+    ask                     ask the user a question (AskUserQuestion)
     slow                    take a long time (for interrupt tests)
     anything else           just reply
 """
@@ -35,6 +36,8 @@ class FakeClaudeClient:
         self.prompts: list[str] = []
         self.contexts: list[str] = []  # additionalContext the hooks gave "Claude"
         self.denied: list[str] = []
+        self.answers: list[Any] = []
+        self.images: list[list[dict[str, Any]]] = []  # image blocks per message that had any  # what AskUserQuestion got back (None = skipped)
         self.connected = False
         self._interrupted = asyncio.Event()
         ALL_CLIENTS.append(self)
@@ -54,7 +57,11 @@ class FakeClaudeClient:
     async def set_permission_mode(self, mode: str) -> None:
         self.options.permission_mode = mode
 
-    async def query(self, prompt: str, session_id: str = "default") -> None:
+    async def query(self, prompt: Any, session_id: str = "default") -> None:
+        if not isinstance(prompt, str):  # streaming input: a user message with content blocks
+            blocks = [b async for m in prompt for b in m["message"]["content"]]
+            self.images.append([b for b in blocks if b["type"] == "image"])
+            prompt = "\n".join(b["text"] for b in blocks if b["type"] == "text")
         self.prompts.append(prompt)
         self._interrupted.clear()
 
@@ -90,6 +97,23 @@ class FakeClaudeClient:
                 yield ResultMessage(subtype="error_during_execution", duration_ms=1, duration_api_ms=1,
                                     is_error=False, num_turns=1, session_id=self.session_id, total_cost_usd=0.01)
                 return
+            if parts[0] == "ask-unrouted":  # Claude Code asks without calling the permission callback
+                inp = {"questions": [{"question": "Which colour?", "options": [{"label": "Red"}, {"label": "Blue"}]}]}
+                tid = "t" + uuid.uuid4().hex[:6]
+                yield AssistantMessage(content=[ToolUseBlock(id=tid, name="AskUserQuestion", input=inp)], model="fake")
+                yield UserMessage(content=[ToolResultBlock(tool_use_id=tid, content="(no answer)", is_error=True)])
+                continue
+            if parts[0] == "ask":
+                inp = {"questions": [{"question": "Which layout?", "header": "Layout", "multiSelect": False,
+                                      "options": [{"label": "In place", "description": "Nothing moves."},
+                                                  {"label": "Reorganise", "description": "Move folders."}]}]}
+                tid = "t" + uuid.uuid4().hex[:6]
+                yield AssistantMessage(content=[ToolUseBlock(id=tid, name="AskUserQuestion", input=inp)], model="fake")
+                res = await self.options.can_use_tool("AskUserQuestion", inp, ToolPermissionContext())
+                self.answers.append(res.updated_input.get("answers") if res.behavior == "allow" else None)
+                yield UserMessage(content=[ToolResultBlock(tool_use_id=tid, content="answered",
+                                                           is_error=res.behavior != "allow")])
+                continue
             if parts[0] == "write" and len(parts) == 3:
                 path = str(Path(self.options.cwd) / parts[1])
                 inp = {"file_path": path, "content": parts[2] + "\n"}

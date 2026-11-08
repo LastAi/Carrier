@@ -15,6 +15,7 @@ prompt, which is fine for single-item conversations.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from carrier.core.config import Config
@@ -70,8 +71,8 @@ async def explain(review: Review, item: ChangeItem, notes: list[Note], cfg: Conf
         prompt=prompt,
         model=cfg.get("models", "guide"),
         tools=READ_ONLY_TOOLS,
-        cwd=cfg.repo,
-        add_dirs=[pt["repo"] for pt in review.parts],
+        cwd=Path(review.folder),
+        add_dirs=[review.part_folder(pt) for pt in review.parts],
         max_turns=int(cfg.get("agents", "guide_max_turns")),
     )
     try:
@@ -135,7 +136,7 @@ async def ask(review: Review, item: ChangeItem, question: str, cfg: Config, back
         prompt=prompt,
         model=cfg.get("models", "guide"),
         tools=READ_ONLY_TOOLS,
-        cwd=cfg.repo,
-        add_dirs=[pt["repo"] for pt in review.parts],
+        cwd=Path(review.folder),
+        add_dirs=[review.part_folder(pt) for pt in review.parts],
         max_turns=int(cfg.get("agents", "guide_max_turns")),
     )

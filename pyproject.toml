@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "carrier"
-version = "0.6.0"
+version = "0.7.0"
 description = "Brief. Launch. Debrief. A mothership for Claude Code: launch AI agents in parallel, keep them aware of each other, and review every change they bring home."
 readme = "README.md"
 requires-python = ">=3.11"

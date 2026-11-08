@@ -83,11 +83,14 @@ class DesktopApi:
         self._emit: Emit = lambda _kind, _data: None
         self._backend_factory = backend_factory
         self._pick_folder = pick_folder
+        self._pick_file: Callable[[str, str], str | None] | None = None
 
-    def _bind(self, emit: Emit, pick_folder: Callable[[], str | None]) -> None:
+    def _bind(self, emit: Emit, pick_folder: Callable[[], str | None],
+              pick_file: Callable[[str, str], str | None] | None = None) -> None:
         """Called by main.py once the window exists."""
         self._emit = emit
         self._pick_folder = pick_folder
+        self._pick_file = pick_file
 
     def _need(self) -> S.ReviewSession:
         if self._session is None:
@@ -95,6 +98,20 @@ class DesktopApi:
         return self._session
 
     # -- setup ---------------------------------------------------------------
+
+    @_guard
+    def attention(self) -> bool:
+        """Ask the OS to draw the user's eye to the window (taskbar flash on Windows)."""
+        fn = getattr(self, "_attention", None)
+        if fn is not None:
+            fn()
+        return fn is not None
+
+    @_guard
+    def upgrade_notice(self) -> str | None:
+        """Where the pre-upgrade backup went, if this start upgraded the database."""
+        backup = getattr(self._store(), "backup", None)
+        return str(backup) if backup else None
 
     @_guard
     def checks(self) -> dict[str, Any]:
@@ -128,7 +145,7 @@ class DesktopApi:
         for label, path in self._store().project_roots(p):
             folder = Path(path)
             info: dict[str, Any] = {"label": label, "path": path, "exists": folder.is_dir()}
-            info["is_repo"] = info["exists"] and gitutil.is_repo(folder)
+            info["is_repo"] = info["exists"] and gitutil.in_repo(folder)
             out.append(info)
         return out
 
@@ -200,6 +217,32 @@ class DesktopApi:
                                    progress=lambda msg: self._emit("progress", msg))
 
     @_guard
+    def db_scan_agents(self, pid: int) -> list[dict[str, Any]]:
+        """The project's review agents for a whole-project scan, with the user's last choice ticked."""
+        from carrier.debrief.projects import project_spec
+
+        spec = project_spec(self._store(), pid)
+        picked = set(self._store().get_setting(f"project:{pid}:scan_agents", ["security"]))
+        return [{"name": c.name, "title": c.title, "severity": c.severity, "picked": c.name in picked}
+                for c in spec.criteria or []]
+
+    @_guard
+    def start_scan(self, pid: int, agents: list[str], use_ai: bool = True) -> dict[str, Any]:
+        """Review the whole project as it is now (no history) with the chosen agents."""
+        from carrier.debrief.projects import project_spec
+
+        if not use_ai:
+            raise ValueError("A scan needs the AI agents.")
+        self._store().set_setting(f"project:{pid}:scan_agents", list(agents))
+        spec = project_spec(self._store(), pid)
+        if self._session is not None:
+            self._session.close()
+            self._session = None
+        self._session = S.ReviewSession(spec.path, backend=self._backend(True), project=spec)
+        return self._session.start(scan=True, agents=list(agents),
+                                   progress=lambda msg: self._emit("progress", msg))
+
+    @_guard
     def start_worktree(self, sid: int, use_ai: bool = True, from_ref: str | None = None,
                        fresh: bool = False) -> dict[str, Any]:
         """Review a Flight Deck session's own copy (worktree) on its own."""
@@ -250,7 +293,18 @@ class DesktopApi:
 
     @_guard
     def finish(self) -> dict[str, Any]:
-        return self._need().finish()
+        from carrier.readyroom import routines
+
+        session = self._need()
+        out = session.finish()
+        routines.invalidate(session.project.id if session.project is not None else None)
+        if session.project is not None and session.review is not None:
+            r = session.review
+            n_fix = sum(1 for i in r.items if i.decision and i.decision.action in ("fix", "revert"))
+            self._store().log_project_event(
+                session.project.id, "review", ("finished a scan" if r.scan else "finished a review") + f" ({r.id})",
+                detail=f"{len(r.items)} change(s); {n_fix} sent back as fixes")
+        return out
 
     @_guard
     def open_file(self, path: str) -> bool:
@@ -345,16 +399,38 @@ class DesktopApi:
         return self._fd().session(sid)
 
     @_guard
-    def fd_send(self, sid: int, text: str) -> bool:
-        return self._fd().send(sid, text)
+    def fd_send(self, sid: int, text: str, images: list[dict[str, Any]] | None = None) -> bool:
+        return self._fd().send(sid, text, images)
 
     @_guard
     def fd_interrupt(self, sid: int) -> bool:
         return self._fd().interrupt(sid)
 
     @_guard
-    def fd_answer(self, sid: int, req_id: str, decision: str, message: str = "") -> bool:
+    def fd_answer(self, sid: int, req_id: str, decision: str, message: Any = "") -> bool:
+        """Answer a permission request, or Claude's questions (decision "answers", message {question: answer})."""
         return self._fd().answer(sid, req_id, decision, message)
+
+    @_guard
+    def rule_sets(self) -> list[dict[str, Any]]:
+        return self._store().rule_sets()
+
+    @_guard
+    def fd_apply_rule(self, sid: int, proposal_id: str, text: str, target: str, rule_set_id: int | None = None,
+                      new_rule_set: str = "") -> str:
+        """Save a rule Claude proposed (as the user edited it) to the project, global rules or a rule set."""
+        deck = self._fd()
+        s = deck.store.session(sid)
+        if s is None:
+            raise ValueError("Unknown session.")
+        result = self._rr().apply_rule(text, target, s["project_id"], rule_set_id or None, new_rule_set)
+        deck.emit(sid, {"type": "rule_done", "id": proposal_id, "decision": "applied", "text": result})
+        return result
+
+    @_guard
+    def fd_dismiss_rule(self, sid: int, proposal_id: str) -> bool:
+        self._fd().emit(sid, {"type": "rule_done", "id": proposal_id, "decision": "dismissed"})
+        return True
 
     @_guard
     def fd_set_mode(self, sid: int, mode: str) -> dict[str, Any]:
@@ -422,12 +498,18 @@ class DesktopApi:
         return self._rr().remove_project(pid)
 
     @_guard
-    def rr_add_task(self, pid: int, title: str, details: str = "", first: bool = False) -> dict[str, Any]:
-        return self._rr().add_task(pid, title, details, first)
+    def rr_add_task(self, pid: int, title: str, details: str = "", first: bool = False,
+                    group_id: int | None = None) -> dict[str, Any]:
+        return self._rr().add_task(pid, title, details, first, group_id=group_id)
 
     @_guard
     def rr_update_task(self, tid: int, title: str, details: str) -> dict[str, Any]:
-        return self._rr().update_task(tid, title, details)
+        before = dict(self._store().task(tid) or {})
+        out = self._rr().update_task(tid, title, details)
+        after = self._store().task(tid) or {}
+        if before.get("status") == "active":  # a session may be working on it: tell it
+            self._fd().notify_task_change(tid, before, after)
+        return out
 
     @_guard
     def rr_delete_task(self, tid: int) -> dict[str, Any]:
@@ -563,7 +645,315 @@ class DesktopApi:
         if backend is None:
             backend = AgentSDKBackend(concurrency=1)
         project = self._store().project(pid) if pid is not None else None
-        return drafting.draft(kind, description, backend, current, (project or {}).get("goal", ""))
+        context = (project or {}).get("goal", "")
+        if project and kind in ("task", "routine"):
+            # The project's queue, so a new task fits in and doesn't repeat one.
+            open_tasks = self._store().tasks(pid, statuses=("planned", "active"))
+            context = (f"Project: {project['name']}\nGoal: {context or '(none)'}\n"
+                       + ("Tasks already queued:\n" + "\n".join(f"- {t['title']}" for t in open_tasks)
+                          if open_tasks else ""))
+        return drafting.draft(kind, description, backend, current, context)
+
+    # -- import existing work (readyroom/importer.py) ---------------------------------
+
+    def _llm(self) -> Backend:
+        from carrier.core.llm import AgentSDKBackend
+
+        backend = self._backend_factory() if self._backend_factory else None
+        return backend if backend is not None else AgentSDKBackend(concurrency=1)
+
+    @_guard
+    def im_pick_export(self) -> str | None:
+        """Pick a claude.ai data export (.zip or conversations.json)."""
+        if self._pick_file is None:
+            raise S.SessionError("File picker unavailable.")
+        return self._pick_file("Claude data export", "*.zip;*.json")
+
+    @_guard
+    def im_scan(self, path: str, export: str = "") -> dict[str, Any]:
+        """What an import of ``path`` would look at (reads only)."""
+        from carrier.readyroom import importer as I
+
+        ws = I.scan(path, export)
+        mains = {p["path"]: p["name"] for p in self._store().projects()}
+        overview = I.scan_overview(ws)
+        overview["projects_inside"] = [name for path_, name in mains.items()
+                                       if Path(path_) == Path(ws["root"]) or Path(ws["root"]) in Path(path_).parents]
+        return overview
+
+    @_guard
+    def im_start(self, path: str, mode: str, export: str = "", chat_ids: list[str] | None = None,
+                 model: str = "sonnet") -> dict[str, Any]:
+        """Start the conversation: Claude says what it found and proposes a split."""
+        from carrier.readyroom import importer as I
+
+        chat = I.ImportChat.start(path, mode, export, chat_ids, model)
+        chat.save()
+        return chat.turn(self._llm())
+
+    @_guard
+    def im_send(self, iid: str, text: str) -> dict[str, Any]:
+        from carrier.readyroom import importer as I
+
+        if not text.strip():
+            raise ValueError("Write something first.")
+        return I.ImportChat.load(iid).turn(self._llm(), text)
+
+    @_guard
+    def im_get(self, iid: str) -> dict[str, Any]:
+        from carrier.readyroom import importer as I
+
+        return I.ImportChat.load(iid).view()
+
+    @_guard
+    def im_recent(self) -> list[dict[str, Any]]:
+        from carrier.readyroom import importer as I
+
+        return I.ImportChat.recent()
+
+    @_guard
+    def im_discard(self, iid: str) -> bool:
+        from carrier.readyroom import importer as I
+
+        I.ImportChat.load(iid).discard()
+        return True
+
+    @_guard
+    def im_rule_done(self, iid: str, message: int, index: int, status: str) -> dict[str, Any]:
+        """A rule Claude proposed during an import was added to the plan, or dismissed."""
+        from carrier.readyroom import importer as I
+
+        return I.ImportChat.load(iid).rule_done(message, index, status)
+
+    @_guard
+    def im_check(self, iid: str, plan: dict[str, Any]) -> dict[str, Any]:
+        """Save the user's edited plan and list what's wrong with it."""
+        from carrier.readyroom import importer as I
+
+        chat = I.ImportChat.load(iid)
+        chat.set_plan(plan)
+        store = self._store()
+        clean, problems = I.validate_plan(chat.root, plan, {p["path"] for p in store.projects()},
+                                          {r["name"] for r in store.rule_sets()},
+                                          allow_moves=chat.mode != "in_place")
+        return {"plan": I.public(clean), "problems": problems}
+
+    @_guard
+    def im_history(self, iid: str) -> dict[str, Any]:
+        """Whether the workspace has git history yet, and the .gitignore lines to suggest."""
+        from carrier.readyroom import importer as I
+
+        root = Path(I.ImportChat.load(iid).root)
+        has = gitutil.in_repo(root) and gitutil.has_head(gitutil.repo_root(root))
+        return {"has_history": has, "suggest": [] if has else I.suggest_gitignore(root)}
+
+    @_guard
+    def im_apply(self, iid: str, plan: dict[str, Any], baseline: bool = True,
+                 first_commit: bool = False, ignore_lines: list[str] | None = None) -> dict[str, Any]:
+        """Create the projects (after the user confirmed, and approved any moves)."""
+        from carrier.readyroom import importer as I
+
+        chat = I.ImportChat.load(iid)
+        chat.set_plan(plan)
+        if chat.mode == "in_place" and plan.get("moves"):
+            raise ValueError("This import works in place; remove the moves first.")
+        note = ""
+        if first_commit:
+            I.validate_plan(chat.root, plan)  # don't commit for a plan that can't be applied
+            note = I.first_commit(chat.root, ignore_lines)
+        out = I.apply_plan(self._rr(), chat.root, plan, baseline=baseline)
+        if note:
+            out["warnings"] = [note, *out.get("warnings", [])]
+        chat.discard()  # done: the projects hold everything now
+        return out
+
+    # -- routines (readyroom/routines.py) --------------------------------------------
+
+    @_guard
+    def rr_routines(self, pid: int) -> dict[str, Any]:
+        """A project's routines, and whether its review is clear (for gated ones)."""
+        from carrier.readyroom import routines as R
+
+        from carrier.core import secrets
+
+        p = self._store().project(pid)
+        files = [dict(f, label=lbl) for lbl, folder in self._store().project_roots(p)
+                 for f in secrets.unignored_secret_files(Path(folder))]
+        return {"routines": self._store().routines(pid), "blockers": R.review_blockers(self._store(), pid),
+                "secrets": R.secret_hits(self._store(), pid), "secret_files": files}
+
+    @_guard
+    def rr_start_history(self, pid: int) -> dict[str, Any]:
+        """Treat the project as reviewed up to now (for work done before it was in Carrier)."""
+        from carrier.readyroom import importer as I
+        from carrier.readyroom import routines as R
+
+        warnings = I.mark_reviewed(self._store(), pid)
+        self._store().log_project_event(pid, "review", "started review history from now")
+        R.invalidate(pid)
+        out = self.rr_routines.__wrapped__(self, pid)
+        out["warnings"] = warnings
+        return out
+
+    @_guard
+    def rr_mark_secret_safe(self, pid: int, fingerprint: str) -> dict[str, Any]:
+        from carrier.readyroom import routines as R
+
+        R.mark_secret_safe(self._store(), pid, fingerprint)
+        return self.rr_routines.__wrapped__(self, pid)
+
+    @_guard
+    def rr_ignore_secret_files(self, pid: int) -> dict[str, Any]:
+        """Add the usual secret-file patterns to .gitignore in each of the project's repositories."""
+        from carrier.core import secrets
+        from carrier.readyroom import routines as R
+
+        p = self._store().project(pid)
+        done = set()
+        for _lbl, folder in self._store().project_roots(p):
+            try:
+                repo, _ = gitutil.locate(Path(folder))
+            except gitutil.GitError:
+                continue
+            if str(repo) not in done:
+                done.add(str(repo))
+                if secrets.ignore_secret_files(Path(folder)):
+                    self._store().log_project_event(pid, "secrets", "added secret-file patterns to .gitignore",
+                                                    detail=str(repo / ".gitignore"))
+        R.invalidate(pid)
+        return self.rr_routines.__wrapped__(self, pid)
+
+    @_guard
+    def fd_check_secrets(self, text: str) -> list[dict[str, Any]]:
+        """Likely secrets in a message about to be sent (checked on this computer)."""
+        from carrier.core import secrets
+
+        return secrets.scan_text(text or "")
+
+    @_guard
+    def rr_save_routine(self, pid: int, fields: dict[str, Any], rid: int | None = None) -> dict[str, Any]:
+        from carrier.readyroom import routines as R
+
+        gid = fields.get("group_id")
+        R.save(self._rr(), pid, str(fields.get("name", "")), str(fields.get("instructions", "")),
+               str(fields.get("trigger", "manual")), str(fields.get("gate", "none")),
+               bool(fields.get("enabled", True)), rid, int(gid) if gid not in (None, "") else None,
+               str(fields.get("mode") or ""))
+        return self.rr_routines.__wrapped__(self, pid)
+
+    @_guard
+    def rr_delete_routine(self, pid: int, rid: int) -> dict[str, Any]:
+        r = self._store().routine(rid)
+        if r is None or r["project_id"] != pid:
+            raise ValueError("Unknown routine.")
+        self._store().delete_routine(rid)
+        self._store().log_project_event(pid, "routine", f"deleted the routine {r['name']}")
+        return self.rr_routines.__wrapped__(self, pid)
+
+    @_guard
+    def rr_set_images(self, pid: int, on: bool) -> dict[str, Any]:
+        return self._rr().set_images_allowed(pid, bool(on))
+
+    @_guard
+    def rr_project_log(self, pid: int) -> list[dict[str, Any]]:
+        """The project's activity log: every task change and project event, newest first."""
+        return self._rr().project_log(pid)
+
+    @_guard
+    def rr_task_history(self, tid: int) -> list[dict[str, Any]]:
+        """Every recorded change to a task."""
+        return self._rr().task_history(tid)
+
+    @_guard
+    def rr_save_group(self, pid: int, fields: dict[str, Any], gid: int | None = None) -> dict[str, Any]:
+        return self._rr().save_group(pid, str(fields.get("name", "")), str(fields.get("priority", "normal")),
+                                     fields.get("tags"), gid)
+
+    @_guard
+    def rr_delete_group(self, pid: int, gid: int) -> dict[str, Any]:
+        return self._rr().delete_group(pid, gid)
+
+    @_guard
+    def rr_set_task_group(self, tid: int, gid: int | None) -> dict[str, Any]:
+        return self._rr().set_task_group(tid, gid)
+
+    @_guard
+    def fd_bring_back(self, sid: int, action: str) -> dict[str, Any]:
+        """Merge, keep or discard a session's own copy."""
+        return self._fd().bring_back(sid, action)
+
+    @_guard
+    def rr_copies(self, pid: int) -> list[dict[str, Any]]:
+        return self._fd().leftover_copies(pid)
+
+    @_guard
+    def fd_set_auto_takeoff(self, on: bool) -> bool:
+        return self._fd().set_auto_takeoff(bool(on))
+
+    @_guard
+    def rr_run_routine(self, rid: int) -> dict[str, Any]:
+        """Queue the routine as the project's next task."""
+        from carrier.readyroom import routines as R
+
+        return R.run(self._rr(), rid)
+
+    # -- skills (core/skills.py) ----------------------------------------------------
+
+    def _skill_root(self, pid: int | None) -> str | None:
+        return self._store().project(pid)["path"] if pid is not None and self._store().project(pid) else None
+
+    @_guard
+    def rr_skills(self, pid: int | None = None) -> dict[str, Any]:
+        """A project's skills (if ``pid``) and the user's personal ones."""
+        from carrier.core import skills
+
+        return skills.list_skills(self._skill_root(pid))
+
+    @_guard
+    def rr_save_skill(self, pid: int | None, name: str, description: str, body: str, scope: str = "project",
+                      old_name: str = "") -> dict[str, Any]:
+        from carrier.core import skills
+
+        saved = skills.save(self._skill_root(pid), name, description, body, scope, old_name)
+        if pid is not None and scope == "project":
+            self._store().log_project_event(pid, "skill", f"saved the skill {saved['name']}", detail=description)
+        return skills.list_skills(self._skill_root(pid))
+
+    @_guard
+    def rr_delete_skill(self, pid: int | None, name: str, scope: str = "project") -> dict[str, Any]:
+        from carrier.core import skills
+
+        skills.delete(self._skill_root(pid), name, scope)
+        if pid is not None and scope == "project":
+            self._store().log_project_event(pid, "skill", f"deleted the skill {name}")
+        return skills.list_skills(self._skill_root(pid))
+
+    @_guard
+    def fd_apply_skill(self, sid: int, proposal_id: str, name: str, description: str, body: str,
+                       scope: str = "project") -> str:
+        """Save a skill Claude proposed (as the user edited it)."""
+        from carrier.core import skills
+
+        deck = self._fd()
+        s = deck.store.session(sid)
+        if s is None:
+            raise ValueError("Unknown session.")
+        root = self._skill_root(s["project_id"]) if scope == "project" else None
+        if scope == "project" and root is None:
+            raise ValueError("This session has no project; save it as a personal skill instead.")
+        saved = skills.save(root, name, description, body, scope)
+        if scope == "project":
+            self._store().log_project_event(s["project_id"], "skill", f"saved the skill {saved['name']} Claude suggested",
+                                            by="claude", detail=description, session_id=sid)
+        where = "this project's skills" if scope == "project" else "your personal skills"
+        text = f"Saved {saved['name']} to {where}."
+        deck.emit(sid, {"type": "skill_done", "id": proposal_id, "decision": "applied", "text": text})
+        return text
+
+    @_guard
+    def fd_dismiss_skill(self, sid: int, proposal_id: str) -> bool:
+        self._fd().emit(sid, {"type": "skill_done", "id": proposal_id, "decision": "dismissed"})
+        return True
 
     @_guard
     def rr_preview(self, pid: int | None, task_id: int | None = None, preset_id: int | None = None) -> str:

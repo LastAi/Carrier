@@ -228,15 +228,12 @@ def test_extra_folder_rules(room: ReadyRoom, folders, tmp_path: Path):
     lib = tmp_path / "other" / "lib"
     lib.mkdir(parents=True)
     assert [f["label"] for f in room.add_folder(a["id"], str(lib))["folders"]] == ["shared", "lib-2"]
-    # A work folder inside a git repository must be its top folder; reference folders needn't be.
+    # A folder inside a git repository can be a work folder too (only it is reviewed).
     repo = tmp_path / "mono"
     (repo / "pkg").mkdir(parents=True)
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    with pytest.raises(RoomError, match="inside the git repository"):
-        room.add_folder(a["id"], str(repo / "pkg"))
     room.add_folder(a["id"], str(repo / "pkg"), kind="reference")
-    with pytest.raises(RoomError, match="inside the git repository"):
-        room.set_folder_kind(a["id"], str((repo / "pkg").resolve()), "work")
+    room.set_folder_kind(a["id"], str((repo / "pkg").resolve()), "work")
     room.set_folder_kind(a["id"], str(lib.resolve()), "reference")
     assert next(f for f in room.project(a["id"])["folders"] if f["label"] == "lib-2")["kind"] == "reference"
 
@@ -292,3 +289,332 @@ def test_builtin_agent_options_and_effort_reach_the_model(room: ReadyRoom, folde
                   pid=p["id"])
     perf = next(c for c in DP.effective_criteria(store, p["id"], folders["server"]) if c.name == "perf")
     assert (perf.model, perf.effort) == ("haiku", "medium")
+
+
+def test_skills_files_and_drafting(tmp_path: Path, monkeypatch):
+    import asyncio
+    import json
+
+    from carrier.core import skills
+    from carrier.core.llm import FakeBackend
+    from carrier.readyroom import drafting
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "home"))
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    saved = skills.save(proj, "Release Mod", "Use when releasing\na mod.", "1. Build.\n2. Zip.")
+    assert saved["name"] == "release-mod" and saved["description"] == "Use when releasing a mod."
+    text = (proj / ".claude/skills/release-mod/SKILL.md").read_text()
+    assert text.startswith("---\nname: release-mod\ndescription: Use when releasing a mod.\n---")
+    skills.save(None, "notes", "Use when taking notes.", "Write notes.", scope="personal")
+    found = skills.list_skills(proj)
+    assert [s["name"] for s in found["project"]] == ["release-mod"]
+    assert [s["name"] for s in found["personal"]] == ["notes"]
+    skills.save(proj, "ship-mod", "Use when shipping.", "1. Ship.", old_name="release-mod")  # rename
+    assert [s["name"] for s in skills.list_skills(proj)["project"]] == ["ship-mod"]
+    for bad in (("", "d", "b"), ("x", "", "b"), ("x", "d", "")):
+        with pytest.raises(ValueError):
+            skills.save(proj, *bad)
+    skills.delete(proj, "ship-mod")
+    assert skills.list_skills(proj)["project"] == []
+    backend = FakeBackend(lambda s, p: json.dumps({"name": "release-mod", "description": "Use when releasing.",
+                                                   "body": "1. Build."}))
+    out = asyncio.run(drafting.draft_async("skill", "release my mod", backend))
+    assert out == {"name": "release-mod", "description": "Use when releasing.", "body": "1. Build."}
+    assert "Claude Code skills" in backend.calls[0]["system"] and backend.calls[0]["tools"] is None
+
+
+def test_workspace_folder_rules(tmp_path: Path):
+    room = ReadyRoom(Store(tmp_path / "c.db"))
+    ws = tmp_path / "ws"
+    (ws / "mods" / "a").mkdir(parents=True)
+    (ws / "other").mkdir()
+    pid = room.create_project("A", str(ws / "mods" / "a"))["id"]
+    with pytest.raises(RoomError, match="inside"):
+        room.add_folder(pid, str(ws), kind="work")  # contains the main folder
+    p = room.add_folder(pid, str(ws), kind="workspace")
+    assert p["folders"][0]["kind"] == "workspace"
+    p = room.add_folder(pid, str(ws / "other"), kind="work")  # a work folder inside the workspace is fine
+    assert [f["kind"] for f in p["folders"]] == ["workspace", "work"]
+    # Only work folders are reviewed and edited; the workspace isn't one of them.
+    roots = [lbl for lbl, _ in room.store.project_roots(room.store.project(pid))]
+    assert roots == ["", "other"]
+
+
+def test_routines_triggers_and_review_gate(tmp_path: Path):
+    import subprocess
+
+    from carrier.core import gitutil
+    from carrier.readyroom import routines as R
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "a.txt").write_text("1\n")
+    for args in (["init", "-q"], ["config", "user.email", "t@e.com"], ["config", "user.name", "T"],
+                 ["add", "-A"], ["commit", "-qm", "start"]):
+        subprocess.run(["git", *args], cwd=proj, check=True)
+    room = ReadyRoom(Store(tmp_path / "c.db"))
+    pid = room.create_project("P", str(proj), first_task="Build it")["id"]
+    with pytest.raises(R.RoutineError):
+        R.save(room, pid, "", "x")
+    docs = R.save(room, pid, "Update docs", "Update README.md.", "after_task")[0]["id"]
+    R.save(room, pid, "Push", "git push", "manual", "reviewed")
+    push = next(r["id"] for r in room.store.routines(pid) if r["name"] == "Push")
+    # Finishing a task queues the "after each task" routine next — once, and not after itself.
+    build = room.store.tasks(pid)[0]
+    room.finish_task(build["id"], "built")
+    queued = room.store.tasks(pid, statuses=("planned",))
+    assert [t["title"] for t in queued] == ["Update docs"] and queued[0]["routine_id"] == docs
+    room.finish_task(queued[0]["id"], "docs done")
+    assert room.store.tasks(pid, statuses=("planned",)) == []
+    # Run puts a manual routine next; the gate holds it until the review is clear.
+    R.run(room, push)
+    R.run(room, push)  # not twice
+    task = next(t for t in room.store.tasks(pid, statuses=("planned",)) if t["routine_id"] == push)
+    assert len(room.store.tasks(pid, statuses=("planned",))) == 1
+    with pytest.raises(R.RoutineError, match="never been reviewed"):
+        R.check_gate(room.store, task)
+    sha = gitutil.snapshot_worktree(proj)
+    gitutil.set_checkpoint(proj, sha, str(pid))
+    R.check_gate(room.store, task)  # clear now
+    (proj / "b.txt").write_text("new\n")
+    with pytest.raises(R.RoutineError, match="1 changed file"):
+        R.check_gate(room.store, task)
+    (proj / "b.txt").unlink()
+    room.add_task(pid, "Fix review findings (1)", "x", fix_review="r1")
+    with pytest.raises(R.RoutineError, match="fix task"):
+        R.check_gate(room.store, task)
+
+
+def test_task_groups_queues_and_group_routines(tmp_path: Path):
+    from carrier.readyroom import routines as R
+
+    proj = tmp_path / "p"
+    proj.mkdir()
+    room = ReadyRoom(Store(tmp_path / "c.db"))
+    pid = room.create_project("P", str(proj), first_task="Main work")["id"]
+    with pytest.raises(RoomError):
+        room.save_group(pid, "Docs", priority="urgent")
+    gid = room.save_group(pid, "Docs", "normal", "docs, writing")["groups"][0]["id"]
+    room.save_group(pid, "Ideas", "backlog")
+    room.add_task(pid, "Draft guide", group_id=gid)
+    room.add_task(pid, "Draft FAQ", group_id=gid)
+    room.add_task(pid, "Urgent doc", group_id=gid, first=True)
+    # Each queue has its own current task; the main queue is unaffected.
+    assert room.current_task(pid)["title"] == "Main work"
+    assert [t["title"] for t in room.queue(pid, gid)] == ["Urgent doc", "Draft guide", "Draft FAQ"]
+    faq = room.queue(pid, gid)[2]
+    room.move_task(faq["id"], "top")
+    assert room.current_task(pid, gid)["title"] == "Draft FAQ"
+    assert room.current_task(pid)["title"] == "Main work"
+    # A routine tied to the group runs when the group's last task is done (not before).
+    with pytest.raises(R.RoutineError, match="Pick the task group"):
+        R.save(room, pid, "Publish docs", "Publish them.", "group_done")
+    R.save(room, pid, "Publish docs", "Publish them.", "group_done", group_id=gid)
+    R.save(room, pid, "Spell-check", "Check spelling.", "after_task", group_id=gid)
+    for t in list(room.queue(pid, gid)):
+        if not t.get("routine_id"):
+            room.finish_task(t["id"])
+    queued = {t["title"]: t for t in room.queue(pid, gid)}
+    assert "Spell-check" in queued  # after each task of the group, in the group's queue
+    room.finish_task(queued["Spell-check"]["id"])
+    assert [t["title"] for t in room.queue(pid, gid)] == ["Publish docs"]
+    # Finishing a main-queue task doesn't trigger the group's routines.
+    room.finish_task(room.current_task(pid)["id"])
+    assert [t["title"] for t in room.queue(pid, gid)] == ["Publish docs"]
+    take = R.takeoff_queue(room.store)
+    assert [q["title"] for q in take] == ["Publish docs"] and take[0]["group"] == "Docs"
+    # Moving a task between queues; deleting a group moves its tasks to the main queue.
+    t = room.add_task(pid, "Loose idea")["tasks"][-1]
+    ideas = next(g["id"] for g in room.project(pid)["groups"] if g["name"] == "Ideas")
+    room.set_task_group(t["id"], ideas)
+    assert [x["title"] for x in room.queue(pid, ideas)] == ["Loose idea"]
+    room.delete_group(pid, ideas)
+    assert "Loose idea" in [x["title"] for x in room.queue(pid)]
+
+
+def test_reshaping_tasks_is_logged(tmp_path: Path):
+    from carrier.debrief.projects import task_scope_text
+
+    proj = tmp_path / "p"
+    proj.mkdir()
+    room = ReadyRoom(Store(tmp_path / "c.db"))
+    pid = room.create_project("P", str(proj), first_task="Build the editor")["id"]
+    cur = room.current_task(pid)
+    room.update_task(cur["id"], details="- panel layout\n- save button\n- undo")
+    other = room.add_task(pid, "Write the manual", "- intro\n- shortcuts page")["tasks"][-1]
+    # New work: into the current task, or placed in a queue (new group, after a task).
+    room.add_to_task(cur["id"], "Keyboard shortcuts", "- Ctrl+S saves", note="Came up while wiring save")
+    assert "### Added: Keyboard shortcuts" in room.store.task(cur["id"])["details"]
+    t = room.place_task(pid, "Icons", "- draw icons", new_group={"name": "Art", "priority": "low"}, by="claude")
+    assert room.store.task_group(t["group_id"])["name"] == "Art"
+    t2 = room.place_task(pid, "Tooltips", "", position=f"after:{cur['id']}")
+    assert [x["title"] for x in room.queue(pid)][:2] == ["Build the editor", "Tooltips"]
+    # Pull part of another task in; then split part of the current task out.
+    room.merge_tasks(cur["id"], other["id"], part="- shortcuts page", remaining="- intro", note="Needed now")
+    assert room.store.task(other["id"])["details"] == "- intro"
+    assert "From task “Write the manual” (part)" in room.store.task(cur["id"])["details"]
+    new = room.split_task(cur["id"], "- panel layout\n- save button", "Undo support", "- undo", note="Too big")
+    assert new["title"] == "Undo support" and room.store.task(cur["id"])["details"] == "- panel layout\n- save button"
+    # Pull a whole task in: it's closed as merged, not lost.
+    room.merge_tasks(cur["id"], t2["id"])
+    assert room.store.task(t2["id"])["status"] == "dropped"
+    kinds = [e["kind"] for e in room.task_history(cur["id"])]
+    assert kinds == ["created", "edited", "scope_added", "merged_in", "split_out", "merged_in"]
+    split = next(e for e in room.task_history(cur["id"]) if e["kind"] == "split_out")
+    assert "- undo" in split["removed"] and "Ctrl+S" in split["removed"]  # what left the task is recorded
+    assert room.task_history(other["id"])[-1]["kind"] == "merged_away"
+    with pytest.raises(RoomError):
+        room.merge_tasks(cur["id"], cur["id"])
+    # Reviews get each task's final scope and its changes, with removals called out.
+    room.store.update_task(cur["id"], status="active")
+    text = task_scope_text(room.store, pid, proj)
+    assert "Task #%d: Build the editor" % cur["id"] in text and "REMOVED from the task" in text
+
+
+def test_database_is_backed_up_before_an_upgrade(tmp_path: Path):
+    import sqlite3
+
+    from carrier.core import db as D
+
+    path = tmp_path / "carrier.db"
+    Store(path)  # current version: nothing to back up
+    assert not (tmp_path / "backups").exists()
+    with sqlite3.connect(path) as c:  # pretend it's an older version
+        c.execute("DROP TABLE task_edits")
+        c.execute("INSERT INTO settings(key, value) VALUES ('marker', ?)", ('"keep me"',))
+    s = Store(path)
+    assert s.backup is not None and s.backup.parent == tmp_path / "backups"
+    with sqlite3.connect(s.backup) as c:
+        assert c.execute("SELECT value FROM settings WHERE key='marker'").fetchone()[0] == '"keep me"'
+    assert s.get_setting("marker") == "keep me"  # upgraded in place, data kept
+    for i in range(7):
+        (tmp_path / "backups" / f"carrier-2000010{i}-000000.db").write_text("")
+    D.backup_database(path)
+    assert len(list((tmp_path / "backups").glob("carrier-*.db"))) == D.MAX_BACKUPS
+
+
+def test_templates_carry_groups_routines_skills_and_agents(tmp_path: Path, monkeypatch):
+    from carrier.core import skills
+    from carrier.readyroom import routines as R
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "home"))
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(); b.mkdir()
+    room = ReadyRoom(Store(tmp_path / "c.db"))
+    pid = room.create_project("Read Aloud", str(a))["id"]
+    gid = room.save_group(pid, "Release", "high", "ship")["groups"][0]["id"]
+    R.save(room, pid, "Push", "git push", "group_done", "reviewed", group_id=gid, mode="acceptEdits")
+    skills.save(a, "release-mod", "Use when releasing.", "1. Zip it.")
+    room.store.add_review_agent(project_id=pid, name="magic-numbers", title="Magic numbers", prompt="Flag them.")
+    tid = room.template_from_project(pid, "Release-ready")[0]["id"]
+    new = room.create_project("Puppeteer", str(b), template_id=tid)["id"]
+    g = room.store.task_groups(new)[0]
+    assert (g["name"], g["priority"], g["tags"]) == ("Release", "high", ["ship"])
+    r = room.store.routines(new)[0]
+    assert (r["name"], r["trigger"], r["gate"], r["mode"], r["group_id"]) == ("Push", "group_done", "reviewed",
+                                                                              "acceptEdits", g["id"])
+    assert skills.list_skills(b)["project"][0]["name"] == "release-mod"
+    assert room.store.review_agents(new)[0]["name"] == "magic-numbers"
+    # Editing the template's text keeps what it copies.
+    room.save_template("Release-ready", goal="Ship mods.", tid=tid)
+    assert room.store.template(tid)["extras"]["routines"][0]["name"] == "Push"
+
+
+def test_review_gate_is_cached_until_something_changes(tmp_path: Path, monkeypatch):
+    import subprocess
+
+    from carrier.readyroom import routines as R
+
+    proj = tmp_path / "p"
+    proj.mkdir()
+    (proj / "a.txt").write_text("1\n")
+    for args in (["init", "-q"], ["config", "user.email", "t@e.com"], ["config", "user.name", "T"],
+                 ["add", "-A"], ["commit", "-qm", "start"]):
+        subprocess.run(["git", *args], cwd=proj, check=True)
+    room = ReadyRoom(Store(tmp_path / "c.db"))
+    pid = room.create_project("P", str(proj))["id"]
+    R.invalidate()
+    calls = []
+    real = R._review_blockers
+    monkeypatch.setattr(R, "_review_blockers", lambda s, p: calls.append(p) or real(s, p))
+    first = R.review_blockers(room.store, pid)
+    assert R.review_blockers(room.store, pid) == first and len(calls) == 1  # cached
+    R.invalidate(pid)
+    R.review_blockers(room.store, pid)
+    assert len(calls) == 2
+    R.review_blockers(room.store, pid, fresh=True)  # starting a gated routine always checks now
+    assert len(calls) == 3
+
+
+def test_secrets_scan_gate_and_gitignore(tmp_path: Path):
+    import subprocess
+
+    from carrier.core import secrets
+    from carrier.readyroom import routines as R
+
+    key = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
+    hits = secrets.scan_text(f'token = "{key}"\napi_key = "YOUR_KEY_HERE_123"\nkey = os.environ["X"]\n', "a.py")
+    assert [(h["kind"], h["line"]) for h in hits] == [("GitHub token", 1)] and key not in hits[0]["preview"]
+    assert secrets.scan_text("-----BEGIN OPENSSH PRIVATE KEY-----")[0]["kind"] == "private key"
+    assert secrets.scan_text("db = 'postgres://bob:hunter22@localhost/x'")[0]["kind"] == "password in URL"
+
+    proj = tmp_path / "p"
+    proj.mkdir()
+    (proj / "app.py").write_text(f'TOKEN = "{key}"\n')
+    (proj / ".env").write_text("SECRET=1\n")
+    (proj / ".env.example").write_text("SECRET=\n")
+    (proj / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\0\0" + key.encode())
+    for args in (["init", "-q"], ["config", "user.email", "t@e.com"], ["config", "user.name", "T"]):
+        subprocess.run(["git", *args], cwd=proj, check=True)
+    room = ReadyRoom(Store(tmp_path / "c.db"))
+    pid = room.create_project("P", str(proj))["id"]
+    R.invalidate()
+    found = R.secret_hits(room.store, pid)
+    assert [(h["path"], h["kind"]) for h in found] == [("app.py", "GitHub token")]  # not the binary file
+    assert any("Possible secret (GitHub token) in app.py line 1" in b for b in R.review_blockers(room.store, pid))
+    R.mark_secret_safe(room.store, pid, found[0]["fingerprint"])
+    assert R.secret_hits(room.store, pid) == []
+    (proj / "app.py").write_text(f'TOKEN = "{key}"  # changed\n')
+    assert len(R.secret_hits(room.store, pid)) == 1  # a changed line is reported again
+    # Key files git would publish, and the one-click .gitignore fix.
+    assert [f["path"] for f in secrets.unignored_secret_files(proj)] == [".env"]
+    added = secrets.ignore_secret_files(proj)
+    assert ".env" in added and "!.env.example" in added
+    assert secrets.unignored_secret_files(proj) == []
+    assert secrets.ignore_secret_files(proj) == []  # only once
+    assert (proj / ".env.example").exists() and ".env.example" in subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"], cwd=proj, capture_output=True, text=True).stdout
+
+
+def test_review_findings_secrets_gitignore_and_first_commit(tmp_path: Path):
+    import subprocess
+
+    from carrier.core import secrets
+    from carrier.readyroom import importer
+
+    for line in ("DB_PASSWORD=Sup3rS3cretValue9", "export AWS_SECRET_ACCESS_KEY=abcdEFGH1234ijklMNOP5678",
+                 "-----BEGIN PGP PRIVATE KEY BLOCK-----", "x" * 3000 + "-----BEGIN RSA PRIVATE KEY-----"):
+        assert secrets.scan_text(line), line
+    for line in ("tokens_count = 1234567890123", "api_key = YOUR_KEY_HERE", "password = ${DB_PASSWORD}"):
+        assert not secrets.scan_text(line), line
+    assert secrets.decode("ghp_x".encode("utf-16")) == "ghp_x"  # PowerShell writes UTF-16
+    # .gitignore: kept byte for byte (encoding, CRLF), exceptions always last.
+    gi = tmp_path / ".gitignore"
+    gi.write_bytes("caf\xe9/\r\n!.env.example\r\n".encode("cp1252"))
+    secrets.append_gitignore(gi, [".env", ".env.*", "!.env.example"], "test")
+    raw = gi.read_bytes()
+    assert raw.startswith("caf\xe9/\r\n!.env.example\r\n".encode("cp1252")) and raw.endswith(b"!.env.example\r\n")
+    # A workspace inside an empty parent repository gets its own history; the parent is untouched.
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    (home / "Documents" / "taxes.txt").write_text("private\n")
+    subprocess.run(["git", "init", "-q"], cwd=home, check=True)
+    ws = home / "ws"
+    ws.mkdir()
+    (ws / "a.txt").write_text("1\n")
+    importer.first_commit(ws, [".env"])
+    assert (ws / ".git").exists()
+    assert subprocess.run(["git", "ls-files"], cwd=ws, capture_output=True, text=True).stdout.split() == \
+        [".gitignore", "a.txt"]
+    assert subprocess.run(["git", "rev-parse", "--verify", "-q", "HEAD"], cwd=home, capture_output=True).returncode != 0

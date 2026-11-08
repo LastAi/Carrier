@@ -28,6 +28,8 @@ the deterministic part easy to test.
 from __future__ import annotations
 
 import hashlib
+import os
+import re
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -40,7 +42,7 @@ from carrier.core.llm import Backend
 from carrier.debrief.models import Review
 from carrier.core.notes import Note, collect_notes
 from carrier.debrief.ranking import rank
-from carrier.debrief.segment import segment
+from carrier.debrief.segment import group_by_file, segment
 from carrier.debrief.store import find_by_fingerprint, is_stale, save_review, supersede
 from carrier.debrief.transcripts import (collect_events, find_transcripts, link_events, now_iso, parse_transcript,
                                          user_requests)
@@ -50,6 +52,33 @@ Progress = Callable[[str], None]
 # Lookback before the base commit when matching transcripts, so an edit
 # made moments before a commit is not missed.
 TRANSCRIPT_SLACK_SECONDS = 15 * 60
+
+
+SCAN_NOTE = """This is a whole-project scan, not a review of recent changes: every file is shown as if newly
+added, so judge the code as it stands. Don't flag something just for being new or for missing history; flag
+only what your instructions ask about."""
+SCAN_MAX_FILES = 400
+SCAN_MAX_FILE_LINES = 3000
+SCAN_SKIP = re.compile(r"(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|Cargo\.lock|"
+                       r"[^/]+\.min\.(js|css)|[^/]+\.map)$")
+
+
+def scan_files(files: list) -> tuple[list, str]:
+    """The files a scan looks at: text files of a sensible size, at most SCAN_MAX_FILES."""
+    keep, skipped = [], {"generated or lock files": 0, "files too long": 0, "binary files": 0, "over the limit": 0}
+    for f in files:
+        lines = sum(len(h.lines) for h in f.hunks)
+        if SCAN_SKIP.search(f.path):
+            skipped["generated or lock files"] += 1
+        elif not f.hunks:
+            skipped["binary files"] += 1
+        elif lines > SCAN_MAX_FILE_LINES:
+            skipped["files too long"] += 1
+        elif len(keep) >= SCAN_MAX_FILES:
+            skipped["over the limit"] += 1
+        else:
+            keep.append(f)
+    return keep, ", ".join(f"{n} {what}" for what, n in skipped.items() if n)
 
 
 class NothingToReview(Exception):
@@ -98,6 +127,8 @@ async def prepare(
     context: str = "",
     criteria: list[Criterion] | None = None,
     task_lookup: TaskLookup | None = None,
+    scope: Path | None = None,
+    scan: bool = False,
 ) -> Review:
     """Prepare a review of ``repo`` (plus a Carrier project's extra folders).
 
@@ -107,29 +138,40 @@ async def prepare(
     tasks) is given to every agent as a note. ``criteria`` replaces the
     file-based criteria (Ready Room manages them for projects).
     ``task_lookup(path, since)`` names the Flight Deck tasks that edited a
-    file, so each item can say which task it came from.
+    file, so each item can say which task it came from. ``scope`` is the main
+    folder when it is a subfolder of ``repo``: only its changes are reviewed.
     """
     cfg = load_config(repo)
     # A project keeps its own checkpoints (see gitutil.checkpoint_ref).
     ns = str(project["id"]) if project and project.get("id") is not None else None
 
-    # 1–3. base, snapshot and diff, for every folder
+    # 1–3. base, snapshot and diff, for every folder. A folder may be a
+    # subfolder of a bigger repository (``scope``, or an extra folder): its
+    # diff is limited to that folder, with paths relative to it. Folders in
+    # the same repository share one snapshot (and so one checkpoint).
     parts: list[dict] = []
-    for label, root, ref in [("", repo, from_ref)] + [(lbl, Path(r), None) for lbl, r in extras or []]:
+    snapshots: dict[str, str] = {}
+    main_folder = Path(scope) if scope is not None else repo
+    for label, folder, ref in [("", main_folder, from_ref)] + [(lbl, Path(r), None) for lbl, r in extras or []]:
+        root, sub = gitutil.locate(folder) if label or scope is not None else (repo, "")
         part_cfg = cfg if not label else load_config(root)
-        base, how = resolve_base(root, part_cfg, ref, ns)
+        base, how = (gitutil.EMPTY_TREE, "as they are now (whole-project scan)") if scan else \
+            resolve_base(root, part_cfg, ref, ns)
         progress(f"Reviewing changes {how}." if not label else f"Folder {label}: changes {how}.")
-        target = gitutil.snapshot_worktree(root)
-        parts.append({"label": label, "repo": root, "base": base, "target": target,
-                      "raw": gitutil.diff_text(root, base, target),
+        key = os.path.normcase(os.path.realpath(root))
+        if key not in snapshots:
+            snapshots[key] = gitutil.snapshot_worktree(root)
+        target = snapshots[key]
+        parts.append({"label": label, "repo": root, "sub": sub, "folder": folder, "base": base,
+                      "target": target, "raw": gitutil.diff_text(root, base, target, sub),
                       "checkpoint_at_prepare": gitutil.get_checkpoint(root, ns)})
     if not any(pt["raw"].strip() for pt in parts):
         main_how = resolve_base(repo, cfg, from_ref, ns)[1]
         raise NothingToReview(f"No changes {main_how}.")
 
     # 4. reuse an identical prepared review
-    fingerprint = hashlib.sha256("\n".join(f"{pt['label']}\n{pt['base']}\n{pt['raw']}" for pt in parts)
-                                 .encode()).hexdigest()[:16]
+    fingerprint = hashlib.sha256(("scan\n" if scan else "") .encode() + "\n".join(
+        f"{pt['label']}\n{pt['base']}\n{pt['raw']}" for pt in parts).encode()).hexdigest()[:16]
     existing = find_by_fingerprint(cfg, fingerprint) if reuse else None
     if existing and not is_stale(cfg, existing):
         progress("Already prepared — reusing it.")
@@ -150,38 +192,49 @@ async def prepare(
                 if pt["label"]:
                     h.path = f"{pt['label']}/{h.path}"
             files.append(f)
+    if scan:
+        files, dropped = scan_files(files)
+        if dropped:
+            warnings_scan = [f"Left out of the scan: {dropped}."]
+        else:
+            warnings_scan = []
     progress(f"{len(files)} file(s), {sum(len(f.hunks) for f in files)} hunk(s) changed.")
 
     # 5–6. notes and Claude Code edit events
     notes, warnings = collect_notes(cfg)
     if context.strip():
         notes.insert(0, Note(path="carrier:project", text=context.strip()))
+    if scan:
+        warnings += warnings_scan
     since_by_label: dict[str, float | None] = {}
     events = []
-    for pt in parts:
+    for pt in parts if not scan else []:  # a scan has no history to explain
         base_time = gitutil.commit_time(pt["repo"], pt["base"])
         since = base_time - TRANSCRIPT_SLACK_SECONDS if base_time else None
         since_by_label[pt["label"]] = since
         if not pt["label"]:
-            events += collect_events(repo, since)
+            events += collect_events(main_folder, since)
             continue
         # Sessions usually run in the main folder and reach into the extra
         # one, so read both folders' transcripts, relative to the extra folder.
-        for t in sorted(set(find_transcripts(repo)) | set(find_transcripts(pt["repo"]))):
-            for e in parse_transcript(t, pt["repo"], since):
+        for t in sorted(set(find_transcripts(main_folder)) | set(find_transcripts(pt["folder"]))):
+            for e in parse_transcript(t, pt["folder"], since):
                 e.path = f"{pt['label']}/{e.path}"
                 events.append(e)
     events.sort(key=lambda e: e.timestamp)
     requests = user_requests(events)
     progress(f"{len(notes)} note file(s); {len(events)} Claude Code edit(s) on record.")
-    if not events:
+    if not events and not scan:
         warnings.append("No Claude Code session record found for this range — "
                         "the guide will say when a reason is unknown.")
 
-    # 7. group into items
+    # 7. group into items (a scan reviews file by file)
     progress("Grouping changes…")
-    items, w = await segment(files, requests, cfg, backend)
-    warnings += w
+    if scan:
+        items = group_by_file(files)
+    else:
+        items, w = await segment(files, requests, cfg, backend)
+        warnings += w
 
     review_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     n = 2
@@ -205,9 +258,12 @@ async def prepare(
         checkpoint_ns=ns,
         project_id=(project or {}).get("id"),
         project_name=(project or {}).get("name", ""),
-        parts=[{"label": pt["label"], "repo": str(pt["repo"]), "base": pt["base"], "target": pt["target"],
-                "checkpoint_at_prepare": pt["checkpoint_at_prepare"]} for pt in parts[1:]],
+        parts=[{"label": pt["label"], "repo": str(pt["repo"]), "sub": pt["sub"], "base": pt["base"],
+                "target": pt["target"], "checkpoint_at_prepare": pt["checkpoint_at_prepare"]}
+               for pt in parts[1:]],
+        sub=parts[0]["sub"],
         context=context.strip(),
+        scan=scan,
     )
     for pt in parts:
         gitutil.keep_snapshot(pt["repo"], review.id, pt["target"])
@@ -237,7 +293,8 @@ async def prepare(
         raise
     # 10. save
     save_review(cfg, review)  # the only write — a cancelled prepare saves nothing
-    supersede(cfg, keep_id=review.id)
+    if not scan:  # a scan sits beside the project's normal review
+        supersede(cfg, keep_id=review.id)
     flagged = sum(1 for i in review.items if i.flags)
     progress(f"Ready: {len(review.items)} item(s), {flagged} flagged.")
     return review

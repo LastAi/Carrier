@@ -19,6 +19,12 @@ playwright = pytest.importorskip("playwright.sync_api")
 
 
 def drafter(system: str, prompt: str) -> str:
+    if "You write tasks" in system:
+        assert "Tasks already queued" in prompt
+        return json.dumps({"title": "Make old saves load", "details": "- Handle v1 files\n- Add a test"})
+    if "You write routines" in system:
+        return json.dumps({"name": "Push to GitHub", "instructions": "- Commit and push.", "trigger": "manual",
+                           "gate": "reviewed"})
     if "review agents for Debrief" in system:
         return json.dumps({"title": "Save compatibility", "severity": "high",
                            "prompt": "Flag changes that stop old <b>save files</b> from loading."})
@@ -140,3 +146,57 @@ def test_new_project_shows_up_in_debrief(rrpage):
     page.click("#db-folders button:text('Start tracking')")
     page.wait_for_selector("#folder-ready:not(.hidden)")
     assert page.locator("#db-folders li.ok").count() == 1
+
+
+def test_work_area_width_and_centring(rrpage):
+    pg, api, _backend = rrpage
+    pg.set_viewport_size({"width": 2560, "height": 1000})
+    pg.click(".tool[data-tool=readyroom]")
+    pg.wait_for_selector("#rr-pane-intro:not(.hidden)")
+    box = pg.locator("#rr-pane-intro").bounding_box()
+    assert box["width"] <= 961  # normal width, left-aligned
+    left = box["x"]
+    pg.click("#btn-settings")
+    pg.select_option("#content-width", "wide")
+    pg.check("#content-center")
+    pg.click("#settings-close")
+    pg.wait_for_timeout(300)
+    box = pg.locator("#rr-pane-intro").bounding_box()
+    assert 1400 <= box["width"] <= 1441 and box["x"] > left + 200  # wider and centred
+    s = api.settings()["data"]
+    assert s["content_width"] == "wide" and s["content_center"] is True
+
+
+def test_draft_tasks_and_routines(rrpage):
+    pg, api, _backend = rrpage
+    pg.click(".tool[data-tool=readyroom]")
+    pg.click("#rr-new-btn")
+    pg.click("#rrn-folder-btn")
+    pg.fill("#rrn-task", "first task")
+    pg.click("#rrn-create")
+    pg.wait_for_selector("#rr-pane-project:not(.hidden)")
+    # A task: title and details come back for editing; nothing is added until "Add task".
+    pg.click(".draft-btn[data-draft=task]")
+    pg.fill("#draft-desc", "old saves crash")
+    pg.click("#draft-go")
+    pg.wait_for_selector("#draft-result:not(.hidden)")
+    assert pg.input_value("#draft-agent-title") == "Make old saves load"
+    pg.click("#draft-use")
+    assert pg.input_value("#rrp-task-title") == "Make old saves load"
+    assert pg.input_value("#rrp-task-details").startswith("- Handle v1 files")
+    pg.click("#rrp-task-add")
+    pg.wait_for_selector("#rrp-tasks >> text=Make old saves load")
+    pid = api.rr_overview()["data"]["projects"][0]["id"]
+    added = [t for t in api.rr_project(pid)["data"]["tasks"] if t["title"] == "Make old saves load"][0]
+    assert "Add a test" in added["details"]
+    # A routine: name, instructions, trigger and gate are filled into the form.
+    pg.click(".draft-btn[data-draft=routine]")
+    pg.fill("#draft-desc", "push when reviewed")
+    pg.click("#draft-go")
+    pg.wait_for_selector("#draft-routine-row:not(.hidden)")
+    assert pg.input_value("#draft-gate") == "reviewed"
+    pg.click("#draft-use")
+    assert pg.input_value("#rro-name") == "Push to GitHub" and pg.input_value("#rro-gate") == "reviewed"
+    assert pg.input_value("#rro-text") == "- Commit and push."
+    pg.click("#rro-save")
+    pg.wait_for_selector(".routine-row >> text=Push to GitHub")

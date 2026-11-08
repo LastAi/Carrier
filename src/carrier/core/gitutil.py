@@ -86,6 +86,28 @@ def is_repo(folder: Path) -> bool:
         return False
 
 
+def in_repo(folder: Path) -> bool:
+    """True if ``folder`` is inside a git repository (its top folder or below)."""
+    try:
+        return Path(folder).is_dir() and bool(repo_root(Path(folder)))
+    except GitError:
+        return False
+
+
+def locate(folder: Path) -> tuple[Path, str]:
+    """``(repository top folder, folder's POSIX path inside it)``; "" for the top itself.
+
+    A Carrier folder may be a subfolder of a bigger repository (several
+    projects split out of one workspace); its reviews are scoped to it.
+    """
+    root = repo_root(Path(folder))
+    rel = os.path.relpath(os.path.realpath(folder), os.path.realpath(root))
+    rel = "" if rel == "." else Path(rel).as_posix()
+    if rel.startswith(".."):
+        raise GitError(f"{folder} is not inside {root}")
+    return root, rel
+
+
 def resolve(repo: Path, ref: str) -> str | None:
     """Resolve ``ref`` to a full SHA, or ``None`` if it does not exist."""
     out = git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", check=False).strip()
@@ -148,15 +170,19 @@ def drop_snapshot(repo: Path, review_id: str) -> None:
     git(repo, "update-ref", "-d", review_ref(review_id), check=False)
 
 
-def diff_text(repo: Path, base: str, target: str) -> str:
+def diff_text(repo: Path, base: str, target: str, sub: str = "") -> str:
     """Raw unified diff between two commits (rename detection on).
+
+    ``sub`` limits it to one folder of the repository, with paths relative to
+    that folder (see :func:`locate`).
 
     Read as bytes and decoded without newline translation: text mode would
     turn a lone ``\r`` inside a line into a line break and corrupt the diff.
     """
+    scope = [f"--relative={sub}"] if sub else []
     proc = subprocess.run(
         ["git", "-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "-M",
-         "-U3", base, target, "--", ".", f":(exclude){CARRIER_PATH}"],
+         "-U3", *scope, base, target, "--", sub or ".", f":(exclude){CARRIER_PATH}"],
         cwd=repo, capture_output=True,
     )
     if proc.returncode != 0:

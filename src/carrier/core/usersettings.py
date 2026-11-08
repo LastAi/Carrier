@@ -30,6 +30,11 @@ DEFAULTS: dict[str, Any] = {
     "custom_colors": {},  # key -> "#rrggbb", see themes.KEYS
     "diff_mode": "unified",  # "unified" | "split"
     "font_size": 14,  # desktop app only
+    "content_width": "normal",  # desktop app: "normal" | "wide" | "wider" | "full" (see web/app.js)
+    "content_center": False,  # desktop app: centre the work area in wide windows
+    "alerts_flash": True,  # desktop app: flash the taskbar button when Claude needs you
+    "alerts_sound": False,  # desktop app: a short chime when Claude needs you
+    "alerts_dnd": False,  # desktop app: do not disturb — only the badge, no banner/flash/sound
     "recent_repos": [],  # most recent first
     "fd_policy": "warn",  # Flight Deck: what happens when sessions overlap (see flightdeck/manager.py)
 }

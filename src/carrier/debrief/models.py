@@ -36,6 +36,7 @@ Decision
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 # Diff types are shared with other Carrier tools, so they live in core.
@@ -210,6 +211,12 @@ class Review:
     # Whose checkpoints this review moves: the project id, or None for a
     # plain folder review (see gitutil.checkpoint_ref).
     checkpoint_ns: str | None = None
+    # The main folder's path inside ``repo`` when it is a subfolder of a
+    # bigger repository ("" = the repository itself); the review covers only it.
+    sub: str = ""
+    # A whole-project scan (no history): every file is reviewed as it is now,
+    # by the agents the user picked; finishing it moves no checkpoint.
+    scan: bool = False
 
     # -- helpers -----------------------------------------------------------
 
@@ -237,9 +244,20 @@ class Review:
 
     def all_parts(self) -> list[dict[str, Any]]:
         """Every reviewed folder, the main one (label "") first."""
-        main = {"label": "", "repo": self.repo, "base": self.base, "target": self.target,
+        main = {"label": "", "repo": self.repo, "sub": self.sub, "base": self.base, "target": self.target,
                 "checkpoint_at_prepare": self.checkpoint_at_prepare}
         return [main, *self.parts]
+
+    @staticmethod
+    def part_folder(part: dict[str, Any]) -> str:
+        """The reviewed folder of one part (a repository, or a folder inside one)."""
+        sub = part.get("sub") or ""
+        return str(Path(part["repo"]) / sub) if sub else str(part["repo"])
+
+    @property
+    def folder(self) -> str:
+        """The main reviewed folder; agents work from here."""
+        return self.part_folder(self.all_parts()[0])
 
     def item(self, item_id: str) -> ChangeItem | None:
         return next((i for i in self.items if i.id == item_id), None)

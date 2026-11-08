@@ -38,6 +38,7 @@ readers and a writer work at the same time.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -65,6 +66,51 @@ CREATE TABLE IF NOT EXISTS tasks (
     origin_path TEXT,                             -- where a standalone task's files are
     created     REAL NOT NULL,
     finished    REAL
+);
+CREATE TABLE IF NOT EXISTS task_edits (        -- every change to a task's scope or place (audit trail)
+    id          INTEGER PRIMARY KEY,
+    task_id     INTEGER NOT NULL,                 -- kept after the task is deleted
+    project_id  INTEGER,
+    ts          REAL NOT NULL,
+    kind        TEXT NOT NULL,                    -- created | edited | scope_added | merged_in | merged_away |
+                                                  -- split_out | moved | status | deleted
+    by          TEXT NOT NULL DEFAULT 'you',      -- you | claude (approved by you) | routine | debrief
+    session_id  INTEGER,
+    note        TEXT NOT NULL DEFAULT '',         -- why (shown in reviews)
+    before      TEXT NOT NULL DEFAULT '',         -- JSON {title, details, ...} before
+    after       TEXT NOT NULL DEFAULT '',         -- JSON after
+    removed     TEXT NOT NULL DEFAULT ''          -- lines that left the task's details (possible descoping)
+);
+CREATE INDEX IF NOT EXISTS task_edits_task ON task_edits(task_id, ts);
+CREATE TABLE IF NOT EXISTS project_events (    -- the project's activity log, besides task changes
+    id          INTEGER PRIMARY KEY,
+    project_id  INTEGER NOT NULL,                 -- kept after the project is deleted
+    ts          REAL NOT NULL,
+    subject     TEXT NOT NULL,                    -- project | folder | group | routine | rule | skill | review | images
+    action      TEXT NOT NULL,                    -- e.g. "changed goal", "added work folder lib"
+    by          TEXT NOT NULL DEFAULT 'you',
+    session_id  INTEGER,
+    detail      TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS project_events_project ON project_events(project_id, ts);
+CREATE TABLE IF NOT EXISTS task_groups (       -- a project's extra task queues (readyroom/manager.py)
+    id          INTEGER PRIMARY KEY,
+    project_id  INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    priority    TEXT NOT NULL DEFAULT 'normal',  -- high | normal | low | backlog
+    tags        TEXT NOT NULL DEFAULT '[]',
+    position    REAL NOT NULL DEFAULT 0,
+    created     REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS routines (          -- repeatable tasks (readyroom/routines.py)
+    id           INTEGER PRIMARY KEY,
+    project_id   INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    instructions TEXT NOT NULL DEFAULT '',
+    trigger      TEXT NOT NULL DEFAULT 'manual',   -- manual | after_task
+    gate         TEXT NOT NULL DEFAULT 'none',     -- none | reviewed
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    created      REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS rule_sets (
     id          INTEGER PRIMARY KEY,
@@ -193,6 +239,9 @@ _MIGRATIONS: dict[str, dict[str, str]] = {
     "sessions": {"task_id": "INTEGER", "policy": "TEXT", "preset_id": "INTEGER", "effort": "TEXT"},
     "events": {"path": "TEXT"},
     "review_agents": {"model": "TEXT", "effort": "TEXT"},
+    "tasks": {"routine_id": "INTEGER", "fix_review": "TEXT", "group_id": "INTEGER"},
+    "routines": {"group_id": "INTEGER", "mode": "TEXT NOT NULL DEFAULT ''"},
+    "templates": {"extras": "TEXT NOT NULL DEFAULT '{}'"},
     "presets": {"effort": "TEXT"},
 }
 
@@ -211,12 +260,34 @@ def default_path() -> Path:
     return new
 
 
-FOLDER_KINDS = ("work", "reference")
+FOLDER_KINDS = ("work", "reference", "workspace")
 
 
 def folder_kind(folder: dict[str, Any]) -> str:
-    """An extra folder's kind: "work" (read and edit; reviewed) or "reference" (read only)."""
-    return "reference" if folder.get("kind") == "reference" else "work"
+    """An extra folder's kind: "work" (read and edit; reviewed), "reference" (read only), or
+    "workspace" (a shared parent folder: its contents are read only, but a *new* folder the
+    project creates there is added to the project as a work folder)."""
+    kind = folder.get("kind")
+    return kind if kind in ("reference", "workspace") else "work"
+
+
+MAX_BACKUPS = 5
+
+
+def backup_database(path: Path) -> Path:
+    """Copy the database (consistently, even mid-write) to ``backups/`` beside it before an
+    upgrade; keeps the newest MAX_BACKUPS. Returns the backup's path."""
+    folder = path.parent / "backups"
+    folder.mkdir(exist_ok=True)
+    target = folder / f"{path.stem}-{time.strftime('%Y%m%d-%H%M%S')}{path.suffix}"
+    with sqlite3.connect(path) as src, sqlite3.connect(target) as dst:
+        src.backup(dst)
+    for old in sorted(folder.glob(f"{path.stem}-*{path.suffix}"))[:-MAX_BACKUPS]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+    return target
 
 
 class Store:
@@ -225,9 +296,31 @@ class Store:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self._write_lock = threading.Lock()  # one writer at a time, process-wide
+        self.backup: Path | None = None  # set when an upgrade made a backup first
+        if path.exists() and self._needs_upgrade(path):
+            self.backup = backup_database(path)
         with self._conn() as c:
             c.executescript(SCHEMA)
             self._migrate(c)
+
+    @staticmethod
+    def _needs_upgrade(path: Path) -> bool:
+        """True if this (existing) database lacks a table or column the current version uses."""
+        tables = set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", SCHEMA))
+        try:
+            with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True) as c:
+                have = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if not have:
+                    return False  # empty file: nothing to protect
+                if tables - have:
+                    return True
+                for table, cols in _MIGRATIONS.items():
+                    present = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+                    if set(cols) - present:
+                        return True
+        except sqlite3.Error:
+            return False  # can't tell; opening it normally will report the real problem
+        return False
 
     @staticmethod
     def _migrate(c: sqlite3.Connection) -> None:
@@ -352,7 +445,7 @@ class Store:
     # -- tasks -----------------------------------------------------------------
 
     TASK_FIELDS = ("project_id", "title", "details", "status", "position", "cwd", "summary", "origin",
-                   "origin_path", "finished")
+                   "origin_path", "finished", "routine_id", "fix_review", "group_id")
 
     def add_task(self, title: str, project_id: int | None = None, **fields: Any) -> int:
         if "position" not in fields:
@@ -462,17 +555,18 @@ class Store:
         rows = self._q("SELECT * FROM presets WHERE id=?", (pid,))
         return rows[0] if rows else None
 
-    TEMPLATE_FIELDS = ("name", "goal", "rules", "rule_set_ids", "tags", "first_task", "preset_id")
+    TEMPLATE_FIELDS = ("name", "goal", "rules", "rule_set_ids", "tags", "first_task", "preset_id", "extras")
 
     @staticmethod
     def _template_row(r: dict[str, Any]) -> dict[str, Any]:
         r["rule_set_ids"] = json.loads(r["rule_set_ids"] or "[]")
         r["tags"] = json.loads(r["tags"] or "[]")
+        r["extras"] = json.loads(r.get("extras") or "{}")
         return r
 
     def _template_values(self, fields: dict[str, Any]) -> dict[str, Any]:
         fields = {k: v for k, v in fields.items() if k in self.TEMPLATE_FIELDS}
-        for k in ("rule_set_ids", "tags"):
+        for k in ("rule_set_ids", "tags", "extras"):
             if k in fields:
                 fields[k] = json.dumps(fields[k])
         return fields
@@ -538,6 +632,120 @@ class Store:
         if fields:
             self._x(f"UPDATE review_agents SET {', '.join(f'{k}=?' for k in fields)} WHERE id=?",
                     (*fields.values(), aid))
+
+    # -- routines (repeatable tasks) --------------------------------------------
+
+    ROUTINE_FIELDS = ("name", "instructions", "trigger", "gate", "enabled", "group_id", "mode")
+
+    def routines(self, project_id: int) -> list[dict[str, Any]]:
+        rows = self._q("SELECT * FROM routines WHERE project_id=? ORDER BY name COLLATE NOCASE", (project_id,))
+        for r in rows:
+            r["enabled"] = bool(r["enabled"])
+        return rows
+
+    def routine(self, rid: int) -> dict[str, Any] | None:
+        rows = self._q("SELECT * FROM routines WHERE id=?", (rid,))
+        if rows:
+            rows[0]["enabled"] = bool(rows[0]["enabled"])
+        return rows[0] if rows else None
+
+    def save_routine(self, project_id: int, rid: int | None = None, **fields: Any) -> int:
+        fields = {k: (int(v) if isinstance(v, bool) else v) for k, v in fields.items() if k in self.ROUTINE_FIELDS}
+        if rid is None:
+            fields.update(project_id=project_id, created=time.time())
+            return self._x(f"INSERT INTO routines({', '.join(fields)}) VALUES ({', '.join('?' for _ in fields)})",
+                           tuple(fields.values()))
+        if fields:
+            self._x(f"UPDATE routines SET {', '.join(f'{k}=?' for k in fields)} WHERE id=? AND project_id=?",
+                    (*fields.values(), rid, project_id))
+        return rid
+
+    # -- task edit log ------------------------------------------------------------
+
+    def log_task_edit(self, task_id: int, kind: str, before: dict[str, Any] | None = None,
+                      after: dict[str, Any] | None = None, by: str = "you", note: str = "",
+                      session_id: int | None = None, project_id: int | None = None) -> None:
+        before, after = before or {}, after or {}
+        old = [ln for ln in str(before.get("details", "")).splitlines() if ln.strip()]
+        new = {ln.strip() for ln in str(after.get("details", "")).splitlines()}
+        removed = [ln for ln in old if ln.strip() not in new] if "details" in after else []
+        self._x("INSERT INTO task_edits(task_id, project_id, ts, kind, by, session_id, note, before, after, removed) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (task_id, project_id, time.time(), kind, by, session_id, note, json.dumps(before), json.dumps(after),
+                 "\n".join(removed)))
+
+    def log_project_event(self, project_id: int, subject: str, action: str, by: str = "you", detail: str = "",
+                          session_id: int | None = None) -> None:
+        self._x("INSERT INTO project_events(project_id, ts, subject, action, by, session_id, detail) "
+                "VALUES (?,?,?,?,?,?,?)", (project_id, time.time(), subject, action, by, session_id, detail[:20000]))
+
+    def project_log(self, project_id: int, limit: int = 500) -> list[dict[str, Any]]:
+        """Everything recorded for a project — task changes and project events — newest first."""
+        tasks = self._q("SELECT e.*, t.title AS task_title FROM task_edits e LEFT JOIN tasks t ON t.id = e.task_id "
+                        "WHERE e.project_id=? ORDER BY e.ts DESC LIMIT ?", (project_id, limit))
+        out = []
+        for r in tasks:
+            title = r["task_title"] or json.loads(r["after"] or "{}").get("title") \
+                or json.loads(r["before"] or "{}").get("title") or f"#{r['task_id']}"
+            out.append({"ts": r["ts"], "subject": "task", "task_id": r["task_id"], "kind": r["kind"],
+                        "action": r["kind"], "title": title, "by": r["by"], "detail": r["note"],
+                        "removed": r["removed"], "session_id": r["session_id"]})
+        for r in self._q("SELECT * FROM project_events WHERE project_id=? ORDER BY ts DESC LIMIT ?",
+                         (project_id, limit)):
+            out.append({**r, "removed": ""})
+        out.sort(key=lambda e: e["ts"], reverse=True)
+        return out[:limit]
+
+    def task_edits(self, task_id: int | None = None, project_id: int | None = None,
+                   since: float = 0) -> list[dict[str, Any]]:
+        if task_id is not None:
+            rows = self._q("SELECT * FROM task_edits WHERE task_id=? AND ts>=? ORDER BY ts, id", (task_id, since))
+        else:
+            rows = self._q("SELECT * FROM task_edits WHERE project_id=? AND ts>=? ORDER BY ts, id", (project_id, since))
+        for r in rows:
+            r["before"] = json.loads(r["before"] or "{}")
+            r["after"] = json.loads(r["after"] or "{}")
+        return rows
+
+    # -- task groups -------------------------------------------------------------
+
+    @staticmethod
+    def _group_row(r: dict[str, Any]) -> dict[str, Any]:
+        r["tags"] = json.loads(r["tags"] or "[]")
+        return r
+
+    def task_groups(self, project_id: int) -> list[dict[str, Any]]:
+        return [self._group_row(r) for r in
+                self._q("SELECT * FROM task_groups WHERE project_id=? ORDER BY position, id", (project_id,))]
+
+    def task_group(self, gid: int) -> dict[str, Any] | None:
+        rows = self._q("SELECT * FROM task_groups WHERE id=?", (gid,))
+        return self._group_row(rows[0]) if rows else None
+
+    def save_task_group(self, project_id: int, gid: int | None = None, **fields: Any) -> int:
+        fields = {k: (json.dumps(v) if k == "tags" else v) for k, v in fields.items()
+                  if k in ("name", "priority", "tags", "position")}
+        if gid is None:
+            rows = self._q("SELECT COALESCE(MAX(position), 0) AS m FROM task_groups WHERE project_id=?", (project_id,))
+            fields.setdefault("position", rows[0]["m"] + 1)
+            fields.update(project_id=project_id, created=time.time())
+            return self._x(f"INSERT INTO task_groups({', '.join(fields)}) VALUES "
+                           f"({', '.join('?' for _ in fields)})", tuple(fields.values()))
+        if fields:
+            self._x(f"UPDATE task_groups SET {', '.join(f'{k}=?' for k in fields)} WHERE id=? AND project_id=?",
+                    (*fields.values(), gid, project_id))
+        return gid
+
+    def delete_task_group(self, gid: int) -> None:
+        """Its tasks move to the main queue; routines tied to it lose the tie."""
+        self._x("UPDATE tasks SET group_id=NULL WHERE group_id=?", (gid,))
+        self._x("UPDATE routines SET group_id=NULL, trigger=CASE WHEN trigger='group_done' THEN 'manual' "
+                "ELSE trigger END WHERE group_id=?", (gid,))
+        self._x("DELETE FROM task_groups WHERE id=?", (gid,))
+
+    def delete_routine(self, rid: int) -> None:
+        self._x("UPDATE tasks SET routine_id=NULL WHERE routine_id=?", (rid,))
+        self._x("DELETE FROM routines WHERE id=?", (rid,))
 
     def delete_review_agent(self, aid: int) -> None:
         self._x("DELETE FROM review_agents WHERE id=?", (aid,))

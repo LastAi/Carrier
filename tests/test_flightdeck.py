@@ -454,3 +454,302 @@ def test_shared_and_reference_folders(deck: FlightDeck, projects, tmp_path: Path
     logged = {(e["project_id"], e["path"]) for e in deck.store._q("SELECT project_id, path FROM edits")}
     assert {(web_id, "server/schema/user.json"), (api_id, "schema/user.json")} <= logged
     deck.end_session(s["id"])
+
+
+def test_questions_and_proposed_rules(deck: FlightDeck, projects):
+    import asyncio
+
+    from carrier.flightdeck import sdk
+
+    s = deck.start_session(projects["DocsSite"], "plan the layout", send_task=False)
+    client = ALL_CLIENTS[-1]
+    # Carrier's propose_rule tool is offered, and needs no permission prompt.
+    assert "carrier" in client.options.mcp_servers and sdk.PROPOSE_RULE in client.options.allowed_tools
+    # AskUserQuestion becomes a question card; the answers go back to Claude Code.
+    deck.send(s["id"], "ask")
+    wait(deck, s["id"], "needs_you")
+    q = events(deck, s["id"], "question")[0]
+    assert q["questions"][0]["options"][0]["label"] == "In place"
+    assert deck.session(s["id"])["pending"][0]["req_id"] == q["req_id"]
+    deck.answer(s["id"], q["req_id"], "answers", {"Which layout?": "In place"})
+    wait(deck, s["id"])
+    assert client.answers == [{"Which layout?": "In place"}]
+    assert events(deck, s["id"], "question_done")[0]["decision"] == "answered"
+    deck.send(s["id"], "ask")
+    wait(deck, s["id"], "needs_you")
+    deck.answer(s["id"], events(deck, s["id"], "question")[1]["req_id"], "skip")
+    wait(deck, s["id"])
+    assert client.answers[-1] is None
+    # propose_rule shows a card; the user's edited version is saved where they choose.
+    runner = deck.runners[s["id"]]
+    tool = sdk.propose_rule_tool(runner._on_propose_rule)
+    out = asyncio.run(tool.handler({"text": "- Keep docs short.", "scope": "project", "why": "You said so"}))
+    assert "rule card" in out["content"][0]["text"]
+    prop = events(deck, s["id"], "rule_proposal")[0]
+    assert prop["text"] == "- Keep docs short." and prop["scope"] == "project"
+    room = deck.room
+    pid = s["project_id"]
+    assert room.apply_rule("- Keep docs very short.", "project", pid).startswith("Added to")
+    assert room.project(pid)["rules"].endswith("- Keep docs very short.")
+    room.apply_rule("- Global one.", "global")
+    assert room.overview()["global"]["rules"].endswith("- Global one.")
+    msg = room.apply_rule("- Shared.", "rule_set", pid, new_rule_set="Docs style")
+    assert "attached" in msg
+    rs = next(r for r in room.store.rule_sets() if r["name"] == "Docs style")
+    assert rs["id"] in room.store.project_rule_set_ids(pid)
+    room.apply_rule("- More.", "rule_set", pid, rule_set_id=rs["id"])
+    assert room.store.rule_set(rs["id"])["body"] == "- Shared.\n- More."
+
+
+def test_workspace_folders_claim_new_folders(deck: FlightDeck, projects, tmp_path: Path):
+    """A workspace folder's existing contents are read only; a new folder Claude
+    creates there joins the project as a work folder."""
+    ws = tmp_path / "ModTools"
+    (ws / "mods" / "Other").mkdir(parents=True)
+    (ws / "mods" / "Other" / "a.txt").write_text("x\n")
+    main = ws / "mods" / "Voice"
+    main.mkdir()
+    room = deck.room
+    pid = room.create_project("Voice", str(main))["id"]
+    room.add_folder(pid, str(ws), kind="workspace")  # may contain the main folder
+    room.add_task(pid, "release tooling")
+    s = deck.start_session(pid, "release tooling", mode="acceptEdits", send_task=False)
+    client = ALL_CLIENTS[-1]
+    assert str(ws) in client.options.add_dirs
+    # Editing an existing folder in the workspace is blocked.
+    deck.send(s["id"], f"write {ws / 'mods' / 'Other' / 'a.txt'} changed")
+    wait(deck, s["id"])
+    assert (ws / "mods" / "Other" / "a.txt").read_text() == "x\n"
+    # Writing into a new folder there adds it as a work folder, and the edit goes ahead.
+    deck.send(s["id"], f"write {ws / 'tools' / 'release' / 'export.sh'} echo hi")
+    wait(deck, s["id"])
+    assert (ws / "tools" / "release" / "export.sh").read_text() == "echo hi\n"
+    folders = {f["label"]: f for f in room.project(pid)["folders"]}
+    assert folders["tools"]["kind"] == "work" and folders["ModTools"]["kind"] == "workspace"
+    assert any("Added the new folder tools" in e["text"] for e in events(deck, s["id"], "notice"))
+    # Its files are now the project's own: a second write needs no new folder.
+    deck.send(s["id"], f"write {ws / 'tools' / 'release' / 'more.sh'} echo 2")
+    wait(deck, s["id"])
+    assert (ws / "tools" / "release" / "more.sh").exists()
+    # The create_work_folder tool does the same without writing a file.
+    runner = deck.runners[s["id"]]
+    out = deck._run(runner._call_tool("create_work_folder", {"path": str(ws / "publish" / "Voice")}), timeout=10)
+    assert "now a work folder" in out and (ws / "publish" / "Voice").is_dir()
+    assert "publish" in {f["label"] for f in room.project(pid)["folders"]}
+    err = deck._run(runner._call_tool("create_work_folder", {"path": str(ws / "mods" / "Other")}), timeout=10)
+    assert err.startswith("Error")
+    # A workspace folder can't become a plain work folder while it holds the project's folders.
+    from carrier.readyroom.manager import RoomError
+    deck.end_session(s["id"])
+    with pytest.raises(RoomError, match="only be a workspace"):
+        room.set_folder_kind(pid, str(ws.resolve()), "work")
+
+
+def test_cross_project_tools_and_pasted_images(deck: FlightDeck, projects, tmp_path: Path):
+    import base64
+
+    room = deck.room
+    pid = projects["DocsSite"]
+    room.update_project(pid, rules="- Release notes in CHANGELOG.md.")
+    from carrier.core import skills
+    skills.save(room.project(pid)["path"], "release", "Use when releasing.", "1. Bump the version.")
+    s = deck.start_session(projects["ApiServer"], "copy release setup", mode="acceptEdits", send_task=False)
+    runner = deck.runners[s["id"]]
+    listing = deck._run(runner._call_tool("list_projects", {}), timeout=10)
+    assert "DocsSite" in listing and "ApiServer" in listing
+    detail = deck._run(runner._call_tool("get_project", {"name": "docssite"}), timeout=10)
+    assert "Release notes in CHANGELOG.md" in detail and "release — Use when releasing." in detail
+    assert deck._run(runner._call_tool("get_project", {"name": "nope"}), timeout=10).startswith("Error")
+    # propose_skill makes a card; nothing is written until the user approves.
+    deck._run(runner._call_tool("propose_skill", {"name": "Release Mod", "description": "Use when releasing.",
+                                                   "body": "1. Build."}), timeout=10)
+    prop = events(deck, s["id"], "skill_proposal")[0]
+    assert prop["name"] == "release-mod"
+    assert not skills.exists(room.project(projects["ApiServer"])["path"], "release-mod")
+    # show_image: only real images, sniffed from their bytes.
+    png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+    (tmp_path / "shot.png").write_bytes(png)
+    (tmp_path / "fake.png").write_text("not an image")
+    deck._run(runner._call_tool("show_image", {"path": str(tmp_path / "shot.png"), "caption": "Look here"}), timeout=10)
+    img = events(deck, s["id"], "image")[0]
+    assert img["mime"] == "image/png" and img["caption"] == "Look here"
+    bad = deck._run(runner._call_tool("show_image", {"path": str(tmp_path / "fake.png")}), timeout=10)
+    assert bad.startswith("Error")
+    # Pasted images go to Claude Code as image blocks, with the user's note.
+    deck.send(s["id"], "what's wrong here?", [{"mime": "image/png", "data": base64.b64encode(png).decode(),
+                                                "note": "the red box"}])
+    wait(deck, s["id"])
+    client = ALL_CLIENTS[-1]
+    assert client.images[-1][0]["source"]["media_type"] == "image/png"
+    assert "the red box" in client.prompts[-1] and "what's wrong here?" in client.prompts[-1]
+    assert events(deck, s["id"], "user")[-1]["images"][0]["note"] == "the red box"
+    with pytest.raises(ValueError):
+        deck.send(s["id"], "x", [{"mime": "image/png", "data": base64.b64encode(b"nope").decode()}])
+
+
+def test_auto_takeoff_starts_clear_routines(deck: FlightDeck, projects):
+    from carrier.readyroom import routines as R
+
+    room = deck.room
+    pid = projects["DocsSite"]
+    gid = room.save_group(pid, "Docs", "normal")["groups"][0]["id"]
+    R.save(room, pid, "Tidy docs", "Tidy them.", "manual", group_id=gid)
+    R.save(room, pid, "Push", "git push", "manual", "reviewed")
+    for r in room.store.routines(pid):
+        R.run(room, r["id"])
+    ov = deck.overview()
+    assert {q["title"]: bool(q["blockers"]) for q in ov["takeoff"]} == {"Tidy docs": False, "Push": True}
+    group = next(p for p in ov["projects"] if p["id"] == pid)["groups"][0]
+    assert group["current_task"]["title"] == "Tidy docs"
+    assert deck.takeoff_tick(every=0) == []  # off by default
+    deck.set_auto_takeoff(True)
+    deck.takeoff_tick(every=0)
+    started = [s for s in deck.store.sessions(pid) if s["task"] == "Tidy docs"]
+    assert len(started) == 1  # the gated "Push" waits for a clear review
+    assert [q["title"] for q in deck.overview()["takeoff"]] == ["Push"]
+    deck.takeoff_tick(every=0)
+    assert len([s for s in deck.store.sessions(pid) if s["task"] == "Tidy docs"]) == 1  # not started twice
+
+
+def test_claude_asks_where_new_work_goes(deck: FlightDeck, projects):
+    import asyncio
+
+    room = deck.room
+    pid = projects["DocsSite"]
+    room.add_task(pid, "Write intro")
+    gid = room.save_group(pid, "Art", "low")["groups"][0]["id"]
+    s = deck.start_task(room.current_task(pid)["id"], mode="acceptEdits", send_task=False)
+    runner = deck.runners[s["id"]]
+    listing = deck._run(runner._call_tool("list_tasks", {}), timeout=10)
+    assert "Main queue" in listing and "Art (priority low)" in listing and "This session's task" in listing
+
+    def ask(tool, args, decision, payload):
+        fut = asyncio.run_coroutine_threadsafe(runner._call_tool(tool, args), deck._loop)
+        wait(deck, s["id"], "needs_you")
+        req = deck.session(s["id"])["pending"][0]["req_id"]
+        deck.answer(s["id"], req, decision, payload)
+        return fut.result(timeout=10)
+
+    # Claude suggests a new group; the user picks the existing Art group instead.
+    out = ask("propose_work", {"title": "Draw icons", "details": "- 16px icons", "suggest": "new_group",
+                               "new_group": "Icons", "reasoning": "Separate art work."},
+              "work", {"title": "Draw icons", "details": "- 16px icons", "where": "queue", "group_id": gid,
+                       "position": "end"})
+    assert "Don't do it in this session" in out
+    assert [t["title"] for t in room.queue(pid, gid)] == ["Draw icons"]
+    card = events(deck, s["id"], "work_proposal")[0]
+    assert card["suggest"]["suggest"] == "new_group" and any(q["name"] == "Art" for q in card["queues"])
+    # Or into the current task: its scope grows, on record.
+    out = ask("propose_work", {"title": "Fix typo", "details": "- in README", "suggest": "current"},
+              "work", {"title": "Fix typo", "details": "- in README", "where": "current"})
+    assert "part of it" in out
+    cur = deck.store.task(s["task_id"])
+    assert "Fix typo" in cur["details"]
+    assert room.task_history(cur["id"])[-1]["by"] == "claude"
+    # Declined: nothing changes.
+    out = ask("propose_work", {"title": "Rewrite all", "details": "x", "suggest": "main"}, "decline", "")
+    assert "didn't add" in out and "Rewrite all" not in [t["title"] for t in deck.store.tasks(pid)]
+    assert any(e["text"] == "Not added." for e in events(deck, s["id"], "proposal_done"))
+
+
+def test_editing_a_running_task_tells_the_session(deck: FlightDeck, projects):
+    room = deck.room
+    pid = projects["DocsSite"]
+    room.add_task(pid, "Write intro", "- one paragraph")
+    s = deck.start_task(room.current_task(pid)["id"], mode="acceptEdits", send_task=False)
+    client = ALL_CLIENTS[-1]
+    before = dict(deck.store.task(s["task_id"]))
+    room.update_task(s["task_id"], details="- two paragraphs\n- a diagram")
+    after = deck.store.task(s["task_id"])
+    assert deck.notify_task_change(s["task_id"], before, after) == [s["id"]]
+    end = time.time() + 10
+    while not client.prompts and time.time() < end:
+        time.sleep(0.02)
+    wait(deck, s["id"])
+    msg = client.prompts[-1]
+    assert msg.startswith("[Carrier Ready Room] The user just changed the task")
+    assert "- - one paragraph" in msg and "+ - a diagram" in msg
+    assert any(e["kind"] == "task_changed" for e in events(deck, s["id"], "notice"))
+    # A change that changes nothing isn't sent.
+    assert deck.notify_task_change(s["task_id"], after, after) == []
+
+
+def test_bring_back_an_own_copy(deck: FlightDeck, projects):
+    import subprocess
+
+    room = deck.room
+    pid = projects["ApiServer"]
+    room.add_task(pid, "Add notes")
+    s = deck.start_task(room.current_task(pid)["id"], isolation="worktree", mode="acceptEdits", send_task=False)
+    deck.send(s["id"], "write notes.txt from the copy")
+    wait(deck, s["id"])
+    copy = Path(deck.store.session(s["id"])["cwd"])
+    with pytest.raises(DeckError, match="End the session"):
+        deck.bring_back(s["id"], "merge")
+    deck.end_session(s["id"])
+    with pytest.raises(DeckError, match="aren't committed"):
+        deck.bring_back(s["id"], "merge")
+    subprocess.run(["git", "add", "-A"], cwd=copy, check=True)
+    subprocess.run(["git", "-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-qm", "notes"], cwd=copy, check=True)
+    assert [c["id"] for c in deck.leftover_copies(pid)] == [s["id"]]
+    out = deck.bring_back(s["id"], "merge")
+    main = Path(deck.store.project(pid)["path"])
+    assert "Merged" in out["text"] and (main / "notes.txt").read_text() == "from the copy\n"
+    assert not copy.exists() and deck.leftover_copies(pid) == []
+
+
+def test_question_fallbacks(deck: FlightDeck, projects):
+    import asyncio
+
+    s = deck.start_session(projects["DocsSite"], "colours", mode="acceptEdits", send_task=False)
+    # Routed questions don't trigger the fallback…
+    deck.send(s["id"], "ask")
+    wait(deck, s["id"], "needs_you")
+    deck.answer(s["id"], events(deck, s["id"], "question")[0]["req_id"], "skip")
+    wait(deck, s["id"])
+    assert events(deck, s["id"], "question_fallback") == []
+    # …a question that never reached Carrier is shown in the chat.
+    deck.send(s["id"], "ask-unrouted")
+    wait(deck, s["id"])
+    fb = events(deck, s["id"], "question_fallback")
+    assert fb and fb[0]["questions"][0]["question"] == "Which colour?"
+    # Carrier's own ask_user tool works whatever Claude Code does.
+    runner = deck.runners[s["id"]]
+    fut = asyncio.run_coroutine_threadsafe(runner._call_tool("ask_user", {"questions": [
+        {"question": "Size?", "options": [{"label": "Small"}, {"label": "Large"}]}]}), deck._loop)
+    wait(deck, s["id"], "needs_you")
+    q = [e for e in events(deck, s["id"], "question") if e["questions"][0]["question"] == "Size?"][0]
+    deck.answer(s["id"], q["req_id"], "answers", {"Size?": "Large"})
+    assert fut.result(timeout=10) == "The user answered:\n- Size? → Large"
+
+
+def test_bring_back_refuses_unsafe_merges(deck: FlightDeck, projects):
+    import subprocess
+
+    room = deck.room
+    pid = projects["ApiServer"]
+    main = Path(deck.store.project(pid)["path"])
+    room.add_task(pid, "Edit app")
+    s = deck.start_task(room.current_task(pid)["id"], isolation="worktree", mode="acceptEdits", send_task=False)
+    deck.send(s["id"], "write src/app.py from the copy")
+    wait(deck, s["id"])
+    copy = Path(deck.store.session(s["id"])["cwd"])
+    deck.end_session(s["id"])
+    git = lambda cwd, *a: subprocess.run(["git", "-c", "user.email=t@e.com", "-c", "user.name=T", *a], cwd=cwd,
+                                         check=True, capture_output=True)
+    git(copy, "commit", "-qam", "copy edit")
+    # A conflicting change in the main folder: the merge is refused and nothing is left half-done.
+    (main / "src" / "app.py").write_text("from main\n")
+    git(main, "commit", "-qam", "main edit")
+    with pytest.raises(DeckError, match="conflicts .*src/app.py"):
+        deck.bring_back(s["id"], "merge")
+    assert not (main / ".git" / "MERGE_HEAD").exists() and (main / "src" / "app.py").read_text() == "from main\n"
+    # A detached HEAD is refused (the merge would be lost when switching back).
+    git(main, "checkout", "-q", "--detach")
+    with pytest.raises(DeckError, match="detached HEAD"):
+        deck.bring_back(s["id"], "merge")
+    git(main, "checkout", "-q", "-")
+    # Discard removes the copy and its branch.
+    branch = deck.store.session(s["id"])["branch"]
+    assert "Copy and branch" in deck.bring_back(s["id"], "discard")["text"]
+    assert subprocess.run(["git", "rev-parse", "--verify", "-q", branch], cwd=main, capture_output=True).returncode != 0

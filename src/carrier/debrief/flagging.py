@@ -25,6 +25,7 @@ and adds a warning — one broken criterion never blocks a review.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from carrier.core.config import Config
 from carrier.debrief.criteria import Criterion
@@ -109,6 +110,10 @@ async def _run_one(
         items="\n\n".join(_render_item(review, i, criterion.sees_rationale) for i in batch),
         severity=criterion.severity,
     )
+    if review.scan:
+        from carrier.debrief.pipeline import SCAN_NOTE
+
+        prompt = f"## Note\n{SCAN_NOTE}\n\n{prompt}"
     try:
         reply = await backend.ask(
             system=CRITERIA_SYSTEM,
@@ -116,8 +121,8 @@ async def _run_one(
             model=criterion.model or cfg.get("models", "criteria"),
             effort=criterion.effort,
             tools=READ_ONLY_TOOLS if criterion.explore else None,
-            cwd=cfg.repo,
-            add_dirs=[pt["repo"] for pt in review.parts],
+            cwd=Path(review.folder),
+            add_dirs=[review.part_folder(pt) for pt in review.parts],
             # More effort also lets an exploring agent look further.
             max_turns=EXPLORE_TURNS.get(criterion.effort or "", 6) if criterion.explore else 1,
         )

@@ -89,8 +89,15 @@ function md(src) {
       const t = block.trim();
       if (!t) continue;
       const lines = t.split("\n");
-      if (lines.every((l) => /^\s*[-*] /.test(l))) {
+      const cells = (l) => l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => inline(esc(c.trim())));
+      if (lines.length >= 2 && lines.every((l) => /^\s*\|/.test(l)) && /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[1])) {
+        html += "<table><thead><tr>" + cells(lines[0]).map((c) => `<th>${c}</th>`).join("") + "</tr></thead><tbody>" +
+          lines.slice(2).map((l) => "<tr>" + cells(l).map((c) => `<td>${c}</td>`).join("") + "</tr>").join("") +
+          "</tbody></table>";
+      } else if (lines.every((l) => /^\s*[-*] /.test(l))) {
         html += "<ul>" + lines.map((l) => `<li>${inline(esc(l.replace(/^\s*[-*] /, "")))}</li>`).join("") + "</ul>";
+      } else if (lines.every((l) => /^\s*\d+[.)] /.test(l))) {
+        html += "<ol>" + lines.map((l) => `<li>${inline(esc(l.replace(/^\s*\d+[.)] /, "")))}</li>`).join("") + "</ol>";
       } else if (/^#{1,4} /.test(t)) {
         html += `<p><b>${inline(esc(t.replace(/^#+ /, "")))}</b></p>`;
       } else {
@@ -154,6 +161,7 @@ function showTool(tool) {
   show($("#view-readyroom"), tool === "readyroom");
   show($("#view-flightdeck"), tool === "flightdeck");
   if (tool === "flightdeck") fdOpen();
+  if (fd.overview) updateAlerts(fd.overview);
   if (tool === "readyroom") rrOpen();
   const inDebrief = tool === "debrief";
   if (!inDebrief) {
@@ -177,6 +185,9 @@ function applyTheme(settings) {
   for (const [key, value] of Object.entries(t.colors)) root.setProperty("--" + key.replace(/_/g, "-"), value);
   root.setProperty("--strike", t.strike_removed ? "line-through" : "none");
   root.setProperty("--code-size", (settings.font_size || 14) + "px");
+  const widths = { normal: "960px", wide: "1440px", wider: "1920px", full: "100000px" };
+  root.setProperty("--content-max", widths[settings.content_width] || widths.normal);
+  document.body.classList.toggle("content-center", !!settings.content_center);
 }
 
 /* ------------------------------------------------------------- start screen */
@@ -258,6 +269,38 @@ function showProject(info) {
   show(list);
   show($("#extras-note"), info.folders.length > 1);
   showFolder({ ...info, is_repo: info.ready }, info.name);
+  renderScanAgents(info.id);
+}
+
+const renderScanAgents = guarded(async (pid) => {
+  const box = $("#scan-agents");
+  box.replaceChildren();
+  show($("#scan-box"), pid != null);
+  if (pid == null) return;
+  for (const a of await api("db_scan_agents", pid)) {
+    const lab = el("label", "check");
+    const cb = Object.assign(el("input"), { type: "checkbox", value: a.name, checked: a.picked });
+    lab.append(cb, el("span", "", a.title), el("span", "muted small", a.severity));
+    box.appendChild(lab);
+  }
+});
+
+async function startScan() {
+  const agents = [...document.querySelectorAll("#scan-agents input:checked")].map((c) => c.value);
+  if (!agents.length) { banner("Tick at least one agent for the scan."); return; }
+  const btn = $("#btn-scan");
+  btn.disabled = true;
+  $("#progress-log").textContent = "";
+  show($("#progress-log"));
+  show($("#btn-cancel"));
+  try {
+    enterReview(await api("start_scan", state.projectId, agents, true));
+  } catch (e) {
+    banner(e.message, /Nothing to review|Cancelled/.test(e.message) ? "info" : "error");
+  } finally {
+    btn.disabled = false;
+    show($("#btn-cancel"), false);
+  }
 }
 
 /* Fill the start/resume box. ``info`` is the main folder's details. */
@@ -873,6 +916,11 @@ function renderSettings() {
   }
   const fs = $("#font-size");
   fs.value = s.font_size; $("#font-size-value").textContent = s.font_size + "px";
+  $("#content-width").value = s.content_width || "normal";
+  $("#alerts-flash").checked = s.alerts_flash !== false;
+  $("#alerts-sound").checked = !!s.alerts_sound;
+  $("#alerts-dnd").checked = !!s.alerts_dnd;
+  $("#content-center").checked = !!s.content_center;
 }
 
 /* ---------------------------------------------------------------- modals */
@@ -919,6 +967,7 @@ function onKey(e) {
  */
 
 const fd = {
+  attach: [],          // images waiting to be sent: {mime, data (base64), note}
   ready: false,        // deck created (first visit to the tab)
   seq: 0,              // last event seen
   overview: null,
@@ -945,12 +994,81 @@ async function fdOpen() {
 
 const fdRefresh = guarded(async () => {
   fd.overview = await api("fd_overview");
-  fdRenderSidebar();
-  const n = fd.overview.needs_you;
-  $("#fd-badge").textContent = n ? String(n) : "";
-  show($("#fd-badge"), n > 0);
-  if (fd.current == null) fdRenderEmpty();
+  if (activeTool() === "flightdeck") fdRenderSidebar();
+  updateAlerts(fd.overview);
+  if (fd.current == null && activeTool() === "flightdeck") fdRenderEmpty();
 });
+
+/* ---- alerts: badge, banner, highlight, taskbar flash, chime ---- */
+
+const alerts = { needs: new Set(), ready: new Set(), dismissed: null };
+
+function needsYou(ov) {
+  const out = [];
+  for (const p of ov.projects) {
+    for (const s of p.sessions) if (s.status === "needs_you") out.push({ project: p.name, session: s });
+  }
+  for (const t of ov.standalone) {
+    for (const s of t.sessions) if (s.status === "needs_you") out.push({ project: "Standalone", session: s });
+  }
+  return out;
+}
+
+function chime() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    for (const [freq, at] of [[660, 0], [880, 0.16]]) {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.frequency.value = freq; o.type = "sine";
+      g.gain.setValueAtTime(0.0001, ctx.currentTime + at);
+      g.gain.exponentialRampToValueAtTime(0.15, ctx.currentTime + at + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + at + 0.3);
+      o.connect(g).connect(ctx.destination);
+      o.start(ctx.currentTime + at); o.stop(ctx.currentTime + at + 0.32);
+    }
+  } catch (_) { /* no audio: fine */ }
+}
+
+function updateAlerts(ov) {
+  const st = state.settings || {};
+  const waiting = needsYou(ov);
+  const onDeck = activeTool() === "flightdeck";
+  // Badge on the Flight Deck tab: urgent count, or a dot for routines ready to take off.
+  const ready = (ov.takeoff || []).filter((q) => !q.blockers.length && !q.backlog);
+  const badge = $("#fd-badge");
+  badge.textContent = waiting.length ? String(waiting.length) : ready.length ? "•" : "";
+  badge.classList.toggle("info", !waiting.length && ready.length > 0);
+  show(badge, waiting.length > 0 || ready.length > 0);
+  $(".tool[data-tool=flightdeck]").classList.toggle("alerting", waiting.length > 0 && !onDeck);
+  // New "needs you" since last time: flash and chime (unless do-not-disturb).
+  const ids = new Set(waiting.map((w) => w.session.id));
+  const fresh = [...ids].filter((id) => !alerts.needs.has(id));
+  alerts.needs = ids;
+  if (fresh.length && !st.alerts_dnd) {
+    if (st.alerts_flash !== false && !document.hasFocus()) api("attention").catch(() => {});
+    if (st.alerts_sound) chime();
+    alerts.dismissed = null;
+  }
+  // A routine whose review gate just cleared: say so once.
+  const nowReady = new Set(ready.map((q) => q.task_id));
+  for (const q of ready) {
+    if (!alerts.ready.has(q.task_id) && alerts.readySeen) {
+      banner(`“${q.title}” (${q.project}) is ready for take-off.`, "info");
+    }
+  }
+  alerts.ready = nowReady;
+  alerts.readySeen = true;
+  // Banner strip on the other tabs.
+  const strip = $("#alert-strip");
+  const first = waiting[0];
+  const showStrip = !!first && !onDeck && !st.alerts_dnd && alerts.dismissed !== first.session.id;
+  show(strip, showStrip);
+  if (showStrip) {
+    $("#alert-text").textContent = `${first.project} — “${first.session.task}” needs you` +
+      (waiting.length > 1 ? ` (and ${waiting.length - 1} more)` : "") + ".";
+    $("#alert-go").onclick = () => { showTool("flightdeck"); fdSelect(first.session.id); };
+  }
+}
 
 function fdRefreshSoon() {
   clearTimeout(fd.refreshTimer);
@@ -963,7 +1081,8 @@ function fdProjectName(id) {
 }
 
 function fdSessionRow(s) {
-  const row = el("div", "fd-sess" + (s.id === fd.current ? " active" : "") + (s.status === "ended" ? " ended" : ""));
+  const row = el("div", "fd-sess" + (s.id === fd.current ? " active" : "") + (s.status === "ended" ? " ended" : "")
+    + (s.status === "needs_you" ? " needs" : ""));
   row.tabIndex = 0;
   row.append(el("span", "dot " + s.status), el("span", "task", s.task),
              el("span", "st", (FD_STATUS[s.status] || s.status) + (s.alerts ? ` · ${s.alerts}⚑` : "")));
@@ -975,10 +1094,38 @@ function fdSessionRow(s) {
 
 const fdLive = (sessions) => sessions.some((s) => s.status !== "ended" && s.running);
 
+/* Routines queued to start ("ready for take-off"), and the auto take-off switch. */
+function fdRenderTakeoff() {
+  const ov = fd.overview;
+  const box = $("#fd-takeoff");
+  const list = $("#fd-takeoff-list");
+  list.replaceChildren();
+  $("#fd-auto-takeoff").checked = !!ov.auto_takeoff;
+  for (const q of ov.takeoff || []) {
+    const row = el("div", "takeoff-row");
+    const info = el("div", "takeoff-info");
+    info.appendChild(el("b", "", q.title));
+    info.appendChild(el("span", "muted small", q.project + (q.group ? ` · ${q.group}` : "")));
+    const state = q.backlog ? "backlog — start it by hand" : q.blockers.length ? "waiting: " + q.blockers.join(" ")
+      : q.error ? "couldn't start: " + q.error : ov.auto_takeoff ? "taking off…" : "ready";
+    info.appendChild(el("span", "small " + (q.blockers.length || q.error ? "warn" : "muted"), state));
+    const go = el("button", "primary small-btn", "▶ Start");
+    go.disabled = q.blockers.length > 0;
+    go.title = q.blockers.length ? "Waiting for a clear review" : "Start it now";
+    go.onclick = () => fdOpenStart(q.project_id, q.task_id);
+    row.append(info, go);
+    list.appendChild(row);
+  }
+  $("#fd-takeoff-count").textContent = (ov.takeoff || []).length ? `(${ov.takeoff.length})` : "";
+  show(box, true);
+  if (!(ov.takeoff || []).length) list.appendChild(el("div", "muted small", "No routines waiting."));
+}
+
 function fdRenderSidebar() {
   const box = $("#fd-projects");
   box.replaceChildren();
   const ov = fd.overview;
+  fdRenderTakeoff();
   if (!ov.projects.length && !ov.standalone.length) {
     box.appendChild(el("div", "muted small", "No projects yet. Set them up in the Ready Room, or start a standalone task."));
     const go = el("button", "ghost small-btn", "Open the Ready Room ▸");
@@ -1008,9 +1155,23 @@ function fdRenderSidebar() {
       go.onclick = () => fdOpenStart(p.id, t.id);
       line.append(ct, go);
     } else {
-      line.appendChild(el("span", "ct", "No open tasks — add one with ＋ Task or in the Ready Room."));
+      line.appendChild(el("span", "ct", (p.groups || []).length ? "Main queue: no open tasks."
+        : "No open tasks — add one with ＋ Task or in the Ready Room."));
     }
     wrap.appendChild(line);
+    // Task groups run alongside the main queue: each has its own current task.
+    for (const g of p.groups || []) {
+      if (!g.current_task) continue;
+      const t = g.current_task;
+      const gl = el("div", `fd-task-line group prio-${g.priority}`);
+      const ct = el("span", "ct", `${g.name}: ${t.status === "active" ? "in progress — " : ""}${t.title}`);
+      ct.title = (g.priority === "backlog" ? "Backlog group. " : "") + (t.details || t.title);
+      const go = el("button", g.priority === "backlog" ? "ghost small-btn" : "primary small-btn", "▶ Start");
+      go.title = `Start a session on ${g.name}'s current task`;
+      go.onclick = () => fdOpenStart(p.id, t.id);
+      gl.append(ct, go);
+      wrap.appendChild(gl);
+    }
     for (const s of p.sessions) wrap.appendChild(fdSessionRow(s));
     box.appendChild(wrap);
   }
@@ -1064,6 +1225,9 @@ function fdRenderEmpty() {
 const fdSelect = guarded(async (sid) => {
   fd.current = sid;
   fd.detail = await api("fd_session", sid);
+  fd.ruleSets = await api("rule_sets").catch(() => []);
+  show($("#fd-image-btn"), fd.detail.images !== false);
+  if (fd.attach.length) { fd.attach = []; fdRenderAttach(); }
   if (fd.current !== sid) return;
   fd.pending = new Set(fd.detail.pending.map((p) => p.req_id));
   fd.skipUntil = fd.detail.seq;
@@ -1107,7 +1271,7 @@ function fdSetStatus(status) {
   $("#fd-input").disabled = !live;
   show($("#fd-resume"), status === "paused" || status === "error");
   show($("#fd-end"), status !== "ended");
-  show($("#fd-rmcopy"), status === "ended" && fd.detail.worktree);
+  show($("#fd-rmcopy"), status === "ended" && !!fd.detail.branch && !!fd.detail.project);
   $("#fd-mode").disabled = status === "ended";
   // Model and effort can only change while Claude is waiting (or the session is paused).
   $("#fd-model").disabled = $("#fd-effort").disabled = status === "ended" || busy;
@@ -1145,7 +1309,23 @@ function fdRenderEvent(ev, scroll = true) {
   const atBottom = tr.scrollHeight - tr.scrollTop - tr.clientHeight < 80;
   const add = (node) => { tr.appendChild(node); };
   switch (ev.type) {
-    case "user": add(el("div", "msg-user", ev.text)); break;
+    case "user": {
+      const u = el("div", "msg-user", ev.text);
+      if (ev.images && ev.images.length) {
+        const row = el("div", "msg-images");
+        ev.images.forEach((img) => row.appendChild(imageFigure(img.mime, img.data, img.note)));
+        u.appendChild(row);
+      }
+      add(u);
+      break;
+    }
+    case "image": add(imageFigure(ev.mime, ev.data, ev.caption || ev.name, "msg-image")); break;
+    case "skill_proposal": add(fdSkillCard(ev)); break;
+    case "skill_done": {
+      const card = tr.querySelector(`.rcard[data-rule="${CSS.escape(ev.id)}"]`);
+      if (card) ruleDone(card, ev.decision === "applied" ? ev.text || "Saved." : "Dismissed.");
+      break;
+    }
     case "text": { fdSetLive(""); const d = el("div", "msg-text"); setMd(d, ev.text); add(d); break; }
     case "thinking": {
       const d = el("details", "msg-thinking");
@@ -1172,6 +1352,45 @@ function fdRenderEvent(ev, scroll = true) {
       break;
     }
     case "permission": add(fdPermissionCard(ev)); break;
+    case "question": add(fdQuestionCard(ev)); break;
+    case "question_done": {
+      const card = tr.querySelector(`.qcard[data-req="${CSS.escape(ev.req_id)}"]`);
+      if (card) {
+        questionsDone(card, ev.decision === "answered"
+          ? "Answered: " + Object.entries(ev.answers || {}).map(([q, a]) => `${q} → ${a}`).join(" · ")
+          : ev.decision === "skipped" ? "Skipped." : "Withdrawn by Claude Code.");
+      }
+      fd.pending.delete(ev.req_id);
+      break;
+    }
+    case "rule_proposal": add(fdRuleCard(ev)); break;
+    case "question_fallback": {
+      const sid = fd.current;
+      const card = questionCard(ev.questions || [], {
+        live: true,
+        onSubmit: (answers) => guarded(async () => {
+          await api("fd_send", sid, Object.entries(answers).map(([q, a]) => `${q} → ${a}`).join("\n"));
+          questionsDone(card, "Sent as a message.");
+        })(),
+      });
+      card.prepend(el("div", "muted small", "Claude Code asked this without waiting for an answer, so your choice is " +
+        "sent as a normal message."), el("div", "ptitle", "Claude asked"));
+      add(card);
+      break;
+    }
+    case "work_proposal": add(fdWorkCard(ev)); break;
+    case "change_proposal": add(fdChangeCard(ev)); break;
+    case "proposal_done": {
+      const card = tr.querySelector(`.rcard[data-req="${CSS.escape(ev.req_id || "")}"]`);
+      if (card) ruleDone(card, ev.text);
+      fd.pending.delete(ev.req_id);
+      break;
+    }
+    case "rule_done": {
+      const card = tr.querySelector(`.rcard[data-rule="${CSS.escape(ev.id)}"]`);
+      if (card) ruleDone(card, ev.decision === "applied" ? (ev.text || "Added.") + " New sessions use it." : "Dismissed.");
+      break;
+    }
     case "permission_done": {
       const card = tr.querySelector(`.perm[data-req="${CSS.escape(ev.req_id)}"]`);
       if (card) fdPermissionDone(card, ev.decision);
@@ -1231,6 +1450,47 @@ function fdPermissionCard(ev) {
   return card;
 }
 
+function fdQuestionCard(ev) {
+  const sid = fd.current;
+  const live = fd.pending.has(ev.req_id) || !!ev.live;
+  const card = questionCard(ev.questions || [], {
+    live,
+    onSubmit: (answers) => guarded(async () => api("fd_answer", sid, ev.req_id, "answers", answers))(),
+    onSkip: () => guarded(async () => api("fd_answer", sid, ev.req_id, "skip", ""))(),
+  });
+  card.dataset.req = ev.req_id;
+  card.prepend(el("div", "ptitle", "Claude has a question"));
+  if (!live) questionsDone(card, "No longer waiting.");
+  return card;
+}
+
+function fdRuleCard(ev) {
+  const sid = fd.current;
+  const project = fd.detail && fd.detail.project;
+  const targets = [];
+  if (project) targets.push({ value: "project", label: `This project's rules (${project.name})` });
+  targets.push({ value: "global", label: "Global rules (every project)" });
+  for (const rs of fd.ruleSets || []) targets.push({ value: `rs:${rs.id}`, label: `Rule set: ${rs.name}` });
+  targets.push({ value: "rs:new", label: "A new rule set…" });
+  let initial = project ? "project" : "global";
+  if (ev.scope === "global") initial = "global";
+  if (ev.scope === "rule_set") {
+    const match = (fd.ruleSets || []).find((r) => r.name.toLowerCase() === (ev.rule_set || "").toLowerCase());
+    initial = match ? `rs:${match.id}` : "rs:new";
+  }
+  const card = ruleCard(ev, {
+    targets, initial,
+    onApply: ({ text, target, name }) => guarded(async () => {
+      const [kind, id] = target.startsWith("rs:") ? ["rule_set", target.slice(3)] : [target, ""];
+      const msg = await api("fd_apply_rule", sid, ev.id, text, kind, id && id !== "new" ? Number(id) : null, name);
+      ruleDone(card, `${msg} New sessions use it.`);
+      if (kind === "rule_set") fd.ruleSets = await api("rule_sets").catch(() => fd.ruleSets);
+    })(),
+    onDismiss: () => guarded(async () => { await api("fd_dismiss_rule", sid, ev.id); ruleDone(card, "Dismissed."); })(),
+  });
+  return card;
+}
+
 function fdPermissionDone(card, decision) {
   card.classList.add("done");
   const actions = card.querySelector(".pactions");
@@ -1250,12 +1510,14 @@ async function fdPollLoop() {
       let refresh = false;
       for (const { seq, session, event } of res.events) {
         fd.seq = Math.max(fd.seq, seq);
-        if (event.type === "permission") fd.pending.add(event.req_id);
+        const asks = ["permission", "question", "work_proposal", "change_proposal"].includes(event.type);
+        if (asks) fd.pending.add(event.req_id);
         if (session === fd.current && seq > fd.skipUntil) {
-          fdRenderEvent(event.type === "permission" ? { ...event, live: true } : event);
+          fdRenderEvent(asks ? { ...event, live: true } : event);
           if (event.type === "notice" || event.type === "result") fdRefreshAwareSoon();
         }
-        if (["status", "notice", "result", "permission", "permission_done"].includes(event.type)) refresh = true;
+        if (["status", "notice", "result", "permission", "permission_done", "question", "question_done",
+             "work_proposal", "change_proposal", "proposal_done"].includes(event.type)) refresh = true;
       }
       fd.seq = Math.max(fd.seq, res.seq);
       if (refresh) fdRefreshSoon();
@@ -1283,11 +1545,350 @@ function fdRefreshAwareSoon() {
 
 const fdSend = guarded(async () => {
   const input = $("#fd-input"), text = input.value.trim();
-  if (!text || fd.current == null) return;
-  await api("fd_send", fd.current, text);
+  if ((!text && !fd.attach.length) || fd.current == null) return;
+  const hits = text ? await api("fd_check_secrets", text) : [];
+  if (hits.length && !(await confirmWord(`This message looks like it contains a secret (${hits[0].kind}: ` +
+      `${hits[0].preview}). It would be sent to Anthropic with the conversation. Send it anyway?`, "send", "Send anyway"))) {
+    return;
+  }
+  await api("fd_send", fd.current, text, fd.attach.map(({ mime, data, note }) => ({ mime, data, note })));
   input.value = "";
+  fd.attach = [];
+  fdRenderAttach();
   fdSetStatus("working");
 });
+
+/* ---- images: shown in the chat, pasted or added, marked up ---- */
+
+const IMAGE_LIMIT = 5 * 1024 * 1024;
+
+function dataUrl(mime, data) { return `data:${mime};base64,${data}`; }
+
+function imageFigure(mime, data, caption, cls = "msg-thumb") {
+  const fig = el("figure", cls);
+  const img = el("img");
+  img.alt = caption || "image";
+  img.src = dataUrl(mime, data); // a data: URL set as an attribute: never parsed as HTML
+  img.onclick = () => {
+    $("#view-image").src = img.src;
+    $("#view-caption").textContent = caption || "";
+    openModal("#modal-view-image");
+  };
+  fig.appendChild(img);
+  if (caption) fig.appendChild(el("figcaption", "", caption));
+  return fig;
+}
+
+/* Read a File/Blob as {mime, data}; large pictures are scaled down to fit Claude's limit. */
+function readImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Couldn't read that image."));
+    reader.onload = () => {
+      const url = String(reader.result);
+      const img = new Image();
+      img.onerror = () => reject(new Error("That file isn't an image Carrier can show."));
+      img.onload = () => resolve(fitImage(img, url));
+      img.src = url;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function fitImage(img, url) {
+  const m = /^data:(image\/(?:png|jpeg|gif|webp));base64,(.*)$/.exec(url);
+  const MAX = 2400;
+  if (m && img.naturalWidth <= MAX && img.naturalHeight <= MAX && m[2].length * 0.75 < IMAGE_LIMIT) {
+    return { mime: m[1], data: m[2], note: "" };
+  }
+  const scale = Math.min(1, MAX / Math.max(img.naturalWidth, img.naturalHeight));
+  const c = document.createElement("canvas");
+  c.width = Math.round(img.naturalWidth * scale); c.height = Math.round(img.naturalHeight * scale);
+  c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+  return canvasImage(c);
+}
+
+function canvasImage(c) {
+  let out = c.toDataURL("image/png");
+  if (out.length * 0.75 > IMAGE_LIMIT) out = c.toDataURL("image/jpeg", 0.85);
+  const [, mime, data] = /^data:([^;]+);base64,(.*)$/.exec(out);
+  return { mime, data, note: "" };
+}
+
+const fdAddImages = guarded(async (files) => {
+  if (fd.detail && fd.detail.images === false) {
+    banner("Images are turned off for this project (Ready Room → the project).");
+    return;
+  }
+  for (const f of files) {
+    if (!/^image\//.test(f.type)) continue;
+    if (fd.attach.length >= 6) { banner("Up to 6 images per message."); break; }
+    fd.attach.push(await readImage(f));
+  }
+  fdRenderAttach();
+});
+
+function fdRenderAttach() {
+  const box = $("#fd-attach");
+  box.replaceChildren();
+  fd.attach.forEach((a, i) => {
+    const fig = imageFigure(a.mime, a.data, a.note, "attach-thumb");
+    const img = fig.querySelector("img");
+    img.title = "Click to mark it up or add a note";
+    img.onclick = () => openMarkup(i);
+    box.appendChild(fig);
+  });
+  show(box, fd.attach.length > 0);
+}
+
+/* Mark-up: pen, box and arrow strokes drawn over the picture, plus a note. */
+const mk = { index: -1, img: null, strokes: [], current: null };
+
+function openMarkup(i) {
+  const a = fd.attach[i];
+  mk.index = i; mk.strokes = []; mk.current = null;
+  $("#img-note").value = a.note || "";
+  mk.img = new Image();
+  mk.img.onload = () => {
+    const c = $("#img-canvas");
+    c.width = mk.img.naturalWidth; c.height = mk.img.naturalHeight;
+    drawMarkup();
+    openModal("#modal-image");
+  };
+  mk.img.src = dataUrl(a.mime, a.data);
+}
+
+function drawMarkup() {
+  const c = $("#img-canvas"), g = c.getContext("2d");
+  g.clearRect(0, 0, c.width, c.height);
+  g.drawImage(mk.img, 0, 0);
+  const width = Math.max(3, Math.round(Math.max(c.width, c.height) / 300));
+  for (const s of [...mk.strokes, ...(mk.current ? [mk.current] : [])]) {
+    g.strokeStyle = s.color; g.lineWidth = width; g.lineCap = "round"; g.lineJoin = "round";
+    const [p0] = s.points, p1 = s.points[s.points.length - 1];
+    g.beginPath();
+    if (s.tool === "pen") { s.points.forEach((p, j) => (j ? g.lineTo(p.x, p.y) : g.moveTo(p.x, p.y))); }
+    else if (s.tool === "box") { g.rect(p0.x, p0.y, p1.x - p0.x, p1.y - p0.y); }
+    else {
+      g.moveTo(p0.x, p0.y); g.lineTo(p1.x, p1.y);
+      const ang = Math.atan2(p1.y - p0.y, p1.x - p0.x), head = width * 5;
+      for (const d of [-0.5, 0.5]) {
+        g.moveTo(p1.x, p1.y);
+        g.lineTo(p1.x - head * Math.cos(ang + d), p1.y - head * Math.sin(ang + d));
+      }
+    }
+    g.stroke();
+  }
+}
+
+function markupPoint(e) {
+  const c = $("#img-canvas"), r = c.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * (c.width / r.width), y: (e.clientY - r.top) * (c.height / r.height) };
+}
+
+function bindMarkup() {
+  const c = $("#img-canvas");
+  c.onpointerdown = (e) => {
+    c.setPointerCapture(e.pointerId);
+    mk.current = { tool: document.querySelector("input[name=img-tool]:checked").value,
+                   color: $("#img-color").value, points: [markupPoint(e)] };
+  };
+  c.onpointermove = (e) => {
+    if (!mk.current) return;
+    const p = markupPoint(e);
+    if (mk.current.tool === "pen") mk.current.points.push(p); else mk.current.points[1] = p;
+    drawMarkup();
+  };
+  c.onpointerup = () => {
+    if (mk.current && mk.current.points.length > 1) mk.strokes.push(mk.current);
+    mk.current = null;
+    drawMarkup();
+  };
+  $("#img-undo").onclick = () => { mk.strokes.pop(); drawMarkup(); };
+  $("#img-clear").onclick = () => { mk.strokes = []; drawMarkup(); };
+  $("#img-cancel").onclick = closeModal;
+  $("#img-remove").onclick = () => { fd.attach.splice(mk.index, 1); closeModal(); fdRenderAttach(); };
+  $("#img-done").onclick = () => {
+    const a = fd.attach[mk.index];
+    if (mk.strokes.length) Object.assign(a, canvasImage($("#img-canvas")));
+    a.note = $("#img-note").value.trim();
+    closeModal();
+    fdRenderAttach();
+  };
+  $("#view-close").onclick = closeModal;
+  $("#history-close").onclick = closeModal;
+}
+
+/* Where should new work go? Claude's suggestion is preselected; everything is editable. */
+function queueSelect(queues, chosen, withNew = true) {
+  const sel = el("select");
+  for (const q of queues) {
+    sel.appendChild(Object.assign(el("option", "", q.group_id == null ? "Main queue"
+      : `Group: ${q.name}${q.priority ? ` (${q.priority})` : ""}`), { value: q.group_id == null ? "main" : String(q.group_id) }));
+  }
+  if (withNew) sel.appendChild(Object.assign(el("option", "", "A new task group…"), { value: "new" }));
+  if (chosen != null) sel.value = chosen;
+  return sel;
+}
+
+function positionSelect(queue, chosen) {
+  const sel = el("select");
+  sel.appendChild(Object.assign(el("option", "", "Next up"), { value: "next" }));
+  sel.appendChild(Object.assign(el("option", "", "At the end"), { value: "end" }));
+  for (const t of (queue && queue.tasks) || []) {
+    sel.appendChild(Object.assign(el("option", "", `After “${t.title}”`), { value: `after:${t.id}` }));
+  }
+  sel.value = [...sel.options].some((o) => o.value === chosen) ? chosen : "end";
+  return sel;
+}
+
+function fdWorkCard(ev) {
+  const sid = fd.current;
+  const live = fd.pending.has(ev.req_id) || !!ev.live;
+  const sg = ev.suggest || {};
+  const card = el("div", "rcard");
+  card.dataset.req = ev.req_id;
+  card.appendChild(el("div", "ptitle", "✎ New work came up — where should it go?"));
+  if (ev.why) card.appendChild(el("div", "muted small", ev.why));
+  const field = (label, node) => { card.append(el("label", "small-label", label), node); return node; };
+  const title = field("Title", Object.assign(el("input"), { type: "text", value: ev.title || "" }));
+  const details = field("Details", Object.assign(el("textarea"), { rows: 4, value: ev.details || "" }));
+  // Where: the current task, or a queue.
+  const groupByName = (n) => (ev.queues || []).find((q) => q.group_id != null && q.name.toLowerCase() === String(n || "").toLowerCase());
+  const where = el("select");
+  if (ev.current_task) where.appendChild(Object.assign(el("option", "", `Add to the current task (“${ev.current_task.title}”)`), { value: "current" }));
+  where.appendChild(Object.assign(el("option", "", "Make it a new task"), { value: "task" }));
+  field("Where", where);
+  const queueRow = el("div", "agent-opts two");
+  const g = groupByName(sg.group);
+  const queue = queueSelect(ev.queues || [], sg.suggest === "new_group" ? "new" : g ? String(g.group_id) : "main");
+  const qLabel = el("label", "field"); qLabel.append("Queue", queue);
+  const posLabel = el("label", "field");
+  let pos = positionSelect((ev.queues || [])[0], sg.position || "end");
+  posLabel.append("Position", pos);
+  queueRow.append(qLabel, posLabel);
+  card.appendChild(queueRow);
+  const newRow = el("div", "agent-opts two");
+  const gName = Object.assign(el("input"), { type: "text", value: sg.new_group || "", placeholder: "New group name" });
+  const gPrio = el("select");
+  for (const p of ["high", "normal", "low", "backlog"]) gPrio.appendChild(Object.assign(el("option", "", p), { value: p }));
+  gPrio.value = sg.new_group_priority || "normal";
+  newRow.append(gName, gPrio);
+  card.appendChild(newRow);
+  const sync = () => {
+    const isTask = where.value === "task";
+    show(queueRow, isTask); show(newRow, isTask && queue.value === "new");
+    const q = (ev.queues || []).find((x) => (x.group_id == null ? "main" : String(x.group_id)) === queue.value);
+    const fresh = positionSelect(q, pos.value);
+    pos.replaceWith(fresh); pos = fresh;
+  };
+  where.value = sg.suggest === "current" && ev.current_task ? "current" : "task";
+  where.onchange = sync; queue.onchange = sync;
+  sync();
+  if (sg.reasoning) card.appendChild(el("div", "suggest", "Claude suggests: " +
+    ({ current: "add it to the current task", main: "a new task in the main queue",
+       group: `a new task in the group ${sg.group || ""}`, new_group: `a new group “${sg.new_group || ""}”` }[sg.suggest] || "")
+    + ". " + sg.reasoning));
+  const actions = el("div", "pactions");
+  if (live) {
+    const ok = el("button", "primary", "Add");
+    ok.onclick = guarded(async () => {
+      const choice = { title: title.value, details: details.value,
+        where: where.value === "current" ? "current" : queue.value === "new" ? "new_group" : "queue",
+        group_id: ["main", "new"].includes(queue.value) ? null : Number(queue.value),
+        new_group: gName.value, new_group_priority: gPrio.value, position: pos.value };
+      if (choice.where === "new_group" && !gName.value.trim()) { gName.focus(); return; }
+      card.querySelectorAll("button").forEach((b) => (b.disabled = true));
+      await api("fd_answer", sid, ev.req_id, "work", choice);
+    });
+    const no = el("button", "ghost", "Leave it out");
+    no.onclick = guarded(async () => { await api("fd_answer", sid, ev.req_id, "decline", ""); });
+    actions.append(ok, no);
+  } else {
+    actions.appendChild(el("span", "muted small", "No longer waiting."));
+    card.classList.add("done");
+  }
+  card.appendChild(actions);
+  return card;
+}
+
+/* Change tasks so the record matches the work: pull in (all or part of) another task, or split this one. */
+function fdChangeCard(ev) {
+  const sid = fd.current;
+  const live = fd.pending.has(ev.req_id) || !!ev.live;
+  const card = el("div", "rcard");
+  card.dataset.req = ev.req_id;
+  const o = ev.other_task, cur = ev.current_task;
+  const head = { pull_in: `✎ Pull task “${o ? o.title : "?"}” into this task?`,
+                 pull_part: `✎ Pull part of “${o ? o.title : "?"}” into this task?`,
+                 split: "✎ Split part of this task into a new task?" }[ev.kind] || "✎ Change the tasks?";
+  card.appendChild(el("div", "ptitle", head));
+  if (ev.why) card.appendChild(el("div", "muted small", ev.why));
+  const field = (label, node) => { card.append(el("label", "small-label", label), node); return node; };
+  const ta = (v, rows = 4) => Object.assign(el("textarea"), { rows, value: v || "" });
+  const inputs = {};
+  if (ev.kind === "pull_in" && o) {
+    card.appendChild(el("div", "small", `Its details are added to “${cur.title}”, and it is closed as merged.`));
+    field(`“${o.title}” — what comes over`, Object.assign(ta(o.details), { readOnly: true }));
+  } else if (ev.kind === "pull_part" && o) {
+    inputs.part = field("The part that comes into this task", ta(ev.part));
+    inputs.remaining = field(`What stays in “${o.title}”`, ta(ev.remaining || o.details));
+  } else if (ev.kind === "split") {
+    inputs.keep = field(`What “${cur.title}” keeps`, ta(ev.keep || cur.details));
+    inputs.new_title = field("New task", Object.assign(el("input"), { type: "text", value: ev.new_title || "" }));
+    inputs.new_details = field("Its details", ta(ev.new_details));
+    const q = (ev.queues || []).find((x) => x.group_id != null && x.name.toLowerCase() === (ev.group || "").toLowerCase());
+    inputs.queue = field("Queue", queueSelect(ev.queues || [], q ? String(q.group_id) : "main", false));
+  }
+  inputs.note = field("Why (kept in the task's history)", Object.assign(el("input"), { type: "text", value: ev.why || "" }));
+  const actions = el("div", "pactions");
+  if (live) {
+    const ok = el("button", "primary", "Change the tasks");
+    ok.onclick = guarded(async () => {
+      const c = { note: inputs.note.value };
+      for (const k of ["part", "remaining", "keep", "new_title", "new_details"]) if (inputs[k]) c[k] = inputs[k].value;
+      if (inputs.queue) c.group_id = inputs.queue.value === "main" ? null : Number(inputs.queue.value);
+      card.querySelectorAll("button").forEach((b) => (b.disabled = true));
+      await api("fd_answer", sid, ev.req_id, "change", c);
+    });
+    const no = el("button", "ghost", "Keep them as they are");
+    no.onclick = guarded(async () => { await api("fd_answer", sid, ev.req_id, "decline", ""); });
+    actions.append(ok, no);
+  } else {
+    actions.appendChild(el("span", "muted small", "No longer waiting."));
+    card.classList.add("done");
+  }
+  card.appendChild(actions);
+  return card;
+}
+
+function fdSkillCard(ev) {
+  const sid = fd.current;
+  const card = el("div", "rcard");
+  card.dataset.rule = ev.id;
+  card.appendChild(el("div", "ptitle", "✎ Claude suggests a skill"));
+  if (ev.why) card.appendChild(el("div", "muted small", ev.why));
+  const field = (label, node) => { card.append(el("label", "small-label", label), node); return node; };
+  const name = field("Name", Object.assign(el("input"), { type: "text", value: ev.name || "", spellcheck: false }));
+  const desc = field("When to use it", Object.assign(el("input"), { type: "text", value: ev.description || "" }));
+  const body = field("Instructions", Object.assign(el("textarea"), { rows: 10, value: ev.body || "", spellcheck: false }));
+  const where = el("select");
+  const project = fd.detail && fd.detail.project;
+  if (project) where.appendChild(Object.assign(el("option", "", `This project's skills (${project.name})`), { value: "project" }));
+  where.appendChild(Object.assign(el("option", "", "My personal skills (every project)"), { value: "personal" }));
+  field("Save to", where);
+  const actions = el("div", "pactions");
+  const add = el("button", "primary", "Add skill");
+  add.onclick = guarded(async () => {
+    const msg = await api("fd_apply_skill", sid, ev.id, name.value, desc.value, body.value, where.value);
+    ruleDone(card, msg);
+  });
+  const dismiss = el("button", "ghost", "Dismiss");
+  dismiss.onclick = guarded(async () => { await api("fd_dismiss_skill", sid, ev.id); ruleDone(card, "Dismissed."); });
+  actions.append(add, dismiss);
+  card.appendChild(actions);
+  return card;
+}
 
 /* ---- starting tasks ---- */
 
@@ -1516,6 +2117,28 @@ function fdBind() {
   $("#fdn-start").onclick = fdStart;
   $("#fdn-task").onkeydown = (e) => { if (e.key === "Enter") fdStart(); };
   $("#fd-send").onclick = fdSend;
+  $("#fd-auto-takeoff").onchange = guarded(async (e) => {
+    if (e.target.checked && !(await confirmWord("Auto take-off starts queued routines on its own — each one is a " +
+        "Claude Code session that uses its project's default preset.", "yes", "Turn on"))) {
+      e.target.checked = false; return;
+    }
+    await api("fd_set_auto_takeoff", e.target.checked);
+    fdRefreshSoon();
+  });
+  $("#fd-image-btn").onclick = () => $("#fd-image-file").click();
+  $("#fd-image-file").onchange = (e) => { fdAddImages([...e.target.files]); e.target.value = ""; };
+  $("#fd-input").addEventListener("paste", (e) => {
+    const files = [...(e.clipboardData ? e.clipboardData.files : [])].filter((f) => /^image\//.test(f.type));
+    if (files.length) { e.preventDefault(); fdAddImages(files); }
+  });
+  for (const zone of ["#fd-input", "#fd-transcript"]) {
+    $(zone).addEventListener("dragover", (e) => e.preventDefault());
+    $(zone).addEventListener("drop", (e) => {
+      const files = [...e.dataTransfer.files].filter((f) => /^image\//.test(f.type));
+      if (files.length) { e.preventDefault(); fdAddImages(files); }
+    });
+  }
+  bindMarkup();
   $("#fd-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); fdSend(); }
   });
@@ -1541,16 +2164,22 @@ function fdBind() {
     if (!(await confirmWord("End this session? (The conversation stays in the list for a day.)", "yes", "End session"))) return;
     await api("fd_end", fd.current); await fdSelect(fd.current); fdRefresh();
   });
-  $("#fd-rmcopy").onclick = guarded(async () => {
-    try { await api("fd_remove_worktree", fd.current, false); }
-    catch (e) {
-      if (!/uncommitted/.test(e.message)) throw e;
-      if (!(await confirmWord(e.message + " Delete the copy anyway? (Its branch is kept.)", "remove", "Delete copy"))) return;
-      await api("fd_remove_worktree", fd.current, true);
-    }
-    await fdSelect(fd.current);
-    banner("Copy removed. Its branch is still in the repository.", "info");
+  $("#fd-rmcopy").onclick = () => {
+    $("#bb-where").textContent = `Branch ${fd.detail.branch}` + (fd.detail.worktree ? ` · ${fd.detail.cwd}` : " (copy already removed)");
+    openModal("#modal-bringback");
+  };
+  const bring = (action) => guarded(async () => {
+    if (action === "discard" && !(await confirmWord("Discard the copy and its branch? Its work is deleted.", "discard", "Discard"))) return;
+    closeModal();
+    const r = await api("fd_bring_back", fd.current, action);
+    await fdSelect(fd.current); fdRefresh();
+    banner(r.text, "info");
   });
+  $("#bb-merge").onclick = bring("merge");
+  $("#bb-keep").onclick = bring("keep");
+  $("#bb-discard").onclick = bring("discard");
+  $("#bb-review").onclick = () => { closeModal(); fdDebriefThis(); };
+  $("#bb-cancel").onclick = closeModal;
   $("#fd-debrief").onclick = fdDebriefThis;
 }
 
@@ -1700,7 +2329,7 @@ const rrLoad = guarded(async () => {
 
 function rrShow(pane) {
   rr.pane = pane;
-  for (const n of ["intro", "new", "project", "global", "rulesets", "presets", "templates", "agents"]) {
+  for (const n of ["intro", "new", "import", "project", "global", "rulesets", "skills", "presets", "templates", "agents"]) {
     show($(`#rr-pane-${n}`), n === pane);
   }
   document.querySelectorAll(".rr-navbtn").forEach((b) => b.classList.toggle("on", b.dataset.pane === pane));
@@ -1710,6 +2339,8 @@ function rrShow(pane) {
   if (pane === "rulesets") rrRenderRuleSets();
   if (pane === "presets") rrRenderPresets();
   if (pane === "templates") rrRenderTemplates();
+  if (pane === "import") imOpen();
+  if (pane === "skills") skOpen();
   $("#rr-main").scrollTop = 0;
 }
 
@@ -1838,8 +2469,15 @@ function rrRenderProject() {
   rrRuleSetChecks($("#rrp-rulesets"), p.rule_set_ids);
   rrFillPresets($("#rrp-preset"), p.preset_id);
   rrSetDirty(false);
+  $("#rrp-images").checked = p.images !== false;
+  rrRenderCopies();
   rrRenderTasks();
   rrRenderLinks();
+  roEdit(null);
+  $("#rrp-routine-form").open = false;
+  rgEdit(null);
+  $("#rrp-group-form").open = false;
+  rrRenderRoutines();
 }
 
 function rrRenderFolders() {
@@ -1848,15 +2486,17 @@ function rrRenderFolders() {
   if (!rr.proj.folders.length) box.appendChild(el("span", "muted", "none"));
   for (const f of rr.proj.folders) {
     // A small card: the folder's name, then its type and a remove button.
-    const chip = el("span", "folder-chip" + (f.kind === "reference" ? " ref" : ""));
+    const chip = el("span", "folder-chip" + (f.kind === "reference" ? " ref" : f.kind === "workspace" ? " ws" : ""));
     chip.title = f.path + (f.exists ? "" : " (missing)");
     const name = el("span", "fc-name", f.label);
     if (!f.exists) name.appendChild(el("span", "muted", " (missing)"));
     const row = el("span", "fc-row");
     const kind = el("select", "kind-select");
     kind.setAttribute("aria-label", `Type of ${f.label}`);
-    kind.title = "Work: Claude reads and edits it, and Debrief reviews it. Reference: read only.";
-    for (const [v, t] of [["work", "Work folder"], ["reference", "Reference (read only)"]]) {
+    kind.title = "Work: Claude reads and edits it, and Debrief reviews it. Reference: read only. " +
+      "Workspace: read only, but a new folder Claude creates there is added as a work folder.";
+    for (const [v, t] of [["work", "Work folder"], ["reference", "Reference (read only)"],
+                          ["workspace", "Workspace (new folders join)"]]) {
       kind.appendChild(Object.assign(el("option", "", t), { value: v }));
     }
     kind.value = f.kind;
@@ -1873,43 +2513,306 @@ function rrRenderFolders() {
   }
 }
 
+/* ---- routines (readyroom/routines.py) ---- */
+
+const ro = { editing: null };
+
+const rrRenderRoutines = guarded(async () => {
+  if (rr.pid == null) return;
+  const pid = rr.pid;
+  const data = await api("rr_routines", pid);
+  if (rr.pid !== pid) return;
+  const box = $("#rrp-routines");
+  box.replaceChildren();
+  if (!data.routines.length) box.appendChild(el("p", "muted small", "No routines yet."));
+  for (const r of data.routines) {
+    const row = el("div", "routine-row" + (r.enabled ? "" : " off"));
+    const info = el("div", "routine-info");
+    info.appendChild(el("b", "", r.name));
+    const group = ((rr.proj && rr.proj.groups) || []).find((g) => g.id === r.group_id);
+    const tags = [r.trigger === "after_task" ? "after each task" : r.trigger === "group_done" ? "when its group is finished"
+                  : "manual", r.gate === "reviewed" ? "needs a clear review" : "no gate"];
+    if (group) tags.push(`group: ${group.name}`);
+    if (!r.enabled) tags.push("paused");
+    info.appendChild(el("span", "muted small", tags.join(" · ")));
+    const run = el("button", "ghost small-btn", "▶ Run");
+    run.title = "Put it next in the queue";
+    run.onclick = guarded(async () => { rr.proj = await api("rr_run_routine", r.id); rrRenderTasks(); rrLoad(); });
+    const edit = el("button", "ghost small-btn", "Edit");
+    edit.onclick = () => roEdit(r);
+    const toggle = el("button", "ghost small-btn", r.enabled ? "Pause" : "Resume");
+    toggle.title = "Paused routines don't queue themselves after tasks";
+    toggle.onclick = guarded(async () => {
+      await api("rr_save_routine", pid, { ...r, enabled: !r.enabled }, r.id); rrRenderRoutines();
+    });
+    const del = el("button", "ghost small-btn", "Delete");
+    del.onclick = guarded(async () => {
+      if (!(await confirmWord(`Delete the routine ${r.name}?`, "delete", "Delete"))) return;
+      await api("rr_delete_routine", pid, r.id); rrRenderRoutines();
+    });
+    row.append(info, run, edit, toggle, del);
+    box.appendChild(row);
+  }
+  rrRenderSecrets(pid, data);
+  const gated = data.routines.some((r) => r.gate === "reviewed");
+  $("#rrp-review-state").textContent = !gated ? "" : data.blockers.length
+    ? "Review not clear yet: " + data.blockers.join(" ") : "✓ Review is clear: gated routines can start.";
+  show($("#rrp-start-history"), data.blockers.some((b) => /never been reviewed/.test(b)));
+});
+
+const rg = { editing: null };
+
+function rgEdit(g) {
+  rg.editing = g;
+  $("#tgf-name").value = g ? g.name : "";
+  $("#tgf-priority").value = g ? g.priority : "normal";
+  $("#tgf-tags").value = g ? g.tags.join(", ") : "";
+  $("#rrp-group-form summary").textContent = g ? `Edit task group: ${g.name}` : "＋ New task group";
+  $("#rrp-group-form").open = !!g || $("#rrp-group-form").open;
+}
+
+function rgBind() {
+  $("#tgf-save").onclick = guarded(async () => {
+    rr.proj = await api("rr_save_group", rr.pid, { name: $("#tgf-name").value, priority: $("#tgf-priority").value,
+      tags: $("#tgf-tags").value }, rg.editing ? rg.editing.id : null);
+    rgEdit(null); $("#rrp-group-form").open = false;
+    rrRenderTasks(); rrLoad(); rrRenderRoutines();
+  });
+  $("#tgf-cancel").onclick = () => { rgEdit(null); $("#rrp-group-form").open = false; };
+}
+
+function roFillGroups(selected) {
+  const sel = $("#rro-group");
+  sel.replaceChildren(Object.assign(el("option", "", "None (main queue)"), { value: "" }));
+  for (const g of (rr.proj && rr.proj.groups) || []) sel.appendChild(Object.assign(el("option", "", g.name), { value: g.id }));
+  sel.value = selected ? String(selected) : "";
+}
+
+/* Likely secrets in the project's files, and key files git would publish. */
+function rrRenderSecrets(pid, data) {
+  const box = $("#rrp-secrets");
+  box.replaceChildren();
+  const hits = data.secrets || [], files = data.secret_files || [];
+  show(box, hits.length > 0 || files.length > 0);
+  if (hits.length) {
+    box.appendChild(el("b", "", `⚠ ${hits.length} possible secret${hits.length === 1 ? "" : "s"} in this project's files`));
+    box.appendChild(el("p", "muted small", "Routines that need a clear review won't start while these are here. " +
+      "Remove the secret (use an environment variable or an ignored file), or mark a line safe if it isn't one."));
+    for (const h of hits.slice(0, 30)) {
+      const row = el("div", "secret-row");
+      row.append(el("span", "", `${h.path}:${h.line}`), el("span", "muted small", `${h.kind} · ${h.preview}`));
+      const ok = el("button", "ghost small-btn", "Mark safe");
+      ok.title = "Not a real secret: don't report this exact line again (a change to it is reported)";
+      ok.onclick = guarded(async () => rrRenderSecrets(pid, await api("rr_mark_secret_safe", pid, h.fingerprint)));
+      row.appendChild(ok);
+      box.appendChild(row);
+    }
+  }
+  if (files.length) {
+    box.appendChild(el("b", "", `⚠ Key or secret files git would publish`));
+    for (const f of files) {
+      box.appendChild(el("div", "secret-row", `${f.label ? f.label + "/" : ""}${f.path}` +
+        (f.tracked ? " — already tracked by git: also run git rm --cached on it" : "")));
+    }
+    const fix = el("button", "ghost small-btn", "Add secret-file patterns to .gitignore");
+    fix.onclick = guarded(async () => {
+      rrRenderSecrets(pid, await api("rr_ignore_secret_files", pid));
+      banner("Added .env, key and credential patterns to .gitignore.", "info");
+    });
+    box.appendChild(fix);
+  }
+}
+
+function roEdit(r) {
+  ro.editing = r;
+  roFillGroups(r ? r.group_id : null);
+  $("#rro-name").value = r ? r.name : "";
+  $("#rro-text").value = r ? r.instructions : "";
+  $("#rro-trigger").value = r ? r.trigger : "manual";
+  $("#rro-gate").value = r ? r.gate : "none";
+  $("#rro-mode").value = r ? r.mode || "" : "";
+  $("#rrp-routine-form").open = true;
+  $("#rrp-routine-form summary").textContent = r ? `Edit routine: ${r.name}` : "＋ New routine";
+}
+
+function roBind() {
+  $("#rro-save").onclick = guarded(async () => {
+    const r = ro.editing;
+    await api("rr_save_routine", rr.pid, { name: $("#rro-name").value, instructions: $("#rro-text").value,
+      trigger: $("#rro-trigger").value, gate: $("#rro-gate").value, enabled: r ? r.enabled : true,
+      group_id: $("#rro-group").value || null, mode: $("#rro-mode").value }, r ? r.id : null);
+    roEdit(null);
+    $("#rrp-routine-form").open = false;
+    rrRenderRoutines();
+  });
+  $("#rro-cancel").onclick = () => { roEdit(null); $("#rrp-routine-form").open = false; };
+}
+
+const PRIORITY_LABEL = { high: "High", normal: "Normal", low: "Low", backlog: "Backlog" };
+
+function rrTaskRow(t, i, queue) {
+  const p = rr.proj;
+  const row = el("li", "task-row" + (i === 0 ? " current" : ""));
+  row.dataset.id = t.id;
+  row.appendChild(el("span", "badge-cur", i === 0 ? "CURRENT" : `${i + 1}.`));
+  const body = el("div");
+  const tt = el("div", "t", t.title + (t.status === "active" ? "  · in progress" : ""));
+  if (t.routine_id) tt.appendChild(el("span", "routine-tag", "routine"));
+  if (t.fix_review) tt.appendChild(el("span", "routine-tag", "review fixes"));
+  body.appendChild(tt);
+  if (t.details) body.appendChild(el("div", "d", t.details));
+  if (t.origin === "standalone" && t.origin_path) body.appendChild(el("div", "origin", "Files: " + t.origin_path));
+  const acts = el("div", "acts");
+  const refresh = async (proj) => { rr.proj = proj; rrRenderTasks(); rrLoad(); };
+  const btn = (label, title, fn, disabled = false) => {
+    const b = el("button", "ghost", label); b.title = title; b.disabled = disabled;
+    b.onclick = guarded(fn); acts.appendChild(b);
+  };
+  btn("↑", "Move up", async () => refresh(await api("rr_move_task", t.id, "up")), i === 0);
+  btn("↓", "Move down", async () => refresh(await api("rr_move_task", t.id, "down")), i === queue.length - 1);
+  if (i) btn("Make current", "Move to the top of its queue", async () => refresh(await api("rr_move_task", t.id, "top")));
+  if ((p.groups || []).length && t.status !== "active") {
+    const move = el("select", "move-group");
+    move.title = "Move to another queue";
+    move.appendChild(Object.assign(el("option", "", "Move to…"), { value: "" }));
+    if (t.group_id) move.appendChild(Object.assign(el("option", "", "Main queue"), { value: "main" }));
+    for (const g of p.groups) if (g.id !== t.group_id) move.appendChild(Object.assign(el("option", "", g.name), { value: g.id }));
+    move.onchange = guarded(async () => {
+      if (!move.value) return;
+      await refresh(await api("rr_set_task_group", t.id, move.value === "main" ? null : Number(move.value)));
+    });
+    acts.appendChild(move);
+  }
+  btn("Changes", "Everything that changed in this task, and why", async () => showTaskHistory(t));
+  btn("Edit", "Edit this task", async () => {
+    const title = await promptText("Task:", { value: t.title, required: true, line: true });
+    if (title === null) return;
+    const details = await promptText("Details (optional — Ctrl+Enter to save):", { value: t.details });
+    if (details === null) return;
+    await refresh(await api("rr_update_task", t.id, title, details));
+  });
+  btn("Delete", "Delete this task", async () => {
+    if (!(await confirmWord(`Delete “${t.title}”?`, "yes", "Delete"))) return;
+    await refresh(await api("rr_delete_task", t.id));
+  }, t.status === "active");
+  row.append(body, acts);
+  return row;
+}
+
+const EDIT_KIND = { created: "Created", edited: "Edited", scope_added: "Scope added", merged_in: "Pulled in work",
+  merged_away: "Work moved out", split_out: "Split", moved: "Moved", status: "Status", deleted: "Deleted" };
+
+const showTaskHistory = guarded(async (t) => {
+  const edits = await api("rr_task_history", t.id);
+  const box = $("#history-list");
+  box.replaceChildren();
+  $("#history-title").textContent = `Changes to “${t.title}”`;
+  if (!edits.length) box.appendChild(el("p", "muted", "No changes recorded."));
+  for (const e of [...edits].reverse()) {
+    const row = el("div", "hist-row");
+    const head = el("div", "hist-head");
+    head.append(el("b", "", EDIT_KIND[e.kind] || e.kind),
+                el("span", "muted small", ` ${new Date(e.ts * 1000).toLocaleString()} · by ${e.by}`));
+    row.appendChild(head);
+    if (e.note) row.appendChild(el("div", "small", e.note));
+    if (e.after && e.after.title && e.before && e.before.title && e.after.title !== e.before.title) {
+      row.appendChild(el("div", "small", `Title: “${e.before.title}” → “${e.after.title}”`));
+    }
+    if (e.removed) {
+      row.appendChild(el("div", "removed-label", "Removed from the task:"));
+      row.appendChild(el("pre", "removed", e.removed));
+    }
+    if (e.after && typeof e.after.details === "string" && e.kind !== "created") {
+      const d = el("details", "small");
+      d.append(el("summary", "", "Details after this change"), el("pre", "", e.after.details));
+      row.appendChild(d);
+    }
+    box.appendChild(row);
+  }
+  openModal("#modal-history");
+});
+
+const rrRenderCopies = guarded(async () => {
+  const pid = rr.pid;
+  const copies = await api("rr_copies", pid);
+  if (rr.pid !== pid) return;
+  const box = $("#rrp-copies");
+  box.replaceChildren();
+  show(box, copies.length > 0);
+  if (!copies.length) return;
+  box.appendChild(el("span", "muted small", "Own copies not brought back yet: "));
+  for (const c of copies) {
+    const b = el("button", "link", `“${c.task}” (${c.branch})`);
+    b.title = c.folder || "Copy removed; the branch is kept";
+    b.onclick = () => { showTool("flightdeck"); fdSelect(c.id); };
+    box.appendChild(b);
+  }
+});
+
+const showProjectLog = guarded(async () => {
+  const log = await api("rr_project_log", rr.pid);
+  const box = $("#history-list");
+  box.replaceChildren();
+  $("#history-title").textContent = `Activity log — ${rr.proj.name}`;
+  if (!log.length) box.appendChild(el("p", "muted", "Nothing recorded yet."));
+  for (const e of log) {
+    const row = el("div", "hist-row");
+    const head = el("div", "hist-head");
+    const what = e.subject === "task" ? `Task “${e.title}”: ${(EDIT_KIND[e.kind] || e.kind).toLowerCase()}`
+                                      : e.action[0].toUpperCase() + e.action.slice(1);
+    head.append(el("b", "", what),
+                el("span", "muted small", ` ${new Date(e.ts * 1000).toLocaleString()} · by ${e.by}`));
+    row.appendChild(head);
+    if (e.detail) row.appendChild(el("pre", "small", e.detail));
+    if (e.removed) {
+      row.appendChild(el("div", "removed-label", "Removed from the task:"));
+      row.appendChild(el("pre", "removed", e.removed));
+    }
+    box.appendChild(row);
+  }
+  openModal("#modal-history");
+});
+
 function rrRenderTasks() {
   const p = rr.proj;
+  const groups = p.groups || [];
   const list = $("#rrp-tasks");
   list.replaceChildren();
-  if (!p.tasks.length) list.appendChild(el("li", "muted small", "No open tasks. Add the next thing to work on below."));
-  p.tasks.forEach((t, i) => {
-    const row = el("li", "task-row" + (i === 0 ? " current" : ""));
-    row.dataset.id = t.id;
-    row.appendChild(el("span", "badge-cur", i === 0 ? "CURRENT" : `${i + 1}.`));
-    const body = el("div");
-    body.appendChild(el("div", "t", t.title + (t.status === "active" ? "  · in progress" : "")));
-    if (t.details) body.appendChild(el("div", "d", t.details));
-    if (t.origin === "standalone" && t.origin_path) body.appendChild(el("div", "origin", "Files: " + t.origin_path));
-    const acts = el("div", "acts");
-    const btn = (label, title, fn, disabled = false) => {
-      const b = el("button", "ghost", label); b.title = title; b.disabled = disabled;
-      b.onclick = guarded(fn); acts.appendChild(b);
-    };
-    btn("↑", "Move up", async () => { rr.proj = await api("rr_move_task", t.id, "up"); rrRenderTasks(); rrLoad(); }, i === 0);
-    btn("↓", "Move down", async () => { rr.proj = await api("rr_move_task", t.id, "down"); rrRenderTasks(); rrLoad(); },
-        i === p.tasks.length - 1);
-    if (i) btn("Make current", "Move to the top of the queue",
-               async () => { rr.proj = await api("rr_move_task", t.id, "top"); rrRenderTasks(); rrLoad(); });
-    btn("Edit", "Edit this task", async () => {
-      const title = await promptText("Task:", { value: t.title, required: true, line: true });
-      if (title === null) return;
-      const details = await promptText("Details (optional — Ctrl+Enter to save):", { value: t.details });
-      if (details === null) return;
-      rr.proj = await api("rr_update_task", t.id, title, details); rrRenderTasks(); rrLoad();
+  const main = p.tasks.filter((t) => !t.group_id);
+  if (!main.length) list.appendChild(el("li", "muted small", groups.length ? "Main queue: no open tasks."
+    : "No open tasks. Add the next thing to work on below."));
+  main.forEach((t, i) => list.appendChild(rrTaskRow(t, i, main)));
+  // Task groups: queues that run alongside the main one.
+  const gbox = $("#rrp-groups");
+  gbox.replaceChildren();
+  for (const g of groups) {
+    const sec = el("section", `task-group prio-${g.priority}`);
+    const head = el("div", "group-head");
+    head.append(el("b", "", g.name), el("span", `prio prio-${g.priority}`, PRIORITY_LABEL[g.priority] || g.priority));
+    for (const tag of g.tags) head.appendChild(el("span", "tag", tag));
+    head.appendChild(el("span", "spacer"));
+    const edit = el("button", "ghost small-btn", "Edit");
+    edit.onclick = () => rgEdit(g);
+    const del = el("button", "ghost small-btn", "Delete group");
+    del.title = "Its tasks move to the main queue";
+    del.onclick = guarded(async () => {
+      if (!(await confirmWord(`Delete the group ${g.name}? Its tasks move to the main queue.`, "delete", "Delete"))) return;
+      rr.proj = await api("rr_delete_group", rr.pid, g.id); rrRenderTasks(); rrLoad(); rrRenderRoutines();
     });
-    btn("Delete", "Delete this task", async () => {
-      if (!(await confirmWord(`Delete “${t.title}”?`, "yes", "Delete"))) return;
-      rr.proj = await api("rr_delete_task", t.id); rrRenderTasks(); rrLoad();
-    }, t.status === "active");
-    row.append(body, acts);
-    list.appendChild(row);
-  });
+    head.append(edit, del);
+    const ol = el("ol", "task-list");
+    const q = p.tasks.filter((t) => t.group_id === g.id);
+    if (!q.length) ol.appendChild(el("li", "muted small", "No open tasks in this group."));
+    q.forEach((t, i) => ol.appendChild(rrTaskRow(t, i, q)));
+    sec.append(head, ol);
+    gbox.appendChild(sec);
+  }
+  const sel = $("#rrp-task-group"), keep = sel.value;
+  sel.replaceChildren(Object.assign(el("option", "", "Main queue"), { value: "" }));
+  for (const g of groups) sel.appendChild(Object.assign(el("option", "", g.name), { value: g.id }));
+  sel.value = groups.some((g) => String(g.id) === keep) ? keep : "";
+  show(sel, groups.length > 0);
+  roFillGroups($("#rro-group").value);  // the routine form's group list follows the groups
   const hist = $("#rrp-history");
   hist.replaceChildren();
   $("#rrp-history-count").textContent = p.history.length ? `(${p.history.length})` : "(none yet)";
@@ -1933,8 +2836,10 @@ function rrRenderTasks() {
 const rrAddTask = guarded(async () => {
   const title = $("#rrp-task-title").value.trim();
   if (!title) { $("#rrp-task-title").focus(); return; }
-  rr.proj = await api("rr_add_task", rr.pid, title, "", $("#rrp-task-first").checked);
-  $("#rrp-task-title").value = ""; $("#rrp-task-first").checked = false;
+  const gid = $("#rrp-task-group").value;
+  rr.proj = await api("rr_add_task", rr.pid, title, $("#rrp-task-details").value, $("#rrp-task-first").checked,
+                      gid ? Number(gid) : null);
+  $("#rrp-task-title").value = ""; $("#rrp-task-details").value = ""; $("#rrp-task-first").checked = false;
   rrRenderTasks(); rrLoad();
 });
 
@@ -2103,6 +3008,11 @@ function rrRenderTemplates() {
   rrRuleSetChecks($("#rrt-rulesets"), it ? it.rule_set_ids : []);
   rrFillPresets($("#rrt-preset"), it ? it.preset_id : null, "None");
   show($("#rrt-delete"), !!it);
+  const x = (it && it.extras) || {};
+  const parts = [["task group", x.groups], ["routine", x.routines], ["skill", x.skills], ["review agent", x.agents]]
+    .filter(([, l]) => l && l.length).map(([n, l]) => `${l.length} ${n}${l.length === 1 ? "" : "s"}`);
+  $("#rrt-extras").textContent = parts.length ? `Also sets up: ${parts.join(", ")} (from the project it was made from).`
+    : "Made from a project with “Save as template”, a template also copies its task groups, routines, skills and review agents.";
 }
 
 const rrSaveTemplate = guarded(async () => {
@@ -2270,7 +3180,10 @@ async function rrAgentsSummary() {
 /* ---- ✨ Draft with Claude ---- */
 
 const DRAFT_TITLES = { project_rules: "Draft project rules", global_rules: "Draft global rules",
-                       rule_set: "Draft a rule set", agent: "Draft a review agent" };
+                       rule_set: "Draft a rule set", agent: "Draft a review agent", task: "Draft a task",
+                       routine: "Draft a routine" };
+const DRAFT_HINTS = { task: "e.g. the save loader crashes on old files — make it handle them and add a test",
+                      routine: "e.g. after every task, update README and the docs folder to match what changed" };
 let draftCtx = null;
 
 function openDraft(kind, target) {
@@ -2285,8 +3198,12 @@ function openDraft(kind, target) {
   show($("#draft-result"), false);
   $("#draft-text").value = "";
   $("#draft-use").disabled = true;
-  const agent = kind === "agent";
-  show($("#draft-agent-title-row"), agent); show($("#draft-agent-sev-row"), agent);
+  const agent = kind === "agent", named = ["agent", "task", "routine"].includes(kind);
+  show($("#draft-agent-title-row"), named); show($("#draft-agent-sev-row"), agent);
+  show($("#draft-routine-row"), kind === "routine");
+  $("#draft-name-label").textContent = kind === "task" ? "Title" : "Name";
+  $("#draft-desc").placeholder = DRAFT_HINTS[kind] ||
+    "e.g. Don't add new libraries without asking. Keep the old save format loading.";
   openModal("#modal-draft");
   $("#draft-desc").focus();
 }
@@ -2298,10 +3215,18 @@ const runDraft = guarded(async () => {
   go.disabled = true; show($("#draft-busy"));
   try {
     const current = $("#draft-revise").checked ? draftCtx.field.value : "";
-    const pid = draftCtx.kind === "project_rules" ? rr.pid
+    const pid = ["project_rules", "task", "routine"].includes(draftCtx.kind) ? rr.pid
               : draftCtx.kind === "agent" ? rr.agentScope : null;
     const r = await api("rr_draft", draftCtx.kind, desc, current, pid);
-    if (draftCtx.kind === "agent") {
+    if (draftCtx.kind === "task") {
+      $("#draft-agent-title").value = r.title;
+      $("#draft-text").value = r.details;
+    } else if (draftCtx.kind === "routine") {
+      $("#draft-agent-title").value = r.name || $("#rro-name").value;
+      $("#draft-text").value = r.instructions;
+      $("#draft-trigger").value = r.trigger;
+      $("#draft-gate").value = r.gate;
+    } else if (draftCtx.kind === "agent") {
       $("#draft-text").value = r.prompt;
       $("#draft-agent-title").value = r.title || $("#rra-title-in").value;
       $("#draft-agent-sev").value = r.severity || "medium";
@@ -2323,10 +3248,21 @@ function useDraft() {
     if ($("#draft-agent-title").value.trim()) $("#rra-title-in").value = $("#draft-agent-title").value.trim();
     $("#rra-severity").value = $("#draft-agent-sev").value;
   }
-  field.dispatchEvent(new Event("input"));  // marks the project as having unsaved changes
+  if (kind === "task") $("#rrp-task-title").value = $("#draft-agent-title").value.trim();
+  if (kind === "routine") {
+    if (!ro.editing) roEdit(null);
+    $("#rro-name").value = $("#draft-agent-title").value.trim();
+    $("#rro-text").value = $("#draft-text").value;  // roEdit cleared it
+    $("#rro-trigger").value = $("#draft-trigger").value;
+    $("#rro-gate").value = $("#draft-gate").value;
+    $("#rrp-routine-form").open = true;
+  }
+  if (kind !== "task" && kind !== "routine") field.dispatchEvent(new Event("input"));  // unsaved project changes
   closeModal();
   field.focus();
-  banner("Draft added. Review it, then press Save.", "info");
+  banner(kind === "task" ? "Draft added. Review it, then press Add task."
+         : kind === "routine" ? "Draft added. Review it, then press Save routine."
+         : "Draft added. Review it, then press Save.", "info");
 }
 
 function rrBindAgentsAndDrafts() {
@@ -2348,6 +3284,577 @@ function rrBindAgentsAndDrafts() {
 
 /* ---- binding ---- */
 
+/* ---------------- Shared cards: Claude's questions and proposed rules ---------------- */
+
+/* Questions as clickable options, like Claude Code's AskUserQuestion. Every question
+   also takes a typed answer. onSubmit gets {question: answer}; answers to
+   multi-select questions are joined with ", ". */
+function questionCard(questions, { live = true, onSubmit, onSkip, answered = null } = {}) {
+  const card = el("div", "qcard");
+  const picks = questions.map(() => new Set());
+  const other = questions.map(() => "");
+  const submit = el("button", "primary", "Send answers");
+  const ready = () => questions.every((_, i) => picks[i].size || other[i].trim());
+  const sync = () => { submit.disabled = !ready(); };
+  questions.forEach((q, i) => {
+    const box = el("div", "q");
+    const head = el("div", "qhead");
+    if (q.header) head.appendChild(el("span", "chip", q.header));
+    head.appendChild(el("span", "qtext", q.question));
+    if (q.multiSelect) head.appendChild(el("span", "muted small", "pick any"));
+    box.appendChild(head);
+    const opts = el("div", "qopts");
+    q.options.forEach((o) => {
+      const b = el("button", "qopt");
+      b.type = "button";
+      b.appendChild(el("span", "qlabel", o.label));
+      if (o.description) b.appendChild(el("span", "qdesc", o.description));
+      b.disabled = !live;
+      b.setAttribute("aria-pressed", "false");
+      b.onclick = () => {
+        if (q.multiSelect) { picks[i].has(o.label) ? picks[i].delete(o.label) : picks[i].add(o.label); }
+        else { picks[i].clear(); picks[i].add(o.label); other[i] = ""; otherIn.value = ""; }
+        opts.querySelectorAll(".qopt").forEach((x) =>
+          x.setAttribute("aria-pressed", String(picks[i].has(x.querySelector(".qlabel").textContent))));
+        sync();
+      };
+      if (answered && String(answered[q.question] || "").split(", ").includes(o.label)) b.setAttribute("aria-pressed", "true");
+      opts.appendChild(b);
+    });
+    const otherIn = Object.assign(el("input", "qother"), { type: "text", placeholder: "Or type your own answer…",
+                                                         disabled: !live });
+    otherIn.oninput = () => {
+      other[i] = otherIn.value;
+      if (otherIn.value.trim() && !q.multiSelect) {
+        picks[i].clear();
+        opts.querySelectorAll(".qopt").forEach((x) => x.setAttribute("aria-pressed", "false"));
+      }
+      sync();
+    };
+    otherIn.onkeydown = (e) => { if (e.key === "Enter" && ready()) submit.click(); };
+    box.append(opts, otherIn);
+    card.appendChild(box);
+  });
+  const actions = el("div", "pactions");
+  if (live) {
+    submit.disabled = true;
+    submit.onclick = () => {
+      const answers = {};
+      questions.forEach((q, i) => {
+        const parts = [...picks[i]];
+        if (other[i].trim()) parts.push(other[i].trim());
+        answers[q.question] = parts.join(", ");
+      });
+      card.querySelectorAll("button, input").forEach((x) => (x.disabled = true));
+      onSubmit(answers);
+    };
+    actions.appendChild(submit);
+    if (onSkip) {
+      const skip = el("button", "ghost", "Skip");
+      skip.onclick = () => { card.querySelectorAll("button, input").forEach((x) => (x.disabled = true)); onSkip(); };
+      actions.appendChild(skip);
+    }
+  } else {
+    card.classList.add("done");
+  }
+  card.appendChild(actions);
+  return card;
+}
+
+function questionsDone(card, text) {
+  card.classList.add("done");
+  card.querySelectorAll("button, input").forEach((x) => (x.disabled = true));
+  card.querySelector(".pactions").replaceChildren(el("span", "muted small", text));
+}
+
+/* A rule Claude proposed, with the same fields as the rules editors. targets:
+   [{value, label}]; a value ending in ":new" asks for a name. onApply gets
+   {text, target, name}. */
+function ruleCard(p, { targets, initial, live = true, status = "", onApply, onDismiss }) {
+  const card = el("div", "rcard");
+  card.dataset.rule = p.id ?? "";
+  card.appendChild(el("div", "ptitle", "✎ Claude suggests a rule"));
+  if (p.why) card.appendChild(el("div", "muted small", p.why));
+  const where = el("select");
+  for (const t of targets) where.appendChild(Object.assign(el("option", "", t.label), { value: t.value }));
+  if (initial && targets.some((t) => t.value === initial)) where.value = initial;
+  const name = Object.assign(el("input"), { type: "text", placeholder: "New rule set name", value: p.rule_set || "",
+                                            spellcheck: false });
+  const syncName = () => show(name, where.value.endsWith(":new"));
+  where.onchange = syncName;
+  const text = Object.assign(el("textarea"), { rows: Math.min(8, Math.max(2, (p.text || "").split("\n").length + 1)),
+                                               value: p.text || "" });
+  const row = el("label", "small-label", "Add to");
+  card.append(row, where, name, text);
+  syncName();
+  const actions = el("div", "pactions");
+  if (live && !status) {
+    const apply = el("button", "primary", "Add rule");
+    apply.onclick = () => {
+      if (!text.value.trim()) { text.focus(); return; }
+      if (where.value.endsWith(":new") && !name.value.trim()) { name.focus(); return; }
+      onApply({ text: text.value.trim(), target: where.value, name: name.value.trim() });
+    };
+    const dismiss = el("button", "ghost", "Dismiss");
+    dismiss.onclick = onDismiss;
+    actions.append(apply, dismiss);
+  } else {
+    ruleDone(card, status === "dismissed" ? "Dismissed." : status === "applied" ? "Added." : status || "No longer open.");
+  }
+  card.appendChild(actions);
+  return card;
+}
+
+function ruleDone(card, text) {
+  card.classList.add("done");
+  card.querySelectorAll("button, input, select, textarea").forEach((x) => (x.disabled = true));
+  const actions = card.querySelector(".pactions");
+  if (actions) actions.replaceChildren(el("span", "muted small", text));
+}
+
+/* ---------------- Import existing work (readyroom/importer.py) ---------------- */
+
+const im = { folder: "", export: "", found: null, id: null, view: null, plan: null, approved: new Set() };
+
+const imOpen = guarded(async () => {
+  if (im.id) return; // a conversation is open: keep it
+  const recent = await api("im_recent");
+  const box = $("#im-recent");
+  box.replaceChildren();
+  if (recent.length) {
+    box.appendChild(el("span", "muted", "Unfinished imports:"));
+    for (const r of recent) {
+      const b = el("button", "ghost small-btn", `${r.root.split(/[\\/]/).filter(Boolean).pop()} (${r.turns} messages)`);
+      b.title = r.root;
+      b.onclick = guarded(async () => imShowTalk(await api("im_get", r.id)));
+      box.appendChild(b);
+    }
+  }
+  show(box, recent.length > 0);
+  fillModelSelect($("#im-model"), "Default (Sonnet)");
+  if (!$("#im-model").value && MODELS.models.some((m) => m.value === "sonnet")) $("#im-model").value = "sonnet";
+});
+
+function imReset() {
+  Object.assign(im, { found: null, id: null, view: null, plan: null, approved: new Set() });
+  show($("#im-setup")); show($("#im-talk"), false); show($("#im-found"), false);
+  $("#im-log").replaceChildren();
+}
+
+const imScan = guarded(async () => {
+  const btn = $("#im-scan");
+  btn.disabled = true; show($("#im-scan-busy"));
+  try {
+    im.found = await api("im_scan", im.folder, im.export);
+  } finally {
+    btn.disabled = !im.folder; show($("#im-scan-busy"), false);
+  }
+  const f = im.found;
+  const list = $("#im-found-list");
+  list.replaceChildren();
+  const add = (text) => list.appendChild(el("li", "", text));
+  const g = f.git;
+  add(!g.is_repo ? "Not tracked by git (Debrief will offer to start tracking each project)."
+      : g.sub ? `Part of the git repository ${g.repo} (${g.commits} recent commit${g.commits === 1 ? "" : "s"} here).`
+      : !g.has_commits ? "A git repository with no commits yet."
+      : `A git repository with ${g.commits} recent commit${g.commits === 1 ? "" : "s"}${g.dirty ? " and uncommitted changes" : ""}.`);
+  add(f.units.length ? `Folders that look like separate pieces of work: ${f.units.join(", ")}`
+      : `${f.folders} folders; none stands out as a separate piece of work.`);
+  add(f.claude_md.length ? `CLAUDE.md: ${f.claude_md.join(", ")}` : "No CLAUDE.md files.");
+  if (f.settings.length) add(`Claude Code settings: ${f.settings.join(", ")}`);
+  add(f.sessions ? `${f.sessions} past Claude Code sessions here.` : "No past Claude Code sessions found for this folder.");
+  if (f.projects_inside.length) add(`Already Carrier projects here: ${f.projects_inside.join(", ")} — the plan will leave their folders alone.`);
+  const chats = $("#im-chat-list");
+  chats.replaceChildren();
+  for (const c of f.chats) {
+    const lab = el("label");
+    const cb = Object.assign(el("input"), { type: "checkbox", value: c.id, checked: f.chats_selected.includes(c.id) });
+    lab.append(cb, el("span", "", c.name), el("span", "muted small", `${c.date} · ${c.messages} messages`));
+    chats.appendChild(lab);
+  }
+  show($("#im-chats"), f.chats.length > 0);
+  show($("#im-found"));
+});
+
+const imStart = guarded(async () => {
+  const mode = document.querySelector("input[name=im-mode]:checked").value;
+  const chatIds = [...document.querySelectorAll("#im-chat-list input:checked")].map((c) => c.value);
+  $("#im-start").disabled = true; show($("#im-start-busy"));
+  try {
+    imShowTalk(await api("im_start", im.folder, mode, im.export, im.found.chats.length ? chatIds : null,
+                         $("#im-model").value || "sonnet"));
+  } finally {
+    $("#im-start").disabled = false; show($("#im-start-busy"), false);
+  }
+});
+
+function imShowTalk(view) {
+  im.id = view.id; im.view = view;
+  show($("#im-setup"), false); show($("#im-recent"), false); show($("#im-talk"));
+  $("#im-talk-root").textContent = `${view.root} · ${{ ask: "deciding with Claude", in_place: "in place",
+    reorganize: "may reorganise" }[view.mode]}`;
+  if (view.plan) {
+    im.plan = JSON.parse(JSON.stringify(view.plan));
+    im.approved = new Set((im.plan.moves || []).map((_, i) => i));
+    imRenderPlan();
+    if (im.history === undefined || im.history.id !== view.id) {
+      api("im_history", view.id).then((h) => {
+        im.history = { ...h, id: view.id };
+        show($("#im-history"), !h.has_history);
+        $("#im-ignore").value = (h.suggest || []).join("\n");
+      }).catch(() => {});
+    }
+  }
+  const log = $("#im-log");
+  log.replaceChildren();
+  view.messages.forEach((m, mi) => {
+    const box = el("div", `im-msg ${m.role}`);
+    box.appendChild(el("div", "who", m.role === "user" ? "You" : "Claude"));
+    const body = el("div", "md");
+    body.innerHTML = md(m.text); // md() escapes everything first
+    box.appendChild(body);
+    const last = mi === view.messages.length - 1;
+    if (m.questions && m.questions.length) {
+      box.appendChild(questionCard(m.questions, {
+        live: last,
+        onSubmit: (answers) => imSendText(Object.entries(answers).map(([q, a]) => `**${q}** ${a}`).join("\n\n")),
+      }));
+      if (!last) questionsDone(box.lastElementChild, "Answered below.");
+    }
+    (m.rules || []).forEach((r, ri) => box.appendChild(imRuleCard(r, mi, ri)));
+    log.appendChild(box);
+  });
+  show($("#im-plan"), !!view.plan);
+  log.lastElementChild?.scrollIntoView({ block: "nearest" });
+}
+
+const imSendText = guarded(async (text) => {
+  if (!text.trim()) return;
+  $("#im-send").disabled = true; show($("#im-send-busy"));
+  try {
+    if (im.plan) await api("im_check", im.id, imPlanToSend(false)); // Claude builds on the user's edits
+    imShowTalk(await api("im_send", im.id, text));
+    return true;
+  } finally {
+    $("#im-send").disabled = false; show($("#im-send-busy"), false);
+  }
+});
+
+const imSend = guarded(async () => {
+  if (await imSendText($("#im-text").value.trim())) $("#im-text").value = "";
+});
+
+/* A rule Claude proposed while importing: it goes into the plan (the projects don't exist yet). */
+function imRuleCard(r, mi, ri) {
+  const plan = im.plan;
+  const targets = [];
+  let initial = "";
+  if (plan) {
+    (plan.projects || []).forEach((p, i) => {
+      targets.push({ value: `p:${i}`, label: `Project rules: ${p.name || `project ${i + 1}`}` });
+      if (!initial && r.project && (p.name || "").toLowerCase() === r.project.toLowerCase()) initial = `p:${i}`;
+    });
+    (plan.rule_sets || []).forEach((rs, i) => {
+      targets.push({ value: `s:${i}`, label: `Rule set: ${rs.name}` });
+      if (r.rule_set && rs.name.toLowerCase() === r.rule_set.toLowerCase()) initial = `s:${i}`;
+    });
+    targets.push({ value: "s:new", label: "A new rule set…" });
+    if (!initial) initial = r.rule_set ? "s:new" : (plan.projects || []).length ? "p:0" : "s:new";
+  } else {
+    targets.push({ value: "ask", label: "Ask Claude to put it in the plan" });
+    initial = "ask";
+  }
+  const card = ruleCard(r, {
+    targets, initial, status: r.status === "proposed" ? "" : r.status,
+    onApply: ({ text, target, name }) => guarded(async () => {
+      if (target === "ask") {
+        await api("im_rule_done", im.id, mi, ri, "applied");
+        await imSendText(`Please add this rule to the plan:\n\n${text}`);
+        return;
+      }
+      const [kind, idx] = target.split(":");
+      const add = (old) => ((old || "").trim() ? `${old.trim()}\n${text}` : text);
+      if (kind === "p") plan.projects[Number(idx)].rules = add(plan.projects[Number(idx)].rules);
+      else if (idx === "new") {
+        plan.rule_sets.push({ name, rules: text });
+        if (r.project) {
+          const proj = plan.projects.find((p) => (p.name || "").toLowerCase() === r.project.toLowerCase());
+          if (proj) (proj.rule_sets ||= []).push(name);
+        }
+      } else plan.rule_sets[Number(idx)].rules = add(plan.rule_sets[Number(idx)].rules);
+      await api("im_check", im.id, imPlanToSend(false));
+      await api("im_rule_done", im.id, mi, ri, "applied");
+      imRenderPlan();
+      ruleDone(card, "Added to the plan.");
+    })(),
+    onDismiss: () => guarded(async () => {
+      await api("im_rule_done", im.id, mi, ri, "dismissed");
+      ruleDone(card, "Dismissed.");
+    })(),
+  });
+  return card;
+}
+
+/* The plan as edited on the page; unticked moves are left out when applying. */
+function imPlanToSend(onlyApproved) {
+  const p = JSON.parse(JSON.stringify(im.plan));
+  if (onlyApproved) p.moves = (p.moves || []).filter((_, i) => im.approved.has(i));
+  return p;
+}
+
+function imInput(value, onInput, placeholder = "") {
+  const i = Object.assign(el("input"), { type: "text", value: value ?? "", placeholder, spellcheck: false });
+  i.oninput = () => onInput(i.value);
+  return i;
+}
+
+function imArea(value, onInput, rows = 2, placeholder = "") {
+  const t = Object.assign(el("textarea"), { rows, value: value ?? "", placeholder });
+  t.oninput = () => onInput(t.value);
+  return t;
+}
+
+function imLabeled(label, node) {
+  const wrap = el("div");
+  wrap.append(el("label", "small-label", label), node);
+  return wrap;
+}
+
+function imRenderPlan() {
+  const plan = im.plan;
+  plan.moves ||= []; plan.rule_sets ||= []; plan.projects ||= [];
+  $("#im-summary").textContent = plan.summary || "";
+  // moves
+  const moves = $("#im-move-list");
+  moves.replaceChildren();
+  plan.moves.forEach((m, i) => {
+    const row = el("label", "im-move");
+    const cb = Object.assign(el("input"), { type: "checkbox", checked: im.approved.has(i) });
+    cb.onchange = () => (cb.checked ? im.approved.add(i) : im.approved.delete(i));
+    row.append(cb, el("code", "", m.from), el("span", "", "→"), el("code", "", m.to));
+    if (m.why) row.appendChild(el("span", "why", m.why));
+    moves.appendChild(row);
+  });
+  show($("#im-moves"), plan.moves.length > 0);
+  // rule sets
+  const sets = $("#im-set-list");
+  sets.replaceChildren();
+  plan.rule_sets.forEach((rs) => {
+    const card = el("div", "im-card");
+    card.append(imInput(rs.name, (v) => (rs.name = v), "Rule set name"),
+                imArea(rs.rules, (v) => (rs.rules = v), 3, "- one rule per line"));
+    sets.appendChild(card);
+  });
+  show($("#im-sets"), plan.rule_sets.length > 0);
+  // projects
+  const box = $("#im-projects");
+  box.replaceChildren();
+  plan.projects.forEach((p, pi) => {
+    p.folders ||= []; p.tasks ||= []; p.rule_sets ||= []; p.tags ||= [];
+    p.folders = p.folders.map((f) => (typeof f === "string" ? { path: f, kind: "work", label: "" } : f));
+    p.tasks = p.tasks.map((t) => (typeof t === "string" ? { title: t, details: "" } : t));
+    const card = el("div", "im-card");
+    const head = el("div", "head");
+    const del = el("button", "ghost small-btn", "Remove project");
+    del.onclick = () => { plan.projects.splice(pi, 1); imRenderPlan(); };
+    head.append(imInput(p.name, (v) => (p.name = v), "Project name"), del);
+    card.append(head,
+      imLabeled("Main folder (relative to the workspace)", imInput(p.main, (v) => (p.main = v), "e.g. mods/MyMod")),
+      imLabeled("Goal", imArea(p.goal, (v) => (p.goal = v), 3)),
+      imLabeled("Rules (added to your global rules)", imArea(p.rules, (v) => (p.rules = v), 3, "- one rule per line")),
+      imLabeled("Rule sets (comma-separated names)", imInput(p.rule_sets.join(", "),
+        (v) => (p.rule_sets = v.split(",").map((x) => x.trim()).filter(Boolean)))),
+      imLabeled("Tags (comma-separated, just for you)", imInput(p.tags.join(", "),
+        (v) => (p.tags = v.split(",").map((x) => x.trim()).filter(Boolean)))));
+    // folders
+    const folders = el("div");
+    folders.appendChild(el("label", "small-label", "Extra folders"));
+    p.folders.forEach((f, fi) => {
+      const row = el("div", "im-row");
+      const kind = el("select");
+      for (const k of ["work", "reference", "workspace"]) kind.appendChild(Object.assign(el("option", "", k), { value: k }));
+      kind.value = ["reference", "workspace"].includes(f.kind) ? f.kind : "work";
+      kind.onchange = () => (f.kind = kind.value);
+      const rm = el("button", "ghost small-btn", "✕");
+      rm.title = "Remove this folder";
+      rm.onclick = () => { p.folders.splice(fi, 1); imRenderPlan(); };
+      row.append(imInput(f.path, (v) => (f.path = v), "path"), kind, imInput(f.label, (v) => (f.label = v), "label"), rm);
+      folders.appendChild(row);
+    });
+    const addF = el("button", "ghost small-btn", "＋ Folder");
+    addF.onclick = () => { p.folders.push({ path: "", kind: "work", label: "" }); imRenderPlan(); };
+    folders.appendChild(addF);
+    // tasks
+    const tasks = el("div");
+    tasks.appendChild(el("label", "small-label", "Tasks, in order"));
+    p.tasks.forEach((t, ti) => {
+      const row = el("div", "im-row task");
+      const rm = el("button", "ghost small-btn", "✕");
+      rm.title = "Remove this task";
+      rm.onclick = () => { p.tasks.splice(ti, 1); imRenderPlan(); };
+      row.append(imInput(t.title, (v) => (t.title = v), "title"), imInput(t.details, (v) => (t.details = v), "details"), rm);
+      tasks.appendChild(row);
+    });
+    const addT = el("button", "ghost small-btn", "＋ Task");
+    addT.onclick = () => { p.tasks.push({ title: "", details: "" }); imRenderPlan(); };
+    tasks.appendChild(addT);
+    card.append(folders, tasks);
+    box.appendChild(card);
+  });
+}
+
+const imCheck = guarded(async () => {
+  const r = await api("im_check", im.id, imPlanToSend(true));
+  const ul = $("#im-problems");
+  ul.replaceChildren(...r.problems.map((t) => el("li", "", t)));
+  show(ul, r.problems.length > 0);
+  if (!r.problems.length) banner("The plan looks good.", "info");
+  return r.problems.length === 0;
+});
+
+const imApply = guarded(async () => {
+  if (!(await imCheck())) return;
+  const plan = imPlanToSend(true);
+  const n = plan.projects.length;
+  const what = `Create ${n} project${n === 1 ? "" : "s"}` +
+    (plan.moves.length ? ` and move ${plan.moves.length} folder${plan.moves.length === 1 ? "" : "s"} on disk` : "") + "?";
+  if (plan.moves.length ? !(await confirmWord(what, "move", "Move and create"))
+                        : !(await confirmWord(what, "create", "Create projects"))) return;
+  $("#im-apply").disabled = true;
+  try {
+    const history = im.history && !im.history.has_history && $("#im-first-commit").checked;
+    const out = await api("im_apply", im.id, plan, $("#im-baseline").checked, !!history,
+                          history ? $("#im-ignore").value.split("\n") : null);
+    for (const w of out.warnings) banner(w);
+    banner(`Created ${out.projects.length} project${out.projects.length === 1 ? "" : "s"}.`, "info");
+    imReset();
+    await rrLoad();
+    if (out.projects.length) await rrOpenProject(out.projects[0], true);
+  } finally {
+    $("#im-apply").disabled = false;
+  }
+});
+
+function imBind() {
+  $("#im-folder-btn").onclick = guarded(async () => {
+    const f = await api("pick_folder");
+    if (!f) return;
+    im.folder = f;
+    $("#im-folder").textContent = f;
+    $("#im-scan").disabled = false;
+    show($("#im-found"), false);
+  });
+  $("#im-export-btn").onclick = guarded(async () => {
+    const f = await api("im_pick_export");
+    if (!f) return;
+    im.export = f;
+    $("#im-export").textContent = f;
+    show($("#im-export-clear"));
+    show($("#im-found"), false);
+  });
+  $("#im-export-clear").onclick = () => {
+    im.export = "";
+    $("#im-export").textContent = "None";
+    show($("#im-export-clear"), false);
+    show($("#im-found"), false);
+  };
+  $("#im-scan").onclick = imScan;
+  $("#im-start").onclick = imStart;
+  $("#im-send").onclick = imSend;
+  $("#im-text").onkeydown = (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) imSend(); };
+  $("#im-check").onclick = imCheck;
+  $("#im-apply").onclick = imApply;
+  $("#im-add-project").onclick = () => {
+    im.plan.projects.push({ name: "", main: "", goal: "", rules: "", rule_sets: [], tags: [], folders: [], tasks: [] });
+    imRenderPlan();
+  };
+  $("#im-discard").onclick = guarded(async () => {
+    if (!(await confirmWord("Discard this import? The conversation is deleted; nothing on disk changes.", "discard",
+                            "Discard"))) return;
+    await api("im_discard", im.id);
+    imReset();
+    imOpen();
+  });
+}
+
+/* ---------------- Skills (core/skills.py) ---------------- */
+
+const sk = { pid: null, scope: "project", list: { project: [], personal: [] }, editing: null };
+
+const skOpen = guarded(async (pid) => {
+  if (pid !== undefined) sk.pid = pid;
+  const ov = rr.ov || (await api("rr_overview", "", null));
+  const sel = $("#sk-scope");
+  sel.replaceChildren();
+  for (const p of ov.projects) sel.appendChild(Object.assign(el("option", "", p.name), { value: `p:${p.id}` }));
+  sel.appendChild(Object.assign(el("option", "", "Personal (every project)"), { value: "personal" }));
+  if (sk.pid == null && ov.projects.length) sk.pid = ov.projects[0].id;
+  sel.value = sk.scope === "personal" || sk.pid == null ? "personal" : `p:${sk.pid}`;
+  sk.scope = sel.value === "personal" ? "personal" : "project";
+  await skLoad();
+});
+
+async function skLoad() {
+  sk.list = await api("rr_skills", sk.scope === "project" ? sk.pid : null);
+  const items = sk.list[sk.scope] || [];
+  const box = $("#sk-list");
+  box.replaceChildren();
+  if (!items.length) box.appendChild(el("p", "muted", "No skills here yet."));
+  for (const it of items) {
+    const row = el("button", "sk-item");
+    row.append(el("b", "", it.name), el("span", "muted small", it.description || "(no description)"));
+    row.title = it.path;
+    row.onclick = () => skEdit(it);
+    box.appendChild(row);
+  }
+  show($("#sk-edit"), false);
+}
+
+function skEdit(it) {
+  sk.editing = it;
+  $("#sk-edit-title").textContent = it ? `Edit ${it.name}` : "New skill";
+  $("#sk-name").value = it ? it.name : "";
+  $("#sk-desc").value = it ? it.description : "";
+  $("#sk-body").value = it ? it.body : "";
+  $("#sk-describe").value = "";
+  show($("#sk-delete"), !!it);
+  show($("#sk-edit"));
+  $("#sk-edit").scrollIntoView({ block: "nearest" });
+}
+
+function skBind() {
+  $("#sk-scope").onchange = guarded(async (e) => {
+    const v = e.target.value;
+    sk.scope = v === "personal" ? "personal" : "project";
+    if (v.startsWith("p:")) sk.pid = Number(v.slice(2));
+    await skLoad();
+  });
+  $("#sk-new").onclick = () => skEdit(null);
+  $("#sk-cancel").onclick = () => show($("#sk-edit"), false);
+  $("#sk-draft").onclick = guarded(async () => {
+    const desc = $("#sk-describe").value.trim();
+    if (!desc) { $("#sk-describe").focus(); return; }
+    $("#sk-draft").disabled = true; show($("#sk-draft-busy"));
+    try {
+      const r = await api("rr_draft", "skill", desc, $("#sk-body").value, sk.scope === "project" ? sk.pid : null);
+      if (r.name && !$("#sk-name").value.trim()) $("#sk-name").value = r.name;
+      if (r.description) $("#sk-desc").value = r.description;
+      $("#sk-body").value = r.body;
+    } finally { $("#sk-draft").disabled = false; show($("#sk-draft-busy"), false); }
+  });
+  $("#sk-save").onclick = guarded(async () => {
+    sk.list = await api("rr_save_skill", sk.scope === "project" ? sk.pid : null, $("#sk-name").value,
+                        $("#sk-desc").value, $("#sk-body").value, sk.scope, sk.editing ? sk.editing.folder : "");
+    banner("Skill saved.", "info");
+    await skLoad();
+  });
+  $("#sk-delete").onclick = guarded(async () => {
+    if (!sk.editing || !(await confirmWord(`Delete the skill ${sk.editing.name}?`, "delete", "Delete"))) return;
+    await api("rr_delete_skill", sk.scope === "project" ? sk.pid : null, sk.editing.folder, sk.scope);
+    await skLoad();
+  });
+}
+
 function rrBind() {
   let searchTimer = null;
   $("#rr-search").oninput = (e) => {
@@ -2356,6 +3863,25 @@ function rrBind() {
   };
   $("#rr-new-btn").onclick = rrNewProject;
   $("#rr-intro-new").onclick = rrNewProject;
+  $("#rr-intro-import").onclick = guarded(async () => { if (await rrLeave()) rrShow("import"); });
+  imBind();
+  skBind();
+  roBind();
+  rgBind();
+  $("#rrp-log-btn").onclick = showProjectLog;
+  $("#rrp-start-history").onclick = guarded(async () => {
+    if (!(await confirmWord("Count everything in this project up to now as reviewed? Reviews and the review gate " +
+        "then look only at work from here on. (A whole-project scan in Debrief can still check the existing code.)",
+        "yes", "Start from now"))) return;
+    const out = await api("rr_start_history", rr.pid);
+    for (const w of out.warnings || []) banner(w);
+    rrRenderRoutines();
+  });
+  $("#rrp-images").onchange = guarded(async (e) => {
+    rr.proj = await api("rr_set_images", rr.pid, e.target.checked);
+    banner(e.target.checked ? "Images are on for this project's sessions." :
+      "Images are off for this project: its sessions are text only.", "info");
+  });
   document.querySelectorAll(".rr-navbtn").forEach((b) => (b.onclick = guarded(async () => {
     if (rr.pane === "project" && !(await rrLeave())) return;
     if (b.dataset.pane === "agents") { await rrOpenAgents(null); return; }
@@ -2384,7 +3910,8 @@ function rrBind() {
     $("#rrp-folder").textContent = rr.proj.path;
     rrLoad();
   });
-  for (const [btn, kind] of [["#rrp-addfolder-btn", "work"], ["#rrp-addref-btn", "reference"]]) {
+  for (const [btn, kind] of [["#rrp-addfolder-btn", "work"], ["#rrp-addref-btn", "reference"],
+                             ["#rrp-addws-btn", "workspace"]]) {
     $(btn).onclick = guarded(async () => {
       const p = await api("rr_add_folder", rr.pid, kind);
       if (p) { rr.proj = p; rrRenderFolders(); }
@@ -2433,7 +3960,15 @@ async function init() {
   try {
     applyTheme(await api("settings"));
   } catch (e) { banner(e.message); }
+  setTimeout(() => {  // Flight Deck alerts work from every tab
+    if (!fd.ready) { fd.ready = true; $("#fd-policy").value = (state.settings && state.settings.fd_policy) || "warn"; fdPollLoop(); }
+    fdRefresh();
+  }, 300);
+  api("upgrade_notice").then((path) => {
+    if (path) banner(`Carrier updated its data for this version. A backup of the old data is at ${path}.`, "info");
+  }).catch(() => {});
   $("#btn-start").onclick = () => startReview(state.freshStart);
+  $("#btn-scan").onclick = startScan;
   $("#btn-cancel").onclick = cancelStart;
   $("#btn-resume").onclick = () => startReview(false);
   $("#btn-new").onclick = () => { state.freshStart = true; show($("#resume-box"), false); show($("#start-box")); };
@@ -2463,6 +3998,19 @@ async function init() {
   };
   $("#font-size").onchange = guarded(async (e) => {
     applyTheme(await api("save_settings", { font_size: Number(e.target.value) }));
+  });
+  for (const [id, key] of [["#alerts-flash", "alerts_flash"], ["#alerts-sound", "alerts_sound"], ["#alerts-dnd", "alerts_dnd"]]) {
+    $(id).onchange = guarded(async (e) => {
+      applyTheme(await api("save_settings", { [key]: e.target.checked }));
+      if (key === "alerts_sound" && e.target.checked) chime();
+      if (fd.overview) updateAlerts(fd.overview);
+    });
+  }
+  $("#content-width").onchange = guarded(async (e) => {
+    applyTheme(await api("save_settings", { content_width: e.target.value }));
+  });
+  $("#content-center").onchange = guarded(async (e) => {
+    applyTheme(await api("save_settings", { content_center: e.target.checked }));
   });
   $("#mode-unified").onclick = () => setSplit(false);
   $("#mode-split").onclick = () => setSplit(true);
