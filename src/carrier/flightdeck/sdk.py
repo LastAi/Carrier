@@ -35,7 +35,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -219,6 +218,20 @@ def user_message(text: str, images: list[dict[str, Any]]) -> Any:
     return stream()
 
 
+def safe_git_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment for Claude Code's commands: git only uses a bare repository (a folder
+    with HEAD, config, objects and refs) when told to with --git-dir. Otherwise Claude
+    could make such a folder with ordinary edits, and its config could make a plain
+    ``git status`` there run a command. Added to any GIT_CONFIG_* settings already there."""
+    env = dict(os.environ if base is None else base)
+    try:
+        n = int(env.get("GIT_CONFIG_COUNT", "0") or 0)
+    except ValueError:
+        n = 0
+    return {"GIT_CONFIG_COUNT": str(n + 1), f"GIT_CONFIG_KEY_{n}": "safe.bareRepository",
+            f"GIT_CONFIG_VALUE_{n}": "explicit"}
+
+
 def build_options(*, cwd: Path, model: str | None, mode: str, resume: str | None,
                   hooks: dict[str, list[Any]], can_use_tool: Callable[..., Any], context: str = "",
                   add_dirs: list[str] | None = None, effort: str | None = None,
@@ -247,6 +260,7 @@ def build_options(*, cwd: Path, model: str | None, mode: str, resume: str | None
         # Load the user's settings and CLAUDE.md files, as the CLI would.
         setting_sources=["user", "project", "local"],
         include_partial_messages=True,  # streaming preview in the UI
+        env=safe_git_env(),
         hooks=hooks,
         can_use_tool=can_use_tool,
     )
@@ -326,11 +340,48 @@ def allow_key(name: str, inp: dict[str, Any]) -> tuple[str, str]:
 
 READ_TOOLS = ("Read", "Glob", "Grep", "LS", "NotebookRead")
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
-# A pre-approved program only covers a simple command: anything that chains, pipes,
-# redirects or substitutes could run something else, so it still asks.
-_SHELL_OPS = re.compile(r"[;&|`<>\n\r]|\$\(")
 ALLOW_DEFAULT: dict[str, Any] = {"read": False, "edit": False, "web_search": False, "web_fetch": False,
-                                 "sites": [], "commands": [], "tools": []}
+                                 "sites": [], "commands": [], "tools": [], "groups": [], "export": True}
+
+# Ready-made groups of programs (entries as in flightdeck/shellcheck.py), one checkbox each.
+GROUPS: dict[str, dict[str, Any]] = {
+    "java": {"label": "Java (JDK)", "entries": ["java", "javac", "javap", "jar", "jdeps"],
+             "note": "Runs Java code, including code Claude wrote."},
+    "gradle": {"label": "Gradle", "entries": ["gradle", "./gradlew", "./gradlew.bat"],
+               "note": "Runs the build, including build scripts Claude can edit."},
+    "maven": {"label": "Maven", "entries": ["mvn", "./mvnw", "./mvnw.cmd"],
+              "note": "Runs the build, including build files Claude can edit."},
+    "node": {"label": "Node.js", "entries": ["node", "npm", "npx", "pnpm", "yarn"],
+             "note": "Runs JavaScript and package scripts, which Claude can edit; npx can download packages."},
+    "python": {"label": "Python", "entries": ["python", "python3", "py", "pip", "pytest"],
+               "note": "Runs Python code, including code Claude wrote; pip installs packages."},
+    "dotnet": {"label": ".NET", "entries": ["dotnet"], "note": "Builds and runs .NET code."},
+    "rust": {"label": "Rust", "entries": ["cargo", "rustc"], "note": "Builds and runs Rust code."},
+    "go": {"label": "Go", "entries": ["go"], "note": "Builds and runs Go code."},
+    "git_read": {"label": "Git (looking only)",
+                 "entries": ["git status", "git diff", "git log", "git show", "git branch", "git rev-parse",
+                             "git ls-files", "git blame"],
+                 "note": "Commands that only show the repository; commits, pushes and options that change "
+                         "it still ask. Carrier only (not shared with plain Claude Code)."},
+    "helpers": {"label": "Read-only helpers",
+                "entries": ["grep", "head", "tail", "wc", "sort", "uniq", "cut", "tr", "cat", "ls", "which",
+                            "diff", "file", "tree"],
+                "note": "In Carrier, only inside the project's folders: a file elsewhere still asks. "
+                        "Not shared with plain Claude Code, which couldn't keep them to the project."},
+    "text": {"label": "Text processing (awk, sed)", "entries": ["awk", "sed"],
+             "note": "awk can run other programs from its script. sed is allowed for printing, deleting and "
+                     "substituting lines; sed -i, sed -e and other sed scripts still ask. Carrier only."},
+}
+
+
+def group_entries(allow: dict[str, Any]) -> list[str]:
+    """All command entries: the listed ones plus the ticked groups'."""
+    out = list(allow.get("commands") or [])
+    for g in allow.get("groups") or []:
+        for e in GROUPS.get(g, {}).get("entries", []):
+            if e not in out:
+                out.append(e)
+    return out
 
 
 def _tool_path(name: str, inp: dict[str, Any]) -> str | None:
@@ -351,7 +402,10 @@ def preapproved(name: str, inp: dict[str, Any], allow: dict[str, Any], cwd: Path
 
     Files count only inside the project's folders: ``editable`` (the session's folder
     and work folders) for edits, those plus reference and workspace folders for reads.
+    Shell commands: every program in them must be pre-approved (flightdeck/shellcheck.py).
     """
+    from carrier.flightdeck import shellcheck
+
     def inside(roots: list[str]) -> bool:
         p = _tool_path(name, inp)
         target = Path(p) if p else cwd  # no path: the tool works in the session's folder
@@ -367,7 +421,10 @@ def preapproved(name: str, inp: dict[str, Any], allow: dict[str, Any], cwd: Path
     if name in READ_TOOLS and allow.get("read") and inside(readable):
         return "read"
     if name in EDIT_TOOLS and allow.get("edit") and inside(editable):
-        return "edit"
+        p = _tool_path(name, inp)
+        target = Path(p) if p else cwd
+        if not shellcheck.protected(str(target if target.is_absolute() else cwd / target), editable):
+            return "edit"  # (.git, .claude, .carrier and .mcp.json always ask: they can run commands)
     if name == "WebSearch" and allow.get("web_search"):
         return "web_search"
     if name == "WebFetch" and allow.get("web_fetch"):
@@ -377,36 +434,61 @@ def preapproved(name: str, inp: dict[str, Any], allow: dict[str, Any], cwd: Path
         if not sites or _host_matches(urlparse(str(inp.get("url", ""))).netloc, sites):
             return "web_fetch"
     if name == "Bash":
-        cmd = str(inp.get("command", "")).strip()
-        prog = cmd.split()[0] if cmd else ""
-        if prog and prog in (allow.get("commands") or []) and not _SHELL_OPS.search(cmd):
+        entries = group_entries(allow)
+        if entries and shellcheck.check(str(inp.get("command", "")), entries, cwd, readable, editable,
+                                        can_edit=bool(allow.get("edit")), can_read=bool(allow.get("read"))).ok:
             return "commands"
     if name in (allow.get("tools") or []):
         return "tools"
     return ""
 
 
-def project_allow(name: str, inp: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
-    """What "always allow in this project" adds for this tool call, and the button's label."""
+def project_allow(name: str, inp: dict[str, Any], allow: dict[str, Any] | None = None, cwd: Path | None = None,
+                  readable: list[str] | None = None, editable: list[str] | None = None) -> dict[str, Any] | None:
+    """What "always allow in this project" would add for this tool call.
+
+    ``{"change": {...}, "label": "...", "programs": [...], "reason": "..."}``; for a shell
+    command, ``programs`` says which programs are pre-approved already, and ``change`` is
+    None when adding programs wouldn't be enough (``reason`` says why it asks).
+    """
+    from carrier.flightdeck import shellcheck
+
     if name in READ_TOOLS:
-        return {"read": True}, "Always allow reading files in this project"
+        return {"change": {"read": True}, "label": "Always allow reading files in this project"}
     if name in EDIT_TOOLS:
-        return {"edit": True}, "Always allow editing files in this project"
+        return {"change": {"edit": True}, "label": "Always allow editing files in this project"}
     if name == "WebSearch":
-        return {"web_search": True}, "Always allow web searches in this project"
+        return {"change": {"web_search": True}, "label": "Always allow web searches in this project"}
     if name == "WebFetch":
         from urllib.parse import urlparse
 
         host = urlparse(str(inp.get("url", ""))).netloc.split(":")[0]
-        return ({"web_fetch": True, "sites": [host]}, f"Always allow fetching from {host} in this project") \
-            if host else None
+        return {"change": {"web_fetch": True, "sites": [host]},
+                "label": f"Always allow fetching from {host} in this project"} if host else None
     if name == "Bash":
-        cmd = str(inp.get("command", "")).strip().split()
-        prog = cmd[0] if cmd else ""
-        return ({"commands": [prog]}, f"Always allow simple `{prog}` commands in this project") if prog else None
+        allow = allow or dict(ALLOW_DEFAULT)
+        v = shellcheck.check(str(inp.get("command", "")), group_entries(allow), cwd or Path.cwd(),
+                             readable or [], editable or [], can_edit=bool(allow.get("edit")),
+                             can_read=bool(allow.get("read")))
+        out = {"programs": v.programs, "reason": v.reason, "change": None, "label": ""}
+        missing = v.missing
+        blockers = [p for p in v.programs if not p["listed"] and not p.get("entry")]
+        unreadable = v.reason and not v.programs and not missing
+        if missing and not blockers and not unreadable and _only_programs_missing(v):
+            out["change"] = {"commands": missing}
+            names = ", ".join(f"`{m}`" for m in missing)
+            out["label"] = f"Always allow {names} in this project"
+        return out
     if name in ("AskUserQuestion",) or name.startswith("mcp__carrier__"):
         return None
-    return {"tools": [name]}, f"Always allow {name} in this project"
+    return {"change": {"tools": [name]}, "label": f"Always allow {name} in this project"}
+
+
+def _only_programs_missing(v: Any) -> bool:
+    """Every reason the command asks is a program that isn't listed yet (nothing else in the way)."""
+    unlisted = [p for p in v.programs if not p["listed"]]
+    whys = [p["why"] or f"{p['name']} isn't pre-approved" for p in unlisted]
+    return v.reason == "; ".join(dict.fromkeys(whys))
 
 
 def summarize_tool(name: str, inp: dict[str, Any], cwd: Path | None = None) -> str:

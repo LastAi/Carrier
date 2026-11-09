@@ -41,8 +41,9 @@ class FakeClaudeClient:
         self.prompts: list[str] = []
         self.contexts: list[str] = []  # additionalContext the hooks gave "Claude"
         self.denied: list[str] = []
-        self.answers: list[Any] = []
-        self.images: list[list[dict[str, Any]]] = []  # image blocks per message that had any  # what AskUserQuestion got back (None = skipped)
+        self.ran: list[str] = []  # shell commands that ran
+        self.answers: list[Any] = []  # what AskUserQuestion got back (None = skipped)
+        self.images: list[list[dict[str, Any]]] = []  # image blocks per message that had any
         self.connected = False
         self._interrupted = asyncio.Event()
         ALL_CLIENTS.append(self)
@@ -135,6 +136,19 @@ class FakeClaudeClient:
                 self.answers.append(res.updated_input.get("answers") if res.behavior == "allow" else None)
                 yield UserMessage(content=[ToolResultBlock(tool_use_id=tid, content="answered",
                                                            is_error=res.behavior != "allow")])
+                continue
+            if line.startswith("shell "):  # a Bash command (asks in the default mode)
+                inp = {"command": line[len("shell "):]}
+                tid = "t" + uuid.uuid4().hex[:6]
+                if self.options.permission_mode == "default":
+                    res = await self.options.can_use_tool("Bash", inp, ToolPermissionContext())
+                    if res.behavior == "deny":
+                        yield UserMessage(content=[ToolResultBlock(tool_use_id=tid, content=res.message,
+                                                                   is_error=True)])
+                        continue
+                self.ran.append(inp["command"])
+                yield AssistantMessage(content=[ToolUseBlock(id=tid, name="Bash", input=inp)], model="fake")
+                yield UserMessage(content=[ToolResultBlock(tool_use_id=tid, content="ok", is_error=False)])
                 continue
             if parts[0] == "write" and len(parts) == 3:
                 path = str(Path(self.options.cwd) / parts[1])

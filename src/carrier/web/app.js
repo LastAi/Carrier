@@ -1624,6 +1624,18 @@ function fdPermissionCard(ev) {
   const code = el("code", "", ev.summary);
   card.appendChild(code);
   if (ev.reason) card.appendChild(el("div", "notice warn", ev.reason));
+  if ((ev.programs || []).length) {  // a shell command: which of its programs are pre-approved
+    const row = el("div", "pprogs small");
+    row.appendChild(el("span", "muted", "Programs: "));
+    ev.programs.forEach((p, i) => {
+      if (i) row.appendChild(el("span", "muted", " · "));
+      const s = el("span", p.listed ? "ok" : "no", (p.listed ? "✓ " : "✗ ") + p.name);
+      s.title = p.listed ? "Pre-approved for this project" : (p.why || "Not pre-approved");
+      row.appendChild(s);
+    });
+    card.appendChild(row);
+  }
+  if (ev.why && !ev.project_label) card.appendChild(el("div", "muted small", "Asks because " + ev.why + "."));
   const actions = el("div", "pactions");
   if (fd.pending.has(ev.req_id) || ev.live) {
     const sid = fd.current;
@@ -2675,8 +2687,32 @@ function rrRenderAllow() {
   document.querySelectorAll("#rrp-allow-box [data-allow]").forEach((c) => { c.checked = !!a[c.dataset.allow]; });
   document.querySelectorAll("#rrp-allow-box [data-allow-list]").forEach((i) => { i.value = (a[i.dataset.allowList] || []).join(", "); });
   $("#rrp-allow-sites").disabled = !a.web_fetch;
+  const box = $("#rrp-allow-groups");
+  box.replaceChildren();
+  const suggest = new Set(rr.proj.allow_suggest || []);
+  for (const g of rr.proj.allow_groups || []) {
+    const lab = el("label", "check small allow-group");
+    const cb = el("input");
+    cb.type = "checkbox";
+    cb.checked = (a.groups || []).includes(g.id);
+    cb.onchange = guarded(async () => {
+      const groups = new Set(rr.proj.allow.groups || []);
+      if (cb.checked) groups.add(g.id); else groups.delete(g.id);
+      rr.proj = await api("rr_set_allow", rr.pid, { groups: [...groups] });
+      rrRenderAllow();
+    });
+    lab.append(cb, el("b", "", " " + g.label + " "), el("span", "muted", "— " + g.entries.join(", ")));
+    if (suggest.has(g.id)) lab.appendChild(el("span", "tag suggest", "suggested for this folder"));
+    if (cb.checked) lab.appendChild(el("div", "muted group-note", g.note));  // what you've accepted
+    lab.title = g.note;
+    box.appendChild(lab);
+  }
+  const err = $("#rrp-allow-export-error");
+  err.textContent = a.export ? (rr.proj.allow_export_error || "") : "";
+  show(err, !!err.textContent);
   const on = [a.read && "read files", a.edit && "edit files", a.web_search && "web search",
               a.web_fetch && (a.sites.length ? "fetch from " + a.sites.length + " site" + (a.sites.length > 1 ? "s" : "") : "fetch any site"),
+              (a.groups || []).length && (rr.proj.allow_groups || []).filter((g) => a.groups.includes(g.id)).map((g) => g.label).join(", "),
               a.commands.length && a.commands.join(", "), a.tools.length && a.tools.length + " other tool" + (a.tools.length > 1 ? "s" : "")]
     .filter(Boolean);
   $("#rrp-allow-sum").textContent = on.length ? "— " + on.join(" · ") : "— none; Claude asks each time";

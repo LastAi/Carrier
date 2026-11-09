@@ -595,3 +595,11 @@ button.danger { color: var(--sev-high); border-color: var(--sev-high); }
 
 .pane-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 #draft-project-row .field { display: block; margin-bottom: 8px; }
+.pprogs { margin: 4px 0; }
+.pprogs .ok { color: var(--sev-low); }
+.pprogs .no { color: var(--sev-medium); }
+.allow-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 2px 16px; margin: 4px 0 6px; }
+.allow-group .tag.suggest { margin-left: 6px; font-size: 11px; padding: 0 6px; border-radius: 8px;
+  border: 1px solid var(--accent); color: var(--accent); }
+.allow-groups-head { margin-top: 8px; }
+.allow-group .group-note { margin-left: 22px; }

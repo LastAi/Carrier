@@ -4,6 +4,37 @@ All notable changes are listed here. Format: [Keep a Changelog](https://keepacha
 
 ## Unreleased
 
+- **Pre-approved programs understand real commands.** A shell command runs
+  without asking when every program in it is pre-approved — pipes, `&&`,
+  variables (`"$JP" -c Foo | awk …`), full paths (`…/javap.exe` is `javap`)
+  and harmless redirects included; `$( )`, here-documents, loops and files
+  outside the project still ask. Program groups with one tick each: Java,
+  Gradle, Maven, Node.js, Python, .NET, Rust, Go, Git (looking only),
+  read-only helpers, and text processing (awk, sed), with suggestions from
+  the project's folder. Entries can be scripts (`./gradlew`, `bash build.sh`)
+  or a program with its first arguments (`git status`).
+- **Safety fix:** programs that run other commands (`bash`, `sh`, `cmd`,
+  `powershell`, `env`, `xargs`, `sudo` …) can no longer be pre-approved on
+  their own — in 0.8.0 pre-approving `bash` let `bash -c "…"` run anything.
+  Such entries saved by 0.8.0 are dropped. Carrier fails closed: settings
+  that change how programs behave (`PATH=`, `GIT_…`, `LD_PRELOAD`,
+  `VAR=x program`), `cd` out of the project, program files in unusual
+  places, and options that run code or touch other files (`git -c`,
+  `git diff --output`, `find -exec`, `sort -o`, `sed -i` …) still ask.
+  Edits to `.git`, `.claude`, `.carrier`, `.mcp.json`, `.gitmodules`,
+  `.vscode`, `.idea`, `.husky`, `.devcontainer` and `.envrc` always ask: they
+  can make git, Claude Code or an editor run commands. Flight Deck sessions
+  also tell git to ignore stray bare repositories (`safe.bareRepository`),
+  so a folder Claude makes can't turn `git status` into a command. Checked by
+  three rounds of independent review.
+- Permission cards for shell commands show which programs are pre-approved,
+  add exactly the missing ones ("for this session" now works per program
+  too), and say why a command asks when adding programs wouldn't help.
+- **Shared with Claude Code:** a project's pre-approvals are also written to
+  its `.claude/settings.local.json` (Carrier's own rules only; git ignores
+  the file via `.git/info/exclude`), so plain Claude Code doesn't ask
+  either. Can be turned off per project.
+
 - **Draft a new project with Claude**: on ＋ New project, describe it in your
   own words and Claude fills in the name, goal, project rules, a starting
   task with details, and tags (with a glimpse of the chosen folder: its name,

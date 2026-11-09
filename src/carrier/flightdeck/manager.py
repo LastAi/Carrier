@@ -201,17 +201,42 @@ class FlightDeck:
             return None
         return next((f for f in project["folders"] if folder_kind(f) == "reference" and inside(f["path"])), None)
 
-    def preapproved(self, session: dict[str, Any], tool: str, tool_input: dict[str, Any]) -> str:
-        """Which of the session's project pre-approvals covers this tool call ("" = ask)."""
+    def _allow_scope(self, session: dict[str, Any]) -> tuple[dict[str, Any], list[str], list[str]] | None:
+        """The session's project pre-approvals and its (readable, editable) folders."""
         project = self.store.project(session["project_id"]) if session["project_id"] is not None else None
         if project is None:
-            return ""
-        allow = self.room.allowances(project["id"])
-        if not any(allow.values()):
-            return ""
+            return None
         editable = [session["cwd"]] + [r for _, r in self.store.project_roots(project)]
         readable = editable + [r for _, r in self.store.project_roots(project, include_reference=True)]
+        return self.room.allowances(project["id"]), readable, editable
+
+    def shell_scope(self, session: dict[str, Any]) -> dict[str, Any]:
+        """For checking a session's shell commands: the project's pre-approved command
+        entries, its folders, and whether reading and editing there are pre-approved."""
+        scope = self._allow_scope(session)
+        if scope is None:  # a standalone task: its own folder only, nothing pre-approved
+            return {"entries": [], "readable": [session["cwd"]], "editable": [session["cwd"]],
+                    "can_edit": False, "can_read": False}
+        allow, readable, editable = scope
+        return {"entries": sdk.group_entries(allow), "readable": readable, "editable": editable,
+                "can_edit": bool(allow.get("edit")), "can_read": bool(allow.get("read"))}
+
+    def preapproved(self, session: dict[str, Any], tool: str, tool_input: dict[str, Any]) -> str:
+        """Which of the session's project pre-approvals covers this tool call ("" = ask)."""
+        scope = self._allow_scope(session)
+        if scope is None:
+            return ""
+        allow, readable, editable = scope
         return sdk.preapproved(tool, tool_input, allow, Path(session["cwd"]), readable, editable)
+
+    def project_allow(self, session: dict[str, Any], tool: str, tool_input: dict[str, Any]) -> dict[str, Any] | None:
+        """For a permission card: what "always allow in this project" would add, and for a
+        shell command which of its programs are pre-approved already."""
+        scope = self._allow_scope(session)
+        if scope is None:
+            return None
+        allow, readable, editable = scope
+        return sdk.project_allow(tool, tool_input, allow, Path(session["cwd"]), readable, editable)
 
     def workspace_target(self, session: dict[str, Any], file_path: str) -> tuple[dict[str, Any], Path | None] | None:
         """For a file outside the session's work folders but inside one of its workspace

@@ -521,9 +521,12 @@ def test_preapproved_actions(fdpage):
     page.press("#rrp-allow-commands", "Tab")
     page.wait_for_selector("#rrp-allow-sum:text-matches('git, npm')")
     assert page.input_value("#rrp-allow-commands") == "git, npm"
-    page.fill("#rrp-allow-commands", "git status")
+    page.check("#rrp-allow-groups label:has-text('Java (JDK)') input")
+    page.wait_for_selector("#rrp-allow-sum:text-matches('Java')")
+    assert page.locator("#rrp-allow-groups .tag.suggest").count() == 1  # Git: the folder is a repository
+    page.fill("#rrp-allow-commands", "bash")
     page.press("#rrp-allow-commands", "Tab")
-    page.wait_for_selector("text=List program names only")  # refused, and the field shows what's saved
+    page.wait_for_selector("text=can run any command")  # refused, and the field shows what's saved
     import time
 
     deadline = time.time() + 5
@@ -533,5 +536,9 @@ def test_preapproved_actions(fdpage):
     deck = page.carrier_api._fd()
     pid = deck.store.projects()[0]["id"]
     a = deck.room.allowances(pid)
-    assert a["read"] and a["edit"] and a["commands"] == ["git", "npm"]
+    assert a["read"] and a["edit"] and a["commands"] == ["git", "npm"] and a["groups"] == ["java"]
+    import json as _json
+
+    shared = _json.loads((srv / ".claude" / "settings.local.json").read_text())["permissions"]["allow"]
+    assert "Bash(javap:*)" in shared and "Edit(/**)" in shared
     page.screenshot(path="/tmp/carrier-shots/allow.png")

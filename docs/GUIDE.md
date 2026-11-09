@@ -150,26 +150,84 @@ other's edits just like sessions in linked projects.
   main queue.
 * Backlog groups never start anything on their own.
 
-### Images, pre-approved actions, activity log and secrets
+### Pre-approved actions
 
-* **Pre-approved actions** (on the project page) are what the project's
-  sessions may do without asking you — the permission cards Flight Deck
-  would otherwise show:
+On the project page, **Pre-approved actions** are what the project's
+sessions may do without asking you — the permission cards Flight Deck
+would otherwise show:
 
-  | Option | Covers |
-  |---|---|
-  | Read files | Reading and searching inside the project's folders (work, reference and workspace) |
-  | Create and edit files | Writing and editing inside the session's folder and the work folders |
-  | Search the web | Web searches |
-  | Fetch web pages | Any site, or only the sites you list (a site includes its subdomains) |
-  | Shell commands | The programs you list (`git, npm, pytest`), for simple commands only: anything with `;` `&` `|` `>` `<` or `$( )` still asks |
-  | Other tools | Exact tool names, for example a connected tool such as `mcp__github__get_issue` |
+| Option | Covers |
+|---|---|
+| Read files | Reading and searching inside the project's folders (work, reference and workspace) |
+| Create and edit files | Writing and editing inside the session's folder and the work folders — except `.git`, `.claude`, `.carrier`, `.mcp.json`, `.gitmodules`, `.vscode`, `.idea`, `.husky`, `.devcontainer` and `.envrc`, which can make git, Claude Code or your editor run commands, so they always ask |
+| Search the web | Web searches |
+| Fetch web pages | Any site, or only the sites you list (a site includes its subdomains) |
+| Programs | Groups you tick (below) and programs you list, in shell commands |
+| Other tools | Exact tool names, for example a connected tool such as `mcp__github__get_issue` |
 
-  Everything else still asks. Files outside the project's folders always ask,
-  edits in reference folders stay blocked, and Claude Code's own settings and
-  the session's **Permissions** setting still apply. A permission card can
-  add to the list with **Always allow … in this project**. Templates copy the
-  list, and changes appear in the activity log.
+**Programs.** A shell command runs without asking when *every* program in
+it is pre-approved — pipes, `&&`, variables and all. For example, with
+`javap` and `awk` pre-approved this runs straight away:
+
+```
+JP="/c/Program Files/Java/jdk-17/bin/javap.exe"; "$JP" -c -cp lib.jar Foo | awk '/private/'
+```
+
+Carrier reads the command without running it, and asks whenever it can't
+be sure. It follows variables set in the same command, knows that
+`javap.exe` in an install folder (`Program Files`, `/usr`, the PATH …) is
+`javap`, and lets `2>&1` and `> /dev/null` through. Writing output to a
+file counts as an edit (allowed in the work folders if editing is
+pre-approved). It still asks for: `$( )` and backticks, here-documents,
+loops, `if` and `{ }`; a program from a variable it can't see, or an
+unquoted variable the shell would split; settings that change how programs
+behave (`PATH=`, `JAVA_HOME=`, `GIT_…`, `LD_PRELOAD`, `VAR=x program` …);
+`cd` out of the project's folders; and a program file somewhere unusual
+(it offers that exact file instead, for example the game's own Java).
+
+Groups (one tick each): **Java (JDK)** `java javac javap jar jdeps`,
+**Gradle**, **Maven**, **Node.js**, **Python**, **.NET**, **Rust**, **Go**,
+**Git (looking only)** `git status`, `git diff`, `git log` …, **Read-only
+helpers** `grep head tail wc sort cat ls` … (files outside the project's
+folders still ask), and **Text processing** `awk sed` (separate, because
+`awk` can run other programs; `sed` is allowed only for printing,
+deleting and substituting lines). Groups that fit the folder are marked
+*suggested*.
+
+In **More programs** you can list a program (`javap`), a script in the
+project by its path (`./build.sh`, `bash build.sh`), or a program with its
+first arguments (`git status` allows `git status -s` but not `git push`).
+Programs whose job is running other commands — `bash`, `sh`, `cmd`,
+`powershell`, `env`, `xargs`, `sudo` … — can't be pre-approved on their own:
+that would allow any command. Options that make a listed program run other
+code or touch other files still ask (`git -c`, `git config`,
+`git diff --output`, `find -exec`, `find -delete`, `sort -o`, `sed -i` …).
+Pre-approving a build tool or runtime lets Claude run code it wrote; that's
+usually the point, but it's worth knowing.
+
+Everything else still asks. Files outside the project's folders always ask,
+edits in reference folders stay blocked, and Claude Code's own settings and
+the session's **Permissions** setting still apply. A permission card shows
+which programs in a command are pre-approved (✓) and which aren't, and can
+add the missing ones with **Always allow … in this project** (or **for this
+session**); when something else makes it ask, the card says what.
+Templates copy the list, and changes appear in the activity log.
+
+**Also let Claude Code use these outside Carrier** (on by default) writes
+the list into the project's `.claude/settings.local.json` as Claude Code
+rules (`Bash(javap:*)`, `Read(/**)` …), so Claude Code in the terminal or
+the Claude app doesn't ask for them either. Reading and editing are shared
+for the main folder only, with edits to `.git`, `.claude` and the like
+still asking there too. Read-only helpers, Git (looking only), text
+processing and other programs whose options Carrier holds back (`find`,
+`sort` …) aren't shared at all: Claude Code's own rules couldn't keep them
+to the project or stop those options. Carrier changes only the rules it wrote — yours
+stay — and makes git ignore the file on this computer
+(`.git/info/exclude`), like Claude Code does. Inside Carrier, Carrier's own
+list decides.
+
+### Images, activity log and secrets
+
 * **Images:** a project switch allows or blocks pictures in its sessions.
   Pictures you paste, and pictures Claude shows or opens, are sent to
   Anthropic as part of the conversation, like your messages; with the switch
@@ -391,7 +449,7 @@ task.
   they happen. Type to guide it at any point.
 * **Permissions:** prompts appear as buttons — **Allow**, **Allow for this
   session**, **Always allow … in this project** (adds it to the project's
-  [pre-approved actions](#images-pre-approved-actions-activity-log-and-secrets)),
+  [pre-approved actions](#pre-approved-actions)),
   or **Deny** with a reason. The header's **Permissions** setting
   can also be *Ask before acting*, *Auto-accept edits*, *Plan only (no
   changes)*, or *Never ask* (which needs confirming).
@@ -828,6 +886,11 @@ always does.
   text can never run as HTML or script in the app.
 * **Projects only.** The window can only review your projects and Flight Deck
   sessions, not arbitrary folders.
+* **Files Carrier writes in your projects.** With **Also let Claude Code use
+  these** on, a project's pre-approvals go into its
+  `.claude/settings.local.json` (only Carrier's own rules; yours are kept),
+  and that file is added to `.git/info/exclude` so git won't publish it.
+  Turn the switch off and Carrier takes its rules back out.
 * **Usage counts are numbers only.** For token counts Carrier reads Claude
   Code's own logs, read only, and keeps just the time, model, folder,
   conversation id and token counts for 60 days — never the conversation.

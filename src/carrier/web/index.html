@@ -281,11 +281,20 @@
         <label class="field small">… only from these sites <span class="muted">— comma-separated, empty for any site;
           a site includes its subdomains</span>
           <input id="rrp-allow-sites" data-allow-list="sites" type="text" spellcheck="false" placeholder="docs.python.org, github.com"></label>
-        <label class="field small">Shell commands <span class="muted">— program names, comma-separated. Only simple
-          commands: anything with ; &amp; | &gt; &lt; or $( ) still asks.</span>
-          <input id="rrp-allow-commands" data-allow-list="commands" type="text" spellcheck="false" placeholder="git, npm, pytest"></label>
+        <div class="allow-groups-head small"><b>Programs</b> <span class="muted">— a command runs without asking when
+          every program in it is pre-approved, pipes and all (<code>"$JDK/javap" -c Foo | awk …</code>). Commands
+          with <code>$( )</code>, here-documents or loops, and files outside the project, still ask.</span></div>
+        <div id="rrp-allow-groups" class="allow-groups"></div>
+        <label class="field small">More programs <span class="muted">— comma-separated: a program (<code>javap</code>), a
+          script in the project (<code>./build.sh</code>, <code>bash build.sh</code>), or a program with its first
+          arguments (<code>git status</code>)</span>
+          <input id="rrp-allow-commands" data-allow-list="commands" type="text" spellcheck="false" placeholder="javap, ./gradlew, git status"></label>
         <label class="field small">Other tools <span class="muted">— exact tool names, comma-separated</span>
           <input id="rrp-allow-tools" data-allow-list="tools" type="text" spellcheck="false" placeholder="mcp__github__get_issue"></label>
+        <label class="check small"><input type="checkbox" data-allow="export"> Also let Claude Code use these outside
+          Carrier <span class="muted">(written to this project's <code>.claude/settings.local.json</code>, which git
+          ignores; your own rules there are kept)</span></label>
+        <div id="rrp-allow-export-error" class="warn small hidden"></div>
         <p class="muted small">Tip: a permission card in Flight Deck can add to this list with
           <b>Always allow … in this project</b>.</p>
       </details>

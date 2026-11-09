@@ -21,6 +21,7 @@ the first planned/active task in queue order.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from pathlib import Path
@@ -28,6 +29,7 @@ from typing import Any
 
 from carrier.core.db import ACTIVE, FOLDER_KINDS, Store, default_path, folder_kind
 from carrier.core.llm import EFFORTS
+from carrier.flightdeck.sdk import GROUPS
 from carrier.readyroom import context
 
 OPEN = ("planned", "active")
@@ -196,17 +198,56 @@ class ReadyRoom:
         """What this project's sessions may do without asking (see flightdeck/sdk.preapproved)."""
         from carrier.flightdeck.sdk import ALLOW_DEFAULT
 
+        from carrier.flightdeck.sdk import GROUPS
+        from carrier.flightdeck.shellcheck import valid_entries
+
         saved = self.store.get_setting(f"project:{pid}:allow", {}) if pid is not None else {}
         out = {k: (list(v) if isinstance(v, list) else v) for k, v in ALLOW_DEFAULT.items()}
         for k, v in (saved or {}).items():
             if k in out and isinstance(v, type(out[k])):
                 out[k] = v
+        out["commands"] = valid_entries(out["commands"])  # e.g. "bash" saved by 0.8.0: never valid alone
+        out["groups"] = [g for g in out["groups"] if g in GROUPS]
         return out
 
+    def allow_suggestions(self, pid: int) -> list[str]:
+        """Program groups that fit what's in the project's main folder (Java files -> Java, ...)."""
+        from carrier.flightdeck.sdk import GROUPS
+
+        folder = Path(self._project(pid)["path"])
+        have = self.allowances(pid)["groups"]
+        found: set[str] = set()
+        markers = {"build.gradle": ("gradle", "java"), "build.gradle.kts": ("gradle", "java"),
+                   "settings.gradle": ("gradle",), "gradlew": ("gradle",), "pom.xml": ("maven", "java"),
+                   "package.json": ("node",), "pyproject.toml": ("python",), "requirements.txt": ("python",),
+                   "setup.py": ("python",), "Cargo.toml": ("rust",), "go.mod": ("go",), ".git": ("git_read",)}
+        for name, groups in markers.items():
+            if (folder / name).exists():
+                found.update(groups)
+        seen = 0
+        try:
+            for root, dirs, files in os.walk(folder):  # a quick look for sources, a few folders deep
+                dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("node_modules", "build", "out",
+                                                                                  "target", "dist", ".venv")]
+                if root[len(str(folder)):].count(os.sep) >= 3:
+                    dirs[:] = []
+                for f in files:
+                    ext = f.rsplit(".", 1)[-1].lower() if "." in f else ""
+                    found.update({"java": ("java",), "kt": ("java",), "csproj": ("dotnet",), "sln": ("dotnet",),
+                                  "py": ("python",), "rs": ("rust",), "go": ("go",)}.get(ext, ()))
+                seen += 1
+                if seen > 400:
+                    break
+        except OSError:
+            pass
+        return [g for g in GROUPS if g in found and g not in have]
+
     def set_allowances(self, pid: int, **changes: Any) -> dict[str, Any]:
-        """Change pre-approvals: booleans for read / edit / web_search / web_fetch, lists
-        (or comma-separated text) for sites / commands / tools."""
-        from carrier.flightdeck.sdk import ALLOW_DEFAULT
+        """Change pre-approvals: booleans for read / edit / web_search / web_fetch / export,
+        lists (or comma-separated text) for sites / commands / tools / groups. Then shares
+        them with Claude Code (readyroom/claude_settings.py) if the project says so."""
+        from carrier.flightdeck.sdk import ALLOW_DEFAULT, GROUPS
+        from carrier.flightdeck.shellcheck import parse_entry
 
         self._project(pid)
         cur = self.allowances(pid)
@@ -222,15 +263,41 @@ class ReadyRoom:
                 for x in (str(i).strip() for i in items):
                     if x and x not in v:
                         v.append(x)
-                if k == "commands" and any(re.search(r"\s|[;&|`<>$]", x) for x in v):
-                    raise RoomError("List program names only (like git, npm, pytest), not whole commands.")
+                if k == "commands":
+                    for x in v:
+                        try:
+                            parse_entry(x)
+                        except ValueError as exc:
+                            raise RoomError(str(exc)) from None
+                if k == "groups" and any(x not in GROUPS for x in v):
+                    raise RoomError("Unknown program group.")
             if cur[k] != v:
                 notes.append(f"{k.replace('_', ' ')}: {v if not isinstance(v, bool) else ('on' if v else 'off')}")
             cur[k] = v
         self.store.set_setting(f"project:{pid}:allow", cur)
         if notes:
             self.store.log_project_event(pid, "allow", "pre-approved actions — " + "; ".join(notes))
+        self.sync_claude_settings(pid)
         return self.project(pid)
+
+    def sync_claude_settings(self, pid: int) -> str:
+        """Write the project's pre-approvals to Claude Code's settings.local.json (see
+        claude_settings.py). Returns a problem to show, or ""; never raises."""
+        from carrier.readyroom import claude_settings
+
+        p = self._project(pid)
+        owned = self.store.get_setting(f"project:{pid}:claude_rules", []) or []
+        try:
+            now = claude_settings.sync(p["path"], self.allowances(pid), owned)
+        except claude_settings.SettingsFileError as exc:
+            self.store.set_setting(f"project:{pid}:claude_rules_error", str(exc))
+            return str(exc)
+        except Exception as exc:  # e.g. git missing: the Carrier list still works
+            self.store.set_setting(f"project:{pid}:claude_rules_error", f"Couldn't update Claude Code's settings: {exc}")
+            return str(exc)
+        self.store.set_setting(f"project:{pid}:claude_rules", now)
+        self.store.set_setting(f"project:{pid}:claude_rules_error", "")
+        return ""
 
     def add_allowance(self, pid: int, change: dict[str, Any]) -> dict[str, Any]:
         """Add to the pre-approvals (lists are extended, not replaced): "always allow in this project"."""
@@ -333,6 +400,9 @@ class ReadyRoom:
                 "rule_set_ids": self.store.project_rule_set_ids(pid),
                 "images": self.images_allowed(pid),
                 "allow": self.allowances(pid),
+                "allow_groups": [{"id": k, **v} for k, v in GROUPS.items()],
+                "allow_suggest": self.allow_suggestions(pid),
+                "allow_export_error": self.store.get_setting(f"project:{pid}:claude_rules_error", "") or "",
                 "tasks": self.store.tasks(pid, statuses=OPEN),
                 "groups": self.store.task_groups(pid),
                 "history": self.store.tasks(pid, statuses=("done",)),

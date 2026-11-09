@@ -54,6 +54,7 @@ class SessionRunner:
         self._routed_asks = 0  # AskUserQuestion calls that reached Carrier, not yet matched to a result
         self._ask_uses: dict[str, Any] = {}  # AskUserQuestion tool-use id -> its questions
         self.always_allow: set[str] = set()  # sdk.allow_key() values allowed for the rest of the session
+        self.session_programs: list[str] = []  # shell programs allowed for the rest of the session
         self._claim_lock = threading.Lock()
         # Claude Code reports cost per connection (and restarts it on /clear);
         # the stored total is base + the current connection's running cost.
@@ -509,11 +510,25 @@ class SessionRunner:
         if tool == "AskUserQuestion":
             return await self._ask_user(tool_input)
         key, allow_label = sdk.allow_key(tool, tool_input)
-        if key in self.always_allow:
+        if key in self.always_allow or (tool == "Bash" and "Bash=" + str(tool_input.get("command", "")) in self.always_allow):
             return sdk.allow(tool_input)
         if self.deck.preapproved(self.row, tool, tool_input):  # the project's pre-approved actions
             return sdk.allow(tool_input)
-        proj = sdk.project_allow(tool, tool_input) if self.row["project_id"] is not None else None
+        session_add: list[str] = []
+        if tool == "Bash":  # "for this session" means programs, as in the project's list
+            from carrier.flightdeck import shellcheck
+
+            sc = self.deck.shell_scope(self.row)
+            v = shellcheck.check(str(tool_input.get("command", "")), sc["entries"] + self.session_programs,
+                                 self.cwd, sc["readable"], sc["editable"], sc["can_edit"], sc["can_read"])
+            if v.ok:
+                return sdk.allow(tool_input)
+            if v.missing and sdk._only_programs_missing(v):
+                session_add = v.missing
+                allow_label = "Allow " + ", ".join(f"`{m}`" for m in session_add) + " for this session"
+            else:
+                key, allow_label = "Bash=" + str(tool_input.get("command", "")), "Allow this exact command for this session"
+        proj = self.deck.project_allow(self.row, tool, tool_input)
         req_id = f"p{next(_req_ids)}"
         loop = asyncio.get_running_loop()
         future: asyncio.Future[tuple[str, str]] = loop.create_future()
@@ -522,7 +537,8 @@ class SessionRunner:
         self.pending[req_id] = {"future": future, "tool": tool, "summary": summary, "reason": reason}
         self.emit({"type": "permission", "req_id": req_id, "tool": tool, "summary": summary,
                    "reason": reason, "input": sdk._trim_input(tool_input), "allow_label": allow_label,
-                   "project_label": proj[1] if proj else ""})
+                   "project_label": (proj or {}).get("label", "") if (proj or {}).get("change") else "",
+                   "programs": (proj or {}).get("programs") or [], "why": (proj or {}).get("reason", "")})
         self.set_status("needs_you")
         try:
             decision, message = await future
@@ -537,12 +553,16 @@ class SessionRunner:
         self.emit({"type": "permission_done", "req_id": req_id, "decision": decision})
         if decision in ("allow", "allow_always", "allow_project"):
             if decision == "allow_always":
-                self.always_allow.add(key)
-            if decision == "allow_project" and proj:
+                if session_add:
+                    self.session_programs += [m for m in session_add if m not in self.session_programs]
+                else:
+                    self.always_allow.add(key)
+            if decision == "allow_project" and proj and proj.get("change"):
                 try:
-                    self.deck.room.add_allowance(self.row["project_id"], proj[0])
+                    self.deck.room.add_allowance(self.row["project_id"], proj["change"])
                     self.emit({"type": "notice", "kind": "allow",
-                               "text": f"Pre-approved for this project: {proj[1].removeprefix('Always allow ')}. "
+                               "text": f"Pre-approved for this project: "
+                                       f"{proj['label'].removeprefix('Always allow ').removesuffix(' in this project')}. "
                                        "Change it in the Ready Room."})
                 except Exception as exc:  # still allow this one
                     self.emit({"type": "notice", "kind": "allow", "text": f"Couldn't save the pre-approval: {exc}"})

@@ -52,8 +52,8 @@ The first start sets everything up (about a minute). Then:
 - **You set the thoroughness.** Choose the model and effort for each session
   and each review agent — Opus at high effort for a security check on
   sensitive code, Sonnet at low effort for a throwaway tool.
-- **✨ Draft with Claude.** Describe your rules or a review agent in plain
-  words; Claude writes it up for you to edit and save.
+- **✨ Draft with Claude.** Describe a new project, your rules, a task or a
+  review agent in plain words; Claude writes it up for you to edit and save.
 - **Bring your existing work.** Point Carrier at a folder you've used with
   plain Claude Code or the Claude app; Claude reads its history and helps you
   turn it into one project or several — in place, or reorganised.
@@ -62,6 +62,12 @@ The first start sets everything up (about a minute). Then:
   review gate, and a full history of every change to a task.
 - **Safety nets.** A local secrets scan before anything is published, alerts
   when Claude needs you, and a backup of your data before every upgrade.
+- **Fewer permission prompts, safely.** Pre-approve what each project's
+  sessions may do — read and edit its files, search the web, run its
+  toolchain (one tick for Java, Gradle, Node, Python …). Carrier reads every
+  shell command first: it runs without asking only if every program in it is
+  pre-approved, and anything it can't be sure of still asks. Optionally
+  shared with plain Claude Code.
 - **Usage limits handled.** See how full your 5-hour and weekly limits are and
   where your tokens go; near a limit automatic work waits, and a task stopped
   by a limit carries on by itself after the reset.
