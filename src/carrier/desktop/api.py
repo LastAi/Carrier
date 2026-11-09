@@ -461,8 +461,18 @@ class DesktopApi:
         return result
 
     @_guard
-    def fd_end(self, sid: int) -> dict[str, Any]:
-        return self._fd().end_session(sid)
+    def fd_end(self, sid: int, handoff: str | None = None) -> dict[str, Any]:
+        """End for good; ``handoff``: a note for the next session on the task (None keeps the old one)."""
+        return self._fd().end_session(sid, handoff=handoff)
+
+    @_guard
+    def fd_end_with_note(self, sid: int) -> dict[str, Any]:
+        """Claude writes the handoff note, then the session ends."""
+        return self._fd().end_with_note(sid)
+
+    @_guard
+    def fd_pause(self, sid: int) -> dict[str, Any]:
+        return self._fd().pause_session(sid)
 
     @_guard
     def fd_remove_worktree(self, sid: int, force: bool = False) -> dict[str, Any]:
@@ -866,6 +876,14 @@ class DesktopApi:
     @_guard
     def rr_set_images(self, pid: int, on: bool) -> dict[str, Any]:
         return self._rr().set_images_allowed(pid, bool(on))
+
+    @_guard
+    def rr_set_watch_refs(self, pid: int, on: bool) -> dict[str, Any]:
+        return self._rr().set_watch_refs(pid, bool(on))
+
+    @_guard
+    def rr_set_handoff(self, tid: int, text: str) -> dict[str, Any]:
+        return self._rr().set_handoff(tid, text)
 
     @_guard
     def rr_set_allow(self, pid: int, changes: dict[str, Any]) -> dict[str, Any]:

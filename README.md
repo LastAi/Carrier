@@ -60,6 +60,10 @@ The first start sets everything up (about a minute). Then:
 - **Organised work.** Task groups that run in parallel, routines (update the
   docs after each task, push once everything is reviewed) with an optional
   review gate, and a full history of every change to a task.
+- **Switch focus without losing track.** Pause a session and it sleeps; on
+  resume Claude is told exactly which files changed meanwhile. Ending a
+  session leaves a note for the next one on the task, and projects that build
+  on another project's files can hear about changes there with every message.
 - **Safety nets.** A local secrets scan before anything is published, alerts
   when Claude needs you, and a backup of your data before every upgrade.
 - **Fewer permission prompts, safely.** Pre-approve what each project's

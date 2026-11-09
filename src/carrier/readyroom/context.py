@@ -91,6 +91,10 @@ def build(store: Store, project_id: int | None, task: dict[str, Any] | None,
         t = f"## Current task\n{task['title']}"
         if task.get("details", "").strip():
             t += f"\n{_cap(task['details'], 3000)}"
+        if (task.get("handoff") or "").strip():
+            t += ("\n\n### Where the last session on this task left off\n"
+                  "(Written when that session ended. The files may have changed since; check before relying on it.)\n"
+                  f"{_cap(task['handoff'], 3000)}")
         if task.get("group_id") and (g := store.task_group(task["group_id"])):
             t += (f"\n\n(This task is in the task group “{g['name']}”, which runs alongside the project's other "
                   "work: other sessions may be working in the same folders at the same time.)")

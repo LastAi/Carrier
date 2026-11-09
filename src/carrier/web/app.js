@@ -1343,10 +1343,8 @@ function fdRenderSidebar() {
       const t = p.current_task;
       const ct = el("span", "ct", (t.status === "active" ? "In progress: " : "Current: ") + t.title);
       ct.title = t.details || t.title;
-      const go = el("button", "primary small-btn", "▶ Start");
-      go.title = "Start a session on the current task";
-      go.onclick = () => fdOpenStart(p.id, t.id);
-      line.append(ct, go);
+      line.append(ct, fdTaskGo(p.sessions, t, "primary small-btn", "Start a session on the current task",
+                               () => fdOpenStart(p.id, t.id)));
     } else {
       line.appendChild(el("span", "ct", (p.groups || []).length ? "Main queue: no open tasks."
         : "No open tasks — add one with ＋ Task or in the Ready Room."));
@@ -1359,10 +1357,8 @@ function fdRenderSidebar() {
       const gl = el("div", `fd-task-line group prio-${g.priority}`);
       const ct = el("span", "ct", `${g.name}: ${t.status === "active" ? "in progress — " : ""}${t.title}`);
       ct.title = (g.priority === "backlog" ? "Backlog group. " : "") + (t.details || t.title);
-      const go = el("button", g.priority === "backlog" ? "ghost small-btn" : "primary small-btn", "▶ Start");
-      go.title = `Start a session on ${g.name}'s current task`;
-      go.onclick = () => fdOpenStart(p.id, t.id);
-      gl.append(ct, go);
+      gl.append(ct, fdTaskGo(p.sessions, t, g.priority === "backlog" ? "ghost small-btn" : "primary small-btn",
+                             `Start a session on ${g.name}'s current task`, () => fdOpenStart(p.id, t.id)));
       wrap.appendChild(gl);
     }
     for (const s of p.sessions) wrap.appendChild(fdSessionRow(s));
@@ -1380,9 +1376,12 @@ function fdRenderSidebar() {
       wrap.appendChild(head);
       const line = el("div", "fd-task-line");
       const live = fdLive(t.sessions);
-      line.appendChild(el("span", "ct", t.status === "done" ? "Done" : live ? "In progress" : "Not running"));
+      const open = t.sessions.find((s) => FD_OPEN.includes(s.status));
+      line.appendChild(el("span", "ct", t.status === "done" ? "Done" : live ? "In progress"
+        : open ? (open.status === "paused" ? "Paused" : "Not running") : "Not running"));
       const btn = (label, fn, cls = "ghost small-btn") => { const b = el("button", cls, label); b.onclick = fn; line.appendChild(b); };
-      if (t.status !== "done" && !live) {
+      if (open && !live) btn("Open session", () => fdSelect(open.id), "primary small-btn");
+      if (t.status !== "done" && !live && !open) {
         btn("▶ Start", () => fdStartStandalone(t), "primary small-btn");
         btn("✓ Done", () => fdFinishStandalone(t));
       }
@@ -1393,6 +1392,26 @@ function fdRenderSidebar() {
       box.appendChild(wrap);
     }
   }
+}
+
+const fdBusy = () => ["working", "needs_you"].includes((fd.detail || {}).status);
+// Statuses that hold a task (as the backend counts them): an "error" or "ended" session doesn't.
+const FD_OPEN = ["starting", "working", "needs_you", "idle", "paused", "limited"];
+
+/* A task's start button, or "Open session" when the task already has one (paused or running):
+   one session per task — finish what's on the plate before taking a new plate. */
+function fdTaskGo(sessions, t, cls, title, start) {
+  const open = (sessions || []).find((s) => s.task_id === t.id && FD_OPEN.includes(s.status));
+  if (open) {
+    const b = el("button", "ghost small-btn", open.status === "paused" ? "⏸ Open" : "Open");
+    b.title = `This task already has a session (${FD_STATUS[open.status] || open.status}): open it`;
+    b.onclick = () => fdSelect(open.id);
+    return b;
+  }
+  const go = el("button", cls, "▶ Start");
+  go.title = title;
+  go.onclick = start;
+  return go;
 }
 
 function fdRenderEmpty() {
@@ -1469,6 +1488,8 @@ function fdSetStatus(status) {
       : "usage limit reset — press Continue now";
   }
   show($("#fd-end"), status !== "ended");
+  show($("#fd-pause"), live && !["paused", "ended", "error"].includes(status));
+  $("#fd-pause").disabled = busy;
   show($("#fd-rmcopy"), status === "ended" && !!fd.detail.branch && !!fd.detail.project);
   $("#fd-mode").disabled = status === "ended";
   // Model and effort can only change while Claude is waiting (or the session is paused).
@@ -2380,11 +2401,34 @@ function fdBind() {
   });
   $("#fd-model").onchange = switcher($("#fd-model"), "fd_set_model", "model");
   $("#fd-effort").onchange = switcher($("#fd-effort"), "fd_set_effort", "effort");
-  $("#fd-resume").onclick = guarded(async () => { await api("fd_resume", fd.current); await fdSelect(fd.current); });
-  $("#fd-continue").onclick = guarded(async () => { await api("fd_continue", fd.current); await fdSelect(fd.current); });
-  $("#fd-end").onclick = guarded(async () => {
-    if (!(await confirmWord("End this session? (The conversation stays in the list for a day.)", "yes", "End session"))) return;
-    await api("fd_end", fd.current); await fdSelect(fd.current); fdRefresh();
+  $("#fd-resume").onclick = guarded(async () => { await api("fd_resume", fd.current); await fdSelect(fd.current); fdRefresh(); });
+  $("#fd-continue").onclick = guarded(async () => { await api("fd_continue", fd.current); await fdSelect(fd.current); fdRefresh(); });
+  $("#fd-pause").onclick = guarded(async () => {
+    await api("fd_pause", fd.current); await fdSelect(fd.current); fdRefresh();
+  });
+  $("#fd-end").onclick = () => {
+    const d = fd.detail || {};
+    const hasTask = !!d.task_row && d.task_row.status !== "done";  // a finished task needs no note
+    show($("#fde-note-box"), hasTask);
+    $("#fde-note").value = hasTask ? (d.task_row.handoff || "") : "";
+    $("#fde-note").dataset.was = $("#fde-note").value;
+    const canAsk = hasTask && d.running && !fdBusy();
+    $("#fde-claude").disabled = !canAsk;
+    $("#fde-claude").title = canAsk ? "Claude writes where things stand, then the session ends"
+      : !hasTask ? "This session has no task" : "Claude has to be connected and not working";
+    openModal("#modal-fd-end");
+    $("#fde-note").focus();
+  };
+  $("#fde-cancel").onclick = closeModal;
+  $("#fde-end").onclick = guarded(async () => {
+    let note = fd.detail && fd.detail.task_row && fd.detail.task_row.status !== "done" ? $("#fde-note").value : null;
+    if (note !== null && note === $("#fde-note").dataset.was) note = null;  // unchanged: keep it as it is
+    closeModal();
+    await api("fd_end", fd.current, note); await fdSelect(fd.current); fdRefresh();
+  });
+  $("#fde-claude").onclick = guarded(async () => {
+    closeModal();
+    await api("fd_end_with_note", fd.current);
   });
   $("#fd-rmcopy").onclick = () => {
     $("#bb-where").textContent = `Branch ${fd.detail.branch}` + (fd.detail.worktree ? ` · ${fd.detail.cwd}` : " (copy already removed)");
@@ -2730,6 +2774,7 @@ function rrRenderProject() {
   rrFillPresets($("#rrp-preset"), p.preset_id);
   rrSetDirty(false);
   $("#rrp-images").checked = p.images !== false;
+  $("#rrp-watch").checked = !!p.watch_refs;
   rrRenderAllow();
   rrRenderCopies();
   rrRenderTasks();
@@ -2923,6 +2968,14 @@ function rrTaskRow(t, i, queue) {
   body.appendChild(tt);
   if (t.details) body.appendChild(el("div", "d", t.details));
   if (t.origin === "standalone" && t.origin_path) body.appendChild(el("div", "origin", "Files: " + t.origin_path));
+  if ((t.handoff || "").trim()) {  // left by the last session that ended on this task
+    const h = el("details", "handoff");
+    h.appendChild(el("summary", "small", "↪ Note for the next session"));
+    const note = el("div");
+    setMd(note, t.handoff);
+    h.appendChild(note);
+    body.appendChild(h);
+  }
   const acts = el("div", "acts");
   const refresh = async (proj) => { rr.proj = proj; rrRenderTasks(); rrLoad(); };
   const btn = (label, title, fn, disabled = false) => {
@@ -2945,6 +2998,15 @@ function rrTaskRow(t, i, queue) {
     acts.appendChild(move);
   }
   btn("Changes", "Everything that changed in this task, and why", async () => showTaskHistory(t));
+  if ((t.handoff || "").trim()) {
+    btn("Edit note", "The note the next session on this task gets", async () => {
+      const text = await promptText("Note for the next session on this task (empty to remove — Ctrl+Enter to save):",
+                                    { value: t.handoff });
+      if (text === null) return;
+      await api("rr_set_handoff", t.id, text);
+      await refresh(await api("rr_project", rr.pid));
+    });
+  }
   btn("Edit", "Edit this task", async () => {
     const title = await promptText("Task:", { value: t.title, required: true, line: true });
     if (title === null) return;
@@ -4185,6 +4247,9 @@ function rrBind() {
         rr.proj = await api("rr_set_allow", rr.pid, { [i.dataset.allowList]: i.value });
       } finally { rrRenderAllow(); }
     });
+  });
+  $("#rrp-watch").onchange = guarded(async (e) => {
+    rr.proj = await api("rr_set_watch_refs", rr.pid, e.target.checked);
   });
   $("#rrp-images").onchange = guarded(async (e) => {
     rr.proj = await api("rr_set_images", rr.pid, e.target.checked);

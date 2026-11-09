@@ -263,6 +263,12 @@
       <div class="rr-sub"><button id="rrp-log-btn" class="link">Activity log</button>
         <span class="muted small">— every change to this project and its tasks</span></div>
       <div class="rr-sub images-row">
+        <label class="check small"><input type="checkbox" id="rrp-watch"> Keep sessions up to date with the reference
+          folders</label>
+        <span class="muted small">With each message (and after a pause), Claude is told which files changed in this
+          project's reference and workspace folders — for projects that build on another project's formats.</span>
+      </div>
+      <div class="rr-sub images-row">
         <label class="check small"><input type="checkbox" id="rrp-images"> Allow images in this project's sessions</label>
         <span class="muted small">Pictures you paste, and pictures Claude shows or opens, are sent to Anthropic as part
           of the conversation — like your messages and the code Claude reads. Turn this off to keep a project's
@@ -598,7 +604,8 @@
         <button id="fd-upgrade" class="ghost hidden">Make it a project…</button>
         <button id="fd-assign" class="ghost hidden">Add to a project…</button>
         <button id="fd-debrief" class="ghost" title="Review this session's changes in Debrief">Debrief this</button>
-        <button id="fd-end" class="ghost">End session</button>
+        <button id="fd-pause" class="ghost hidden" title="Put the session to sleep: Resume carries on the same conversation, and Claude is told what changed in its folders meanwhile. The task stays with this session.">⏸ Pause</button>
+        <button id="fd-end" class="ghost" title="Finish with this conversation for good">End session</button>
         <button id="fd-rmcopy" class="ghost hidden">Bring it back…</button>
       </div>
       <div id="fd-aware" class="fd-aware"></div>
@@ -842,6 +849,23 @@
     <button id="usage-settings" class="ghost">Settings…</button>
     <span class="spacer"></span>
     <button id="usage-close" class="primary">Close</button>
+  </div>
+</div>
+
+<div id="modal-fd-end" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="fde-title">
+  <h3 id="fde-title">End this session?</h3>
+  <p class="muted small">Ending is for good: the conversation can't be resumed (it stays in the list, read only, for a
+    day). To stop for now and carry on later, use ⏸ Pause instead. The task goes back to the queue unless it's done.</p>
+  <div id="fde-note-box">
+    <label class="field">Note for the next session on this task <span class="muted small">— what's done, what's left,
+      anything to watch out for. It's given to the next session that starts this task.</span>
+      <textarea id="fde-note" rows="6"></textarea></label>
+  </div>
+  <div class="modal-actions">
+    <button id="fde-cancel" class="ghost">Cancel</button>
+    <span class="spacer"></span>
+    <button id="fde-claude" class="ghost">✨ Claude writes the note, then end</button>
+    <button id="fde-end" class="primary">End session</button>
   </div>
 </div>
 

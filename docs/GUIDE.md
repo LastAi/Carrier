@@ -502,9 +502,25 @@ task.
 * **Model and effort** can be changed in the header while Claude is waiting
   for you. A new model applies from the next message; a new effort reconnects
   the session and continues the same conversation.
-* **Stop** interrupts Claude mid-reply. **End** closes the session. After a
-  restart, open sessions show as paused; **Resume** picks up the same
-  conversation.
+* **Stop** interrupts Claude mid-reply.
+* **⏸ Pause** puts the session to sleep when you switch focus: Claude Code
+  disconnects, the task stays with this session, and other sessions stop
+  treating it as active (no overlap warnings about it, no briefings that it's
+  at work). **Resume** carries on the same conversation, and with your next
+  message Claude is told every file that changed in its folders while it
+  slept — by another session (named), by you or by anything else — and to
+  re-read those before relying on them. Closing Carrier pauses open sessions
+  the same way.
+* **One session per task.** While a task has a session (working or paused),
+  its button reads **Open** instead of **▶ Start**: finish or end that one
+  before starting another. Big tasks are better split into smaller ones.
+* **End session** finishes with the conversation for good — it can't be
+  resumed (it stays in the list, read only, for a day). The dialog asks for a
+  **note for the next session on this task**: what's done, what's left, what
+  to watch out for. Write it yourself, or press **✨ Claude writes the note,
+  then end**. The next session that starts the task gets the note with its
+  task; you can edit or remove it in the Ready Room (**Edit note** on the
+  task).
 * **Cost** for the session is shown in the header.
 
 ### Usage and limits
@@ -561,9 +577,12 @@ With an API key, the same waiting applies to API rate limits.
 
 ### Finishing a task
 
-**✓ Mark done** saves a short summary to the project's history — written by
-Claude or by you — and the next task in the queue becomes current. **Debrief
-this session** opens a review of exactly what the session changed.
+| Button | The task | The session | What's kept |
+|---|---|---|---|
+| **✓ Mark done** | Done; the next one in the queue becomes current | Stays open | A short summary (by Claude or you) in the project's history |
+| **⏸ Pause** | Stays with the session | Asleep; **Resume** carries on | The conversation, plus what changed while it slept |
+| **End session** | Back to the queue (unless done) | Over for good | A note for the next session on the task |
+| **Debrief this** | Unchanged | Unchanged | — opens a review of exactly what the session changed |
 
 ### Standalone tasks
 
@@ -596,6 +615,14 @@ choose or a scratch folder Carrier makes. Afterwards:
    sessions did since your last message, for example *"api-server session #1
    changed the shared contract file schema/user.json — check whether this
    project needs a matching update."* You see exactly what was shared.
+4. **Reference folders, watched.** For a project that builds on another
+   project's files — a ship editor that reads an animation project's
+   formats — turn on **Keep sessions up to date with the reference folders**
+   on its Ready Room page. With each message, Claude is told which files
+   changed in the project's reference and workspace folders since the last
+   one (by another session, by you, or anything else), and the page shows a
+   notice as soon as another session edits one. After a pause they're part of
+   the catch-up too.
 
 ---
 
@@ -981,6 +1008,7 @@ should yet.
 |---|---|
 | Local network access | Use Carrier from other devices on your network. An optional build that can be left out entirely |
 | Right-click menu on macOS and Linux | Spelling suggestions and copy/paste in text boxes, as on Windows |
+| Watch reference folders one by one | Choose per reference or workspace folder whether sessions are kept up to date with its changes, instead of one switch for all of a project's reference folders |
 
 ### Known issues
 

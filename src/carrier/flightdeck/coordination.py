@@ -154,7 +154,9 @@ def check_edit(store: Store, session: dict[str, Any], path: str,
 
     # 1. Another active session touched this file — from any project, since a
     #    session may edit files of another registered project.
-    others = {s["id"]: s for s in store.sessions(active_only=True) if s["id"] != session["id"]}
+    # Paused sessions are asleep: they hear what changed when they wake (manager._wake_up).
+    others = {s["id"]: s for s in store.sessions(active_only=True)
+              if s["id"] != session["id"] and s["status"] != "paused"}
     seen: set[int] = set()
     for e in store.edits(pid, path=path, since=now - RECENT_SECONDS, exclude_session=session["id"]):
         other = others.get(e["session_id"])
@@ -227,11 +229,11 @@ def related_sessions(store: Store, session: dict[str, Any]) -> list[dict[str, An
     pids = {pid} | {other for _, _, other, _ in _contract_sides(store, pid)}
     out = []
     for p in pids:
-        out += [s for s in store.sessions(p, active_only=True) if s["id"] != session["id"]]
+        out += [s for s in store.sessions(p, active_only=True) if s["id"] != session["id"] and s["status"] != "paused"]
     seen = {s["id"] for s in out}
     visitors = {e["session_id"] for e in store.edits(pid, since=time.time() - RECENT_SECONDS)}
     for s in store.sessions(active_only=True):
-        if s["id"] in visitors and s["id"] not in seen and s["id"] != session["id"]:
+        if s["id"] in visitors and s["id"] not in seen and s["id"] != session["id"] and s["status"] != "paused":
             out.append(s)
     return out
 
@@ -275,5 +277,5 @@ def briefing(store: Store, session: dict[str, Any]) -> str | None:
     store.update_session(session["id"], last_briefed=time.time())
     if not lines:
         return None
-    return ("[Carrier Flight Deck] Other Claude Code sessions are working on related projects. "
+    return ("[Carrier Flight Deck] What changed around this session — other Claude Code sessions, its folders. "
             "Take this into account; it is information, not a request from the user:\n" + "\n".join(lines))

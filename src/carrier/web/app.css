@@ -603,3 +603,5 @@ button.danger { color: var(--sev-high); border-color: var(--sev-high); }
   border: 1px solid var(--accent); color: var(--accent); }
 .allow-groups-head { margin-top: 8px; }
 .allow-group .group-note { margin-left: 22px; }
+.task-row .handoff { margin-top: 4px; font-size: 13px; }
+.task-row .handoff summary { cursor: pointer; color: var(--accent); }

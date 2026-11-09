@@ -588,6 +588,10 @@ class SessionRunner:
     # -- coordination hooks ---------------------------------------------------
 
     async def _on_prompt(self, data: dict[str, Any], tool_use_id: str | None, ctx: Any) -> dict[str, Any]:
+        try:  # reference folders this project watches: what changed since the last message
+            await asyncio.to_thread(self.deck.refs_check, self.sid)
+        except Exception:
+            traceback.print_exc()
         text = coordination.briefing(self.deck.store, self.row)
         if text:
             items = [ln[2:] if ln.startswith("- ") else ln for ln in text.split("\n")[1:]]
@@ -676,6 +680,10 @@ class SessionRunner:
                     notified.append(n)
         rel = owners[0][1]
         self.deck.store.update_session(self.sid, last_activity=time.time())
+        try:
+            self.deck.notify_ref_watchers(self.row, path)
+        except Exception:
+            traceback.print_exc()
         if notified:
             names = ", ".join(f"#{n}" for n in notified)
             self.emit({"type": "notice", "kind": "contract_sent",

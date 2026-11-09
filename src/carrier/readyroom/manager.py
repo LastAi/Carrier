@@ -192,6 +192,33 @@ class ReadyRoom:
         self.store.log_project_event(pid, "images", "turned images " + ("on" if on else "off"))
         return self.project(pid)
 
+    # -- watching reference folders --------------------------------------------------------
+
+    def watch_refs(self, pid: int | None) -> bool:
+        """Tell this project's sessions what changed in its reference and workspace folders,
+        with each message and after a pause (off by default)."""
+        return bool(self.store.get_setting(f"project:{pid}:watch_refs", False)) if pid is not None else False
+
+    def set_watch_refs(self, pid: int, on: bool) -> dict[str, Any]:
+        self._project(pid)
+        self.store.set_setting(f"project:{pid}:watch_refs", bool(on))
+        if not on:  # forget the old look, so turning it back on doesn't report a backlog of changes
+            for s in self.store.sessions(pid):
+                self.store.drop_manifest(s["id"], "refs")
+        self.store.log_project_event(pid, "watch_refs",
+                                     "sessions " + ("now hear" if on else "no longer hear")
+                                     + " about changes in reference and workspace folders")
+        return self.project(pid)
+
+    def set_handoff(self, tid: int, text: str, by: str = "you", session_id: int | None = None) -> dict[str, Any]:
+        """Save (or clear) the note for the next session on a task."""
+        t = self._task(tid)
+        text = (text or "").strip()
+        self.store.update_task(tid, handoff=text)
+        self.store.log_task_edit(tid, "handoff", {"handoff": t.get("handoff", "")}, {"handoff": text},
+                                 by=by, session_id=session_id, project_id=t["project_id"])
+        return self.store.task(tid)
+
     # -- pre-approved actions -------------------------------------------------------------
 
     def allowances(self, pid: int | None) -> dict[str, Any]:
@@ -399,6 +426,7 @@ class ReadyRoom:
                             for f in p["folders"]],
                 "rule_set_ids": self.store.project_rule_set_ids(pid),
                 "images": self.images_allowed(pid),
+                "watch_refs": self.watch_refs(pid),
                 "allow": self.allowances(pid),
                 "allow_groups": [{"id": k, **v} for k, v in GROUPS.items()],
                 "allow_suggest": self.allow_suggestions(pid),
@@ -902,6 +930,7 @@ class ReadyRoom:
                        for a in self.store.review_agents(pid)],
             "allow": self.allowances(pid),
             "images": self.images_allowed(pid),
+            "watch_refs": self.watch_refs(pid),
         }
 
     def _apply_template_extras(self, pid: int, extras: dict[str, Any]) -> list[str]:
@@ -915,6 +944,8 @@ class ReadyRoom:
             self.set_allowances(pid, **{k: v for k, v in extras["allow"].items() if k in self.allowances(pid)})
         if extras.get("images") is False:
             self.store.set_setting(f"project:{pid}:images", False)
+        if extras.get("watch_refs"):
+            self.store.set_setting(f"project:{pid}:watch_refs", True)
         ids: dict[str, int] = {}
         for g in extras.get("groups") or []:
             self.save_group(pid, g["name"], g.get("priority", "normal"), g.get("tags"))

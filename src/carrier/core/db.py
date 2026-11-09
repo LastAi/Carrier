@@ -219,6 +219,12 @@ CREATE TABLE IF NOT EXISTS messages (
     ts          REAL NOT NULL,
     body        TEXT NOT NULL                 -- JSON event (see sdk.py)
 );
+CREATE TABLE IF NOT EXISTS session_manifests (  -- folder manifests (flightdeck/folderscan.py)
+    session_id  INTEGER NOT NULL,
+    kind        TEXT NOT NULL,                -- "wake": taken at pause; "refs": reference folders, last message
+    data        BLOB NOT NULL,                -- zlib JSON
+    PRIMARY KEY (session_id, kind)
+);
 CREATE TABLE IF NOT EXISTS usage_files (      -- how far each Claude Code log was read (core/usage.py)
     path        TEXT PRIMARY KEY,
     size        INTEGER NOT NULL,             -- -1 = not finished (read again next time)
@@ -257,10 +263,12 @@ _MIGRATIONS: dict[str, dict[str, str]] = {
     },
     "sessions": {"task_id": "INTEGER", "policy": "TEXT", "preset_id": "INTEGER", "effort": "TEXT",
                  "limit_until": "REAL",  # waiting for a usage limit to reset: continue then
-                 "limit_tries": "INTEGER NOT NULL DEFAULT 0"},
+                 "limit_tries": "INTEGER NOT NULL DEFAULT 0",
+                 "paused_at": "REAL"},  # when it was paused (by the user or by closing Carrier)
     "events": {"path": "TEXT"},
     "review_agents": {"model": "TEXT", "effort": "TEXT"},
-    "tasks": {"routine_id": "INTEGER", "fix_review": "TEXT", "group_id": "INTEGER"},
+    "tasks": {"routine_id": "INTEGER", "fix_review": "TEXT", "group_id": "INTEGER",
+              "handoff": "TEXT NOT NULL DEFAULT ''"},  # where things stood when a session on it ended
     "routines": {"group_id": "INTEGER", "mode": "TEXT NOT NULL DEFAULT ''"},
     "templates": {"extras": "TEXT NOT NULL DEFAULT '{}'"},
     "presets": {"effort": "TEXT"},
@@ -466,7 +474,7 @@ class Store:
     # -- tasks -----------------------------------------------------------------
 
     TASK_FIELDS = ("project_id", "title", "details", "status", "position", "cwd", "summary", "origin",
-                   "origin_path", "finished", "routine_id", "fix_review", "group_id")
+                   "origin_path", "finished", "routine_id", "fix_review", "group_id", "handoff")
 
     def add_task(self, title: str, project_id: int | None = None, **fields: Any) -> int:
         if "position" not in fields:
@@ -881,6 +889,26 @@ class Store:
     def add_message(self, session_id: int, body: dict[str, Any]) -> None:
         self._x("INSERT INTO messages(session_id, ts, body) VALUES (?,?,?)",
                 (session_id, time.time(), json.dumps(body)))
+
+    # -- folder manifests (flightdeck/folderscan.py) -------------------------------
+
+    def save_manifest(self, session_id: int, kind: str, data: bytes) -> None:
+        self._x("INSERT INTO session_manifests(session_id, kind, data) VALUES (?,?,?) "
+                "ON CONFLICT(session_id, kind) DO UPDATE SET data=excluded.data", (session_id, kind, data))
+
+    def manifest(self, session_id: int, kind: str) -> bytes | None:
+        r = self._q("SELECT data FROM session_manifests WHERE session_id=? AND kind=?", (session_id, kind))
+        return r[0]["data"] if r else None
+
+    def drop_manifest(self, session_id: int, kind: str | None = None) -> None:
+        if kind is None:
+            self._x("DELETE FROM session_manifests WHERE session_id=?", (session_id,))
+        else:
+            self._x("DELETE FROM session_manifests WHERE session_id=? AND kind=?", (session_id, kind))
+
+    def edits_since(self, since: float) -> list[dict[str, Any]]:
+        """Every recorded edit since ``since`` (any session, any project), newest first."""
+        return self._q("SELECT * FROM edits WHERE ts >= ? ORDER BY ts DESC", (since,))
 
     # -- usage (core/usage.py) ---------------------------------------------------
 

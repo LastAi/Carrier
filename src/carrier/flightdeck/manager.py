@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from carrier.core import gitutil, usage, usersettings
-from carrier.flightdeck import coordination, sdk, worktrees
+from carrier.flightdeck import coordination, folderscan, sdk, worktrees
 from carrier.readyroom import context as rr_context
 from carrier.readyroom.manager import ReadyRoom, RoomError
 from carrier.core.db import ACTIVE, Store, default_path, folder_kind
@@ -97,6 +97,8 @@ class FlightDeck:
         self._last_usage_tick = 0.0
         self._usage_lock = threading.Lock()
         self._continue_lock = threading.Lock()
+        self._refs_scanned: dict[int, float] = {}  # session -> when its reference folders were last scanned
+        self._refs_touched: set[int] = set()  # sessions whose reference folders another session edited
         self._continue_failed: dict[int, int] = {}  # session id -> failed continues in a row
         self._events: deque[dict[str, Any]] = deque(maxlen=MAX_EVENTS)
         self._seq = 0
@@ -141,14 +143,18 @@ class FlightDeck:
         if self._closed:
             return
         self._closed = True
+        scans: dict[tuple[str, ...], bytes] = {}  # sessions on the same folders share one scan
+        deadline = time.time() + 15  # don't hold up quitting for long: later sessions just miss the catch-up
         for runner in list(self.runners.values()):
+            if time.time() < deadline:
+                self._snapshot_for_wake(runner.sid, scans)  # so it hears what changed while Carrier was closed
             try:
                 self._run(runner.stop(), timeout=10)
             except Exception:
                 pass
             row = self.store.session(runner.sid)
             if not (row and row["status"] == "limited"):
-                self.store.update_session(runner.sid, status="paused")
+                self.store.update_session(runner.sid, status="paused")  # paused_at: only a deliberate pause
         self.runners.clear()
         self._loop.call_soon_threadsafe(self._loop.stop)
 
@@ -493,6 +499,10 @@ class FlightDeck:
             routines.check_gate(self.store, task)  # e.g. "push" only once everything is reviewed
         except routines.RoutineError as exc:
             raise DeckError(str(exc)) from exc
+        for other in self.store.sessions(active_only=True):
+            if other.get("task_id") == task_id:  # finish what's on the plate first
+                raise DeckError(f"This task already has a session ({other['status'].replace('_', ' ')}). "
+                                "Resume it, or end it to start a new one.")
         if not confirm_usage:
             lv = usage.level(self.store, usage.settings())
             if lv["state"] == "reached":
@@ -580,7 +590,7 @@ class FlightDeck:
         task = self.store.task(task_id)
         if task and task["status"] == "active":
             still = [s for s in self.store.sessions(active_only=True)
-                     if s.get("task_id") == task_id and s["id"] in self.runners]
+                     if s.get("task_id") == task_id and (s["id"] in self.runners or s["status"] in ("paused", "limited"))]
             if not still:
                 self.store.update_task(task_id, status="planned")
 
@@ -646,8 +656,12 @@ class FlightDeck:
         if any(r.row.get("task_id") == task_id for r in self.runners.values()):
             raise DeckError("End the task's session first.")
         for s in self.store.sessions(active_only=True):
+            if s.get("task_id") == task_id and s["status"] in ("paused", "limited") and s.get("paused_at"):
+                raise DeckError("The task's session is paused. End it first (you can leave a note).")
+        for s in self.store.sessions(active_only=True):
             if s.get("task_id") == task_id:
                 self.store.update_session(s["id"], status="ended", ended=time.time())
+                self.store.drop_manifest(s["id"])
                 self.emit(s["id"], {"type": "status", "status": "ended"})
         self._release_task(task_id)
 
@@ -669,7 +683,207 @@ class FlightDeck:
         self.emit(sid, {"type": "notice", "kind": "resume",
                         "text": "Session resumed." if s["sdk_session"] else
                         "Resumed as a new conversation (the previous one never got a Claude Code session id)."})
+        try:
+            self._wake_up(sid)
+        except Exception as exc:  # the session still works; it just isn't told
+            self.emit(sid, {"type": "notice", "kind": "wake", "text": f"Couldn't check what changed while paused: {exc}"})
+        self.store.update_session(sid, paused_at=None)
         return self._session_summary(self.store.session(sid))
+
+    # -- pausing: asleep, then told what changed -----------------------------------------
+
+    def _wake_roots(self, row: dict[str, Any]) -> list[str]:
+        """Folders whose changes a paused session hears about when it resumes."""
+        roots = [row["cwd"]]
+        project = self.store.project(row["project_id"]) if row["project_id"] is not None else None
+        if project:
+            # A session in its own copy works there, not in the main folder: skip the main folder.
+            roots += [r for label, r in self.store.project_roots(project) if not (row.get("worktree") and label == "")]
+            if self.room.watch_refs(project["id"]):
+                roots += self._ref_roots(project)
+        return list(dict.fromkeys(roots))
+
+    def _ref_roots(self, project: dict[str, Any]) -> list[str]:
+        work = {os.path.normcase(r) for _, r in self.store.project_roots(project)}
+        return [r for _, r in self.store.project_roots(project, include_reference=True) if os.path.normcase(r) not in work]
+
+    def _snapshot_for_wake(self, sid: int, scans: dict[tuple[str, ...], bytes] | None = None) -> None:
+        row = self.store.session(sid)
+        if row is None:
+            return
+        try:
+            roots = self._wake_roots(row)
+            key = tuple(roots)
+            if scans is not None and key in scans:
+                blob = scans[key]
+            else:
+                blob = folderscan.pack(folderscan.manifest(roots))
+                if scans is not None:
+                    scans[key] = blob
+            self.store.save_manifest(sid, "wake", blob)
+        except Exception:
+            traceback.print_exc()
+
+    def pause_session(self, sid: int) -> dict[str, Any]:
+        """Put a session to sleep: disconnect it (Resume carries on the same conversation), keep its
+        task, and take note of its folders so that on waking Claude hears what changed meanwhile.
+        Other sessions stop treating it as active."""
+        row = self.store.session(sid)
+        if row is None:
+            raise DeckError("Unknown session.")
+        if row["status"] in ("ended", "paused"):
+            raise DeckError("This session is already " + ("ended." if row["status"] == "ended" else "paused."))
+        runner = self.runners.get(sid)
+        if runner is not None:
+            # Take the session first, so no message (yours, a limit continue, a task change) can
+            # start between this check and stopping it.
+            with runner._claim_lock:
+                if runner.busy:
+                    raise DeckError("Claude is working. Wait for it, or press Stop, then pause.")
+                runner.busy = True
+            self.runners.pop(sid, None)
+        self._snapshot_for_wake(sid)
+        if runner is not None:
+            try:
+                self._run(runner.stop(), timeout=30)
+            except Exception:
+                traceback.print_exc()
+        self.store.update_session(sid, status="paused", paused_at=time.time(), limit_until=None)
+        self.emit(sid, {"type": "status", "status": "paused"}, persist=False)
+        self.emit(sid, {"type": "notice", "kind": "pause",
+                        "text": "Paused. Other sessions no longer treat this one as active. Press Resume to carry "
+                                "on: Claude will be told what changed in its folders meanwhile."})
+        return self._session_summary(self.store.session(sid))
+
+    def _wake_up(self, sid: int) -> None:
+        old = folderscan.unpack(self.store.manifest(sid, "wake"))
+        self.store.drop_manifest(sid, "wake")
+        row = self.store.session(sid)
+        if not old or row is None:
+            return
+        new = folderscan.manifest(old["roots"])
+        # This note covers what changed while it slept; the usual briefing picks up from now on
+        # (otherwise the same edits would be reported twice).
+        self.store.update_session(sid, last_briefed=time.time())
+        project = self.store.project(row["project_id"]) if row["project_id"] is not None else None
+        if project and self.store.manifest(sid, "refs") is not None:
+            refs = self._ref_roots(project)
+            if refs and all(r in old["roots"] for r in refs):  # covered here: don't report them twice
+                self.store.save_manifest(sid, "refs", folderscan.pack(folderscan.manifest(refs)))
+        d = folderscan.diff(old, new)
+        n = len(d["changed"]) + len(d["added"]) + len(d["removed"])
+        if not n:
+            self.emit(sid, {"type": "notice", "kind": "wake", "text": "Nothing changed in its folders while paused."})
+            return
+        text = self._change_note(d, old["roots"], old["taken"],
+                                 f"While this session was paused ({coordination.ago(old['taken'])}), "
+                                 "these files in its folders changed")
+        self.store.add_event(sid, None, "while_away", text)
+        self.emit(sid, {"type": "notice", "kind": "wake",
+                        "text": f"While paused, {n} file{'s' if n != 1 else ''} changed in its folders. "
+                                "Claude will be told with your next message."})
+
+    MAX_CHANGE_LINES = 40
+
+    def _change_note(self, d: dict[str, Any], roots: list[str], since: float, head: str) -> str:
+        """A note for Claude listing changed files, and who changed them where Carrier knows."""
+        who = self._editors_since(since, roots)
+        lines = []
+        for kind, paths in (("changed", d["changed"]), ("new", d["added"]), ("deleted", d["removed"])):
+            for p in paths:
+                by = who.get(p)
+                lines.append(f"  - {self._show_path(p, roots)} ({kind}" + (f", by {by})" if by else ")"))
+        more = len(lines) - self.MAX_CHANGE_LINES
+        lines = lines[:self.MAX_CHANGE_LINES] + ([f"  - … and {more} more"] if more > 0 else [])
+        if d.get("truncated"):
+            lines.append("  - (Some folders are too big to check completely.)")
+        return (f"{head}:\n" + "\n".join(lines) +
+                "\n  Re-read any of these before relying on what you remember of them, and before editing them.")
+
+    @staticmethod
+    def _show_path(p: str, roots: list[str]) -> str:
+        for r in sorted(roots, key=len, reverse=True):
+            rn = os.path.normcase(r).rstrip(os.sep)
+            if p.startswith(rn + os.sep):
+                rel = p[len(rn) + 1:].replace(os.sep, "/")
+                return rel if r == roots[0] else f"{Path(r).name}/{rel}"
+        return p
+
+    def _editors_since(self, since: float, roots: list[str]) -> dict[str, str]:
+        """Changed file (normcase absolute path) -> which Flight Deck session edited it."""
+        out: dict[str, str] = {}
+        sessions: dict[int, dict[str, Any]] = {}
+        watched = {os.path.normcase(r) for r in roots}
+        for e in self.store.edits_since(since):  # newest first: the latest editor wins
+            project = self.store.project(e["project_id"])
+            if project is None:
+                continue
+            if e["session_id"] not in sessions:
+                sessions[e["session_id"]] = self.store.session(e["session_id"]) or {}
+            s = sessions[e["session_id"]]
+            if s.get("worktree") and os.path.normcase(s.get("cwd", "")) not in watched:
+                continue  # made in that session's own copy, not in these folders
+            who = coordination._label(self.store, s) if s else f"session #{e['session_id']}"
+            path = e["path"]
+            for label, root in self.store.project_roots(project):
+                if label == "":  # the main folder: paths as they are (or the copy's own folder)
+                    base = s["cwd"] if s.get("worktree") else root
+                    full = os.path.join(base, path.replace("/", os.sep))
+                elif path.startswith(label + "/"):  # an extra folder logs "<label>/<path>"
+                    full = os.path.join(root, path[len(label) + 1:].replace("/", os.sep))
+                else:
+                    continue
+                out.setdefault(os.path.normcase(full), who)
+                break
+        return out
+
+    REFS_RESCAN_SECONDS = 60
+
+    def refs_check(self, sid: int) -> None:
+        """Before a message: if the project watches its reference folders, note what changed there
+        since the last message (any source) for Claude. Runs off the event loop."""
+        row = self.store.session(sid)
+        project = self.store.project(row["project_id"]) if row and row["project_id"] is not None else None
+        if project is None or not self.room.watch_refs(project["id"]):
+            return
+        roots = self._ref_roots(project)
+        if not roots:
+            return
+        now = time.time()
+        if sid not in self._refs_touched and now - self._refs_scanned.get(sid, 0) < self.REFS_RESCAN_SECONDS:
+            return  # scanned moments ago and no session has edited there since: changes keep until next time
+        self._refs_touched.discard(sid)
+        self._refs_scanned[sid] = now
+        new = folderscan.manifest(roots)
+        old = folderscan.unpack(self.store.manifest(sid, "refs"))
+        self.store.save_manifest(sid, "refs", folderscan.pack(new))
+        if not old or old.get("roots") != new["roots"]:
+            return  # the first look: nothing to compare with yet
+        d = folderscan.diff(old, new)
+        if d["changed"] or d["added"] or d["removed"]:
+            self.store.add_event(sid, None, "refs_changed",
+                                 self._change_note(d, [project["path"]] + roots, old["taken"],
+                                                   "Since your last message, these files changed in this project's "
+                                                   "reference folders (the projects it depends on)"))
+
+    def notify_ref_watchers(self, source: dict[str, Any], path: str) -> None:
+        """Another session edited ``path``: tell live sessions watching it as a reference folder."""
+        p = os.path.normcase(os.path.abspath(path))
+        for sid, runner in list(self.runners.items()):
+            if sid == source["id"]:
+                continue
+            row = runner.row
+            project = self.store.project(row["project_id"]) if row["project_id"] is not None else None
+            if project is None or not self.room.watch_refs(project["id"]):
+                continue
+            roots = self._ref_roots(project)
+            if any(p == os.path.normcase(r) or p.startswith(os.path.normcase(r).rstrip(os.sep) + os.sep) for r in roots):
+                self._refs_touched.add(sid)  # look again with the next message
+                roots = [project["path"]] + roots  # so the folder's name is shown
+                self.emit(sid, {"type": "notice", "kind": "refs_changed",
+                                "text": f"{coordination._cap(coordination._label(self.store, source))} changed "
+                                        f"{self._show_path(p, roots)} in a reference folder. Claude will be told "
+                                        "with your next message."})
 
     def send(self, sid: int, text: str, images: list[dict[str, Any]] | None = None) -> bool:
         """Send a message; ``images`` are pasted pictures ``{"mime", "data" (base64), "note"}``."""
@@ -997,14 +1211,56 @@ class FlightDeck:
         self.policy = policy
         return policy
 
-    def end_session(self, sid: int) -> dict[str, Any]:
+    HANDOFF_PROMPT = ("[Carrier] The user is ending this session; the task isn't finished. Write a short handoff "
+                      "note for the next session that picks up this task: what's done, what's left, decisions "
+                      "made, and anything to watch out for (files, commands, gotchas). Markdown bullets, under "
+                      "200 words. Reply with the note only; it is given to the next session on this task.")
+
+    def end_with_note(self, sid: int) -> dict[str, Any]:
+        """Ask Claude for a handoff note, save it to the task, then end the session."""
+        row = self.store.session(sid)
+        if row is None or not row.get("task_id"):
+            raise DeckError("This session has no task to leave a note on.")
+        runner = self._runner(sid)
+        if not runner.claim():
+            raise DeckError("Claude is still working. Wait for it, or press Stop.")
+
+        def finished(text: str) -> None:  # on the event loop: ending waits for it, so end from a thread
+            threading.Thread(target=self._end_quietly, args=(sid, text), daemon=True).start()
+
+        def failed() -> None:
+            current = self.store.session(sid)
+            if current and current["status"] == "ended":
+                return  # ended some other way meanwhile
+            self.emit(sid, {"type": "notice", "kind": "handoff",
+                            "text": "No note was written, so the session is still open. Try again, or end it "
+                                    "with a note of your own."})
+
+        self.emit(sid, {"type": "notice", "kind": "handoff", "text": "Asking Claude for a handoff note, then ending…"})
+        self._spawn(runner.send(self.HANDOFF_PROMPT, on_done=finished, on_fail=failed))
+        return {"ending": True}
+
+    def _end_quietly(self, sid: int, handoff: str) -> None:
+        try:
+            self.end_session(sid, handoff=handoff, by="Claude")
+        except Exception:
+            traceback.print_exc()
+
+    def end_session(self, sid: int, handoff: str | None = None, by: str = "you") -> dict[str, Any]:
+        """End for good. ``handoff``: a note for the next session on the task (None = keep the old one)."""
+        row = self.store.session(sid)
+        if handoff is not None and row and row.get("task_id"):
+            self.room.set_handoff(row["task_id"], handoff, by=by, session_id=sid)
         runner = self.runners.pop(sid, None)
         if runner is not None:
             self._run(runner.stop(), timeout=30)
-        self.store.update_session(sid, status="ended", ended=time.time())
+        self.store.update_session(sid, status="ended", ended=time.time(), paused_at=None)
+        self.store.drop_manifest(sid)
         self._release_task(self.store.session(sid).get("task_id"))
         self.emit(sid, {"type": "status", "status": "ended"}, persist=False)
-        self.emit(sid, {"type": "notice", "kind": "end", "text": "Session ended."})
+        self.emit(sid, {"type": "notice", "kind": "end",
+                        "text": "Session ended." + (" Its note is saved for the next session on this task."
+                                                    if handoff and handoff.strip() else "")})
         return self._session_summary(self.store.session(sid))
 
     def remove_worktree(self, sid: int, force: bool = False) -> dict[str, Any]:
@@ -1096,6 +1352,10 @@ class FlightDeck:
     # -- reading ---------------------------------------------------------------
 
     def session(self, sid: int) -> dict[str, Any]:
+        # seq before anything else is read: the page skips polled events up to this seq, so state
+        # read here must be at least as new (a status change in between is then polled again).
+        with self._ev_lock:
+            seq = self._seq
         s = self.store.session(sid)
         if s is None:
             raise DeckError("Unknown session.")
@@ -1106,10 +1366,6 @@ class FlightDeck:
                 return runner.pending_list()
 
             pending = self._run(_snapshot(), timeout=10)
-        # seq first, then the transcript: the page skips polled events up to
-        # this seq, so nothing is drawn twice and nothing is missed.
-        with self._ev_lock:
-            seq = self._seq
         task = self.store.task(s["task_id"]) if s.get("task_id") else None
         project = self.store.project(s["project_id"]) if s["project_id"] is not None else None
         return {**self._session_summary(s), "project": project, "task_row": task, "seq": seq,

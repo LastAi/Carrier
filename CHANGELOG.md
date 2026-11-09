@@ -4,6 +4,25 @@ All notable changes are listed here. Format: [Keep a Changelog](https://keepacha
 
 ## Unreleased
 
+- **⏸ Pause a session** when you switch focus. Claude Code disconnects, the
+  task stays with the session, and other sessions stop treating it as active.
+  **Resume** carries on the same conversation, and Claude is told which files
+  changed in its folders while it slept (who changed them, where Carrier
+  knows) and to re-read them. Closing Carrier pauses sessions the same way.
+- **One session per task:** while a task has a session, its button opens that
+  session instead of starting another.
+- **End session leaves a note:** the End dialog asks for a note for the next
+  session on the task — yours, or written by Claude — which the next session
+  gets with its task. Editable in the Ready Room. The dialog also says plainly
+  that ending is for good.
+- Fixed: a session's header could stay on "working" after Claude finished,
+  when its status changed just as the page loaded it (also the cause of
+  some flaky page tests).
+- **Watch reference folders** (project switch): with each message Claude
+  hears what changed in the project's reference and workspace folders, and
+  the page shows a notice when another session edits one. (Planned: choose
+  this per folder.)
+
 - **Pre-approved programs understand real commands.** A shell command runs
   without asking when every program in it is pre-approved — pipes, `&&`,
   variables (`"$JP" -c Foo | awk …`), full paths (`…/javap.exe` is `javap`)

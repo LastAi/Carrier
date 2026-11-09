@@ -175,8 +175,8 @@ def test_standalone_task_flow(fdpage):
     page.click("#fdd-ok")
     page.wait_for_selector("#fd-meta:text-matches('task done')")
     page.click("#fd-end")
-    page.fill("#prompt-line", "yes")
-    page.click("#prompt-ok")
+    assert page.locator("#fde-note-box.hidden").count() == 1  # the task is done: no note needed
+    page.click("#fde-end")
     page.wait_for_selector("#fd-assign:not(.hidden)")
     page.click("#fd-assign")
     page.click("#fda-ok")
@@ -542,3 +542,33 @@ def test_preapproved_actions(fdpage):
     shared = _json.loads((srv / ".claude" / "settings.local.json").read_text())["permissions"]["allow"]
     assert "Bash(javap:*)" in shared and "Edit(/**)" in shared
     page.screenshot(path="/tmp/carrier-shots/allow.png")
+
+
+def test_pause_resume_and_end_with_a_note(fdpage):
+    page, srv = fdpage
+    page.click(".tool[data-tool='readyroom']")
+    page.wait_for_selector("#rr-pane-intro:not(.hidden)")
+    rr_new_project(page, "ApiServer", "A small API server.", "hello")
+    page.click(".tool[data-tool='flightdeck']")
+    page.click(".fd-project:has(.name:text-is('ApiServer')) >> text=▶ Start")
+    page.click("#fdn-start")
+    page.wait_for_selector("#fd-status:text('waiting for you')")
+    page.click("#fd-pause")
+    page.wait_for_selector("#fd-status:text('paused')")
+    page.wait_for_selector("#fd-resume:not(.hidden)")
+    # The task's button opens the paused session instead of starting a second one.
+    page.wait_for_selector(".fd-project:has(.name:text-is('ApiServer')) >> text=⏸ Open")
+    page.click("#fd-resume")
+    page.wait_for_selector("#fd-status:text('waiting for you')")
+    page.wait_for_selector("#fd-transcript .notice >> text=Nothing changed in its folders while paused")
+    page.click("#fd-end")
+    page.wait_for_selector("#modal-fd-end:not(.hidden)")
+    page.fill("#fde-note", "- routes done\n- auth left")
+    page.screenshot(path="/tmp/carrier-shots/end.png")
+    page.click("#fde-end")
+    page.wait_for_selector("#fd-status:text('ended')")
+    page.click(".tool[data-tool='readyroom']")
+    page.click("#rr-list .rr-item:has-text('ApiServer')")
+    page.wait_for_selector(".task-row .handoff >> text=Note for the next session")
+    page.click(".task-row .handoff summary")
+    page.wait_for_selector(".task-row .handoff >> text=auth left")
