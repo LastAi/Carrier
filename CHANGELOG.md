@@ -4,6 +4,12 @@ All notable changes are listed here. Format: [Keep a Changelog](https://keepacha
 
 ## Unreleased
 
+- **Draft a new project with Claude**: on ＋ New project, describe it in your
+  own words and Claude fills in the name, goal, project rules, a starting
+  task with details, and tags (with a glimpse of the chosen folder: its name,
+  top-level names and the start of its README). The form also gains
+  optional starting-task details and project rules.
+
 - **Pre-approved actions** per project (Ready Room): let its sessions read
   files, create and edit files, search the web, fetch pages (any site or
   listed sites), run listed programs (simple commands only) and use named

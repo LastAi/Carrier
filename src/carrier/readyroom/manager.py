@@ -344,7 +344,7 @@ class ReadyRoom:
     def create_project(self, name: str, path: str, goal: str = "", first_task: str = "",
                        tags: list[str] | str | None = None, rules: str = "",
                        rule_set_ids: list[int] | None = None, preset_id: int | None = None,
-                       template_id: int | None = None) -> dict[str, Any]:
+                       template_id: int | None = None, first_task_details: str = "") -> dict[str, Any]:
         folder = Path(path).expanduser()
         if not folder.is_dir():
             raise RoomError(f"Folder not found: {path}")
@@ -382,8 +382,9 @@ class ReadyRoom:
             if extras:
                 self._apply_template_extras(pid, extras)
             if first_task.strip():
-                tid = self.store.add_task(first_task.strip(), pid)
-                self.store.log_task_edit(tid, "created", {}, {"title": first_task.strip(), "details": ""},
+                details = (first_task_details or "").strip()
+                tid = self.store.add_task(first_task.strip(), pid, **({"details": details} if details else {}))
+                self.store.log_task_edit(tid, "created", {}, {"title": first_task.strip(), "details": details},
                                          project_id=pid)
         except Exception:
             self.store.remove_project(pid)  # don't leave a half-made project behind

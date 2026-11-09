@@ -2624,7 +2624,7 @@ async function rrNewProject() {
   if (!(await rrLeave())) return;
   rr.newFolder = null;
   $("#rrn-folder").textContent = "No folder chosen";
-  for (const id of ["#rrn-name", "#rrn-goal", "#rrn-task", "#rrn-tags"]) $(id).value = "";
+  for (const id of ["#rrn-name", "#rrn-goal", "#rrn-task", "#rrn-task-details", "#rrn-tags", "#rrn-rules"]) $(id).value = "";
   const sel = $("#rrn-template");
   sel.replaceChildren(el("option", "", "A blank project"));
   sel.firstChild.value = "";
@@ -2638,6 +2638,7 @@ function rrApplyTemplate() {
   if (!$("#rrn-goal").value.trim()) $("#rrn-goal").value = t.goal;
   if (!$("#rrn-task").value.trim()) $("#rrn-task").value = t.first_task;
   if (!$("#rrn-tags").value.trim()) $("#rrn-tags").value = tagsText(t.tags);
+  if (!$("#rrn-rules").value.trim()) $("#rrn-rules").value = t.rules || "";
 }
 
 const rrCreate = guarded(async () => {
@@ -2645,7 +2646,8 @@ const rrCreate = guarded(async () => {
   const tpl = $("#rrn-template").value;
   const p = await api("rr_create_project", {
     name: $("#rrn-name").value.trim(), path: rr.newFolder, goal: $("#rrn-goal").value,
-    first_task: $("#rrn-task").value, tags: $("#rrn-tags").value, template_id: tpl ? Number(tpl) : null,
+    first_task: $("#rrn-task").value, first_task_details: $("#rrn-task-details").value, tags: $("#rrn-tags").value,
+    rules: $("#rrn-rules").value, template_id: tpl ? Number(tpl) : null,
   });
   await rrLoadAll();
   await rrOpenProject(p.id, true);
@@ -3404,9 +3406,18 @@ async function rrAgentsSummary() {
 
 const DRAFT_TITLES = { project_rules: "Draft project rules", global_rules: "Draft global rules",
                        rule_set: "Draft a rule set", agent: "Draft a review agent", task: "Draft a task",
-                       routine: "Draft a routine" };
+                       routine: "Draft a routine", project: "Draft a new project" };
 const DRAFT_HINTS = { task: "e.g. the save loader crashes on old files — make it handle them and add a test",
-                      routine: "e.g. after every task, update README and the docs folder to match what changed" };
+                      routine: "e.g. after every task, update README and the docs folder to match what changed",
+                      project: "e.g. A Python tool that converts my game's save files to JSON and back. It must never "
+                               + "lose data from old saves. First, get loading the old format working with tests." };
+
+/* The new-project form as text, for "revise the current text". */
+function rrnFormText() {
+  const parts = [["Name", "#rrn-name"], ["Goal", "#rrn-goal"], ["Starting task", "#rrn-task"],
+                 ["Starting task details", "#rrn-task-details"], ["Tags", "#rrn-tags"], ["Project rules", "#rrn-rules"]];
+  return parts.filter(([, id]) => $(id).value.trim()).map(([k, id]) => `${k}: ${$(id).value.trim()}`).join("\n");
+}
 let draftCtx = null;
 
 function openDraft(kind, target) {
@@ -3415,7 +3426,12 @@ function openDraft(kind, target) {
   $("#draft-go").textContent = "Write draft";
   $("#draft-title").textContent = DRAFT_TITLES[kind] || "Draft with Claude";
   $("#draft-desc").value = "";
-  const hasText = !!field.value.trim();
+  const project = kind === "project";
+  const hasText = project ? !!rrnFormText() : !!field.value.trim();
+  show($("#draft-project-row"), project);
+  show($("#draft-project-note"), project && !!rr.newFolder);
+  $("#draft-text-label").textContent = project ? "Project rules" : "Draft";
+  $("#draft-text").rows = project ? 5 : 12;
   show($("#draft-revise-row"), hasText);
   $("#draft-revise").checked = hasText;
   show($("#draft-result"), false);
@@ -3437,11 +3453,19 @@ const runDraft = guarded(async () => {
   const go = $("#draft-go");
   go.disabled = true; show($("#draft-busy"));
   try {
-    const current = $("#draft-revise").checked ? draftCtx.field.value : "";
+    const project = draftCtx.kind === "project";
+    const current = $("#draft-revise").checked ? (project ? rrnFormText() : draftCtx.field.value) : "";
     const pid = ["project_rules", "task", "routine"].includes(draftCtx.kind) ? rr.pid
               : draftCtx.kind === "agent" ? rr.agentScope : null;
-    const r = await api("rr_draft", draftCtx.kind, desc, current, pid);
-    if (draftCtx.kind === "task") {
+    const r = await api("rr_draft", draftCtx.kind, desc, current, pid, project ? (rr.newFolder || "") : "");
+    if (project) {
+      $("#draft-p-name").value = r.name;
+      $("#draft-p-goal").value = r.goal;
+      $("#draft-p-task").value = r.first_task;
+      $("#draft-p-details").value = r.first_task_details;
+      $("#draft-p-tags").value = (r.tags || []).join(", ");
+      $("#draft-text").value = r.rules;
+    } else if (draftCtx.kind === "task") {
       $("#draft-agent-title").value = r.title;
       $("#draft-text").value = r.details;
     } else if (draftCtx.kind === "routine") {
@@ -3466,6 +3490,19 @@ const runDraft = guarded(async () => {
 
 function useDraft() {
   const { kind, field } = draftCtx;
+  if (kind === "project") {
+    $("#rrn-name").value = $("#draft-p-name").value.trim();
+    $("#rrn-goal").value = $("#draft-p-goal").value.trim();
+    $("#rrn-task").value = $("#draft-p-task").value.trim();
+    $("#rrn-task-details").value = $("#draft-p-details").value.trim();
+    $("#rrn-tags").value = $("#draft-p-tags").value.trim();
+    $("#rrn-rules").value = $("#draft-text").value.trim();
+    closeModal();
+    $("#rrn-name").focus();
+    banner(rr.newFolder ? "Draft added. Review it, then press Create project."
+           : "Draft added. Choose the project's folder, review the form, then press Create project.", "info");
+    return;
+  }
   field.value = $("#draft-text").value;
   if (kind === "agent") {
     if ($("#draft-agent-title").value.trim()) $("#rra-title-in").value = $("#draft-agent-title").value.trim();

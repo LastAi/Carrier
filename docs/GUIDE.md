@@ -81,7 +81,9 @@ API key. Claude Code itself is not bundled.
 ### Your first mission
 
 1. **Ready Room → ＋ New project.** Choose the project's folder, write a
-   short long-term goal and a starting task.
+   short long-term goal and a starting task — or press **✨ Draft with
+   Claude…**, describe the project in your own words, and let Claude fill in
+   the form.
 2. **Flight Deck → ▶ Start** next to the task. Guide Claude as it works;
    press **✓ Mark done** when it's finished.
 3. **Debrief →** pick the project, **Start review**, and go through the
@@ -724,6 +726,13 @@ for".
 3. **Write draft.** Edit the result freely, or **Write again**.
 4. **Use this draft** puts it in the field. Review it there, then **Save**.
 
+On **＋ New project** it fills in the whole form from your description:
+name, long-term goal, project rules, a starting task with details, and tags.
+If you've chosen the folder first, Claude also sees the folder's name, the
+names of its top-level files and folders, and the start of its README —
+nothing else from the folder — so the draft can match what's there. You then
+**Create project**.
+
 It's also next to **Tasks** (Claude writes a title and details — what to do
 and what "done" means; you then **Add task**), **Routines** (name,
 instructions, and a suggested trigger and review gate; you then **Save
@@ -732,7 +741,8 @@ routine**) and the **Skills** editor.
 For project rules, the project's goal is given to Claude as context; for
 tasks and routines, the goal and the tasks already queued. For
 review agents, the draft also suggests a name and a severity. Each draft is
-one short request to Claude with no tools, so it can't read or change files.
+one short request to Claude with no tools, so it can't read or change files
+(for a new project, Carrier itself passes along the folder glimpse above).
 
 ---
 

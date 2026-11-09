@@ -83,7 +83,9 @@
 
     <!-- New project -->
     <div id="rr-pane-new" class="rr-pane hidden">
-      <h2>New project</h2>
+      <div class="pane-head"><h2>New project</h2>
+        <button class="ghost draft-btn" data-draft="project" data-target="#rrn-goal"
+                title="Describe the project in your own words; Claude fills in this form">✨ Draft with Claude…</button></div>
       <label class="field">Start from
         <select id="rrn-template"><option value="">A blank project</option></select>
       </label>
@@ -97,6 +99,12 @@
       </label>
       <label class="field">Starting task
         <input id="rrn-task" type="text" placeholder="e.g. add input validation to the signup form">
+      </label>
+      <label class="field">Starting task details <span class="muted small">— optional: what it involves, what "done" means</span>
+        <textarea id="rrn-task-details" rows="2"></textarea>
+      </label>
+      <label class="field">Project rules <span class="muted small">— optional; added to your global rules</span>
+        <textarea id="rrn-rules" rows="3" placeholder="e.g. - Keep the old save format loading."></textarea>
       </label>
       <label class="field">Tags <span class="muted small">— comma-separated, just for you</span>
         <input id="rrn-tags" spellcheck="false" type="text" placeholder="e.g. backend, client work">
@@ -945,6 +953,8 @@
     then use it. Nothing is saved until you press Save.</p>
   <label class="field">What you want
     <textarea id="draft-desc" rows="4" placeholder="e.g. Don't add new libraries without asking. Keep the old save format loading."></textarea></label>
+  <p id="draft-project-note" class="muted small hidden">Claude also sees the chosen folder's name, the names of
+    its top-level files and folders, and the start of its README — nothing else from the folder.</p>
   <label id="draft-revise-row" class="check hidden"><input type="checkbox" id="draft-revise" checked> Revise the current text (otherwise start fresh)</label>
   <div class="modal-actions left"><button id="draft-go" class="primary">Write draft</button>
     <span id="draft-busy" class="muted small hidden">Claude is writing…</span></div>
@@ -958,7 +968,14 @@
     </div>
     <label id="draft-agent-sev-row" class="field hidden">Severity
       <select id="draft-agent-sev"><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
-    <label class="field">Draft <span class="muted small">— edit freely</span><textarea id="draft-text" rows="12"></textarea></label>
+    <div id="draft-project-row" class="hidden">
+      <label class="field">Name <input id="draft-p-name" type="text"></label>
+      <label class="field">Long-term goal <textarea id="draft-p-goal" rows="3"></textarea></label>
+      <label class="field">Starting task <input id="draft-p-task" type="text"></label>
+      <label class="field">Starting task details <textarea id="draft-p-details" rows="3"></textarea></label>
+      <label class="field">Tags <input id="draft-p-tags" type="text" spellcheck="false"></label>
+    </div>
+    <label class="field"><span id="draft-text-label">Draft</span> <span class="muted small">— edit freely</span><textarea id="draft-text" rows="12"></textarea></label>
   </div>
   <div class="modal-actions">
     <button id="draft-cancel" class="ghost">Cancel</button>

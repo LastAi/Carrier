@@ -18,7 +18,7 @@ from typing import Any
 from carrier.core.jsonutil import extract_json
 from carrier.core.llm import Backend, BackendError
 
-KINDS = ("project_rules", "global_rules", "rule_set", "agent", "skill", "task", "routine")
+KINDS = ("project_rules", "global_rules", "rule_set", "agent", "skill", "task", "routine", "project")
 
 RULES_SYSTEM = """You turn a user's description into clear working rules for Claude Code, an AI coding agent.
 Write rules Claude can follow and check itself against:
@@ -86,6 +86,53 @@ Keep every requirement the user gave; invent no paths or commands they didn't gi
 Reply with JSON only: {"name": "...", "instructions": "...", "trigger": "manual|after_task", "gate": "none|reviewed"}"""
 
 
+PROJECT_SYSTEM = """You set up a new project in Carrier, an app that runs Claude Code (an AI coding agent) on a
+project's tasks. From the user's description (and, if given, a glimpse of the project's folder), write:
+- name: short, under 40 characters;
+- goal: what the project is and is for, 2-4 sentences, in plain words — Claude reads it at the start of
+  every session;
+- rules: working rules for Claude in this project, one "- " bullet per line, imperative and checkable
+  (e.g. "- Keep the public API backwards compatible."), only ones that follow from what the user said or
+  plainly from the folder (its language, build tool); empty if nothing specific;
+- first_task: the first piece of work, imperative, under 80 characters (empty if the user gave none and
+  none is obvious);
+- first_task_details: what that task involves and what "done" means, markdown bullets (empty if no task);
+- tags: 1-4 short lowercase labels.
+Keep every requirement the user gave; invent no paths, commands or technologies they or the folder didn't
+show. Reply with JSON only:
+{"name": "...", "goal": "...", "rules": "...", "first_task": "...", "first_task_details": "...", "tags": ["..."]}"""
+
+FOLDER_ENTRIES = 60
+FOLDER_README_CHARS = 3000
+
+
+def folder_context(path: str) -> str:
+    """A glimpse of a folder for drafting a project: its name, top-level entries and the start of its
+    README. Names and that excerpt only; nothing else is read."""
+    from pathlib import Path
+
+    from carrier.readyroom.importer import SKIP_DIRS
+
+    folder = Path(path).expanduser() if path else None
+    if folder is None or not folder.is_dir():
+        return ""
+    try:
+        entries = sorted(folder.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+    except OSError:
+        return f"Folder: {folder.name}\n"
+    names = [p.name + ("/" if p.is_dir() else "") for p in entries
+             if p.name not in SKIP_DIRS and not p.name.startswith(".")][:FOLDER_ENTRIES]
+    out = [f"Folder: {folder.name}", "Top-level files and folders: " + (", ".join(names) or "(empty)")]
+    readme = next((folder / n for n in ("README.md", "README.txt", "README") if (folder / n).is_file()), None)
+    if readme:
+        try:
+            text = readme.read_text(encoding="utf-8", errors="replace")[:FOLDER_README_CHARS]
+            out.append(f"README (start):\n{text.strip()}")
+        except OSError:
+            pass
+    return "\n".join(out) + "\n"
+
+
 def _current_block(current: str) -> str:
     current = (current or "").strip()
     if not current:
@@ -107,6 +154,23 @@ async def draft_async(kind: str, description: str, backend: Backend, current: st
     description = (description or "").strip()
     if not description:
         raise ValueError("Describe what you want first.")
+    if kind == "project":
+        reply = await backend.ask(system=PROJECT_SYSTEM, model=model,
+                                  prompt=f"## What the user wants\n{description[:6000]}\n"
+                                         + (f"\n## The project's folder\n{goal[:6000]}\n" if goal.strip() else "")
+                                         + _current_block(current))
+        try:
+            data = extract_json(reply)
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            return {"name": "", "goal": reply.strip(), "rules": "", "first_task": "", "first_task_details": "",
+                    "tags": []}
+        tags = data.get("tags") if isinstance(data.get("tags"), list) else str(data.get("tags", "")).split(",")
+        return {"name": str(data.get("name", "")).strip()[:80], "goal": str(data.get("goal", "")).strip(),
+                "rules": str(data.get("rules", "")).strip(), "first_task": str(data.get("first_task", "")).strip()[:200],
+                "first_task_details": str(data.get("first_task_details", "")).strip(),
+                "tags": [str(t).strip() for t in tags if str(t).strip()][:6]}
     if kind in ("task", "routine"):
         system = TASK_SYSTEM if kind == "task" else ROUTINE_SYSTEM
         reply = await backend.ask(system=system, model=model,

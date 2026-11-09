@@ -493,7 +493,8 @@ class DesktopApi:
 
     @_guard
     def rr_create_project(self, fields: dict[str, Any]) -> dict[str, Any]:
-        allowed = ("name", "path", "goal", "first_task", "tags", "rules", "rule_set_ids", "preset_id", "template_id")
+        allowed = ("name", "path", "goal", "first_task", "first_task_details", "tags", "rules", "rule_set_ids",
+                   "preset_id", "template_id")
         return self._rr().create_project(**{k: v for k, v in fields.items() if k in allowed})
 
     @_guard
@@ -644,8 +645,10 @@ class DesktopApi:
         return DP.agents_view(self._store(), pid)
 
     @_guard
-    def rr_draft(self, kind: str, description: str, current: str = "", pid: int | None = None) -> dict[str, Any]:
-        """Draft rules or a review agent from the user's description (nothing is saved)."""
+    def rr_draft(self, kind: str, description: str, current: str = "", pid: int | None = None,
+                 folder: str = "") -> dict[str, Any]:
+        """Draft rules, a review agent, a task, a routine, a skill or a whole new project from the
+        user's description (nothing is saved). For a project, ``folder`` gives Claude a glimpse of it."""
         from carrier.core.llm import AgentSDKBackend
         from carrier.readyroom import drafting
 
@@ -660,6 +663,8 @@ class DesktopApi:
             context = (f"Project: {project['name']}\nGoal: {context or '(none)'}\n"
                        + ("Tasks already queued:\n" + "\n".join(f"- {t['title']}" for t in open_tasks)
                           if open_tasks else ""))
+        if kind == "project":
+            context = drafting.folder_context(folder)
         return drafting.draft(kind, description, backend, current, context)
 
     # -- import existing work (readyroom/importer.py) ---------------------------------

@@ -19,6 +19,12 @@ playwright = pytest.importorskip("playwright.sync_api")
 
 
 def drafter(system: str, prompt: str) -> str:
+    if "You set up a new project" in system:
+        assert "Folder: Game" in prompt and "main.py" in prompt and "A turn-based game" in prompt
+        assert "secret code" not in prompt  # file contents (other than the README's start) aren't read
+        return json.dumps({"name": "Game", "goal": "A turn-based <b>strategy</b> game.",
+                           "rules": "- Keep old save files loading.", "first_task": "Load v1 saves",
+                           "first_task_details": "- Read the old format\n- Add a test", "tags": ["game", "python"]})
     if "You write tasks" in system:
         assert "Tasks already queued" in prompt
         return json.dumps({"title": "Make old saves load", "details": "- Handle v1 files\n- Add a test"})
@@ -200,3 +206,30 @@ def test_draft_tasks_and_routines(rrpage):
     assert pg.input_value("#rro-text") == "- Commit and push."
     pg.click("#rro-save")
     pg.wait_for_selector(".routine-row >> text=Push to GitHub")
+
+
+def test_draft_a_new_project(rrpage, tmp_path):
+    pg, api, _backend = rrpage
+    game = tmp_path / "Game"
+    (game / "main.py").write_text("print('secret code')\n")
+    (game / "README.md").write_text("# Game\nA turn-based game.\n")
+    pg.click(".tool[data-tool=readyroom]")
+    pg.click("#rr-new-btn")
+    pg.click("#rrn-folder-btn")
+    pg.click("#rr-pane-new .draft-btn[data-draft=project]")
+    pg.wait_for_selector("#draft-project-note:not(.hidden)")
+    pg.fill("#draft-desc", "a strategy game; never break old saves; first load v1 saves")
+    pg.click("#draft-go")
+    pg.wait_for_selector("#draft-project-row:not(.hidden)")
+    assert pg.input_value("#draft-p-task") == "Load v1 saves"
+    pg.fill("#draft-p-name", "Strategy Game")  # edits are kept
+    pg.click("#draft-use")
+    assert pg.input_value("#rrn-name") == "Strategy Game"
+    assert pg.input_value("#rrn-goal") == "A turn-based <b>strategy</b> game."
+    assert pg.input_value("#rrn-tags") == "game, python"
+    pg.click("#rrn-create")
+    pg.wait_for_selector("#rr-pane-project:not(.hidden) >> #rrp-tasks >> text=Load v1 saves")
+    p = api.rr_project(api.rr_overview()["data"]["projects"][0]["id"])["data"]
+    assert p["name"] == "Strategy Game" and p["rules"] == "- Keep old save files loading."
+    assert p["tags"] == ["game", "python"] and "Add a test" in p["tasks"][0]["details"]
+    assert pg.locator("#rrp-goal b").count() == 0  # shown as text

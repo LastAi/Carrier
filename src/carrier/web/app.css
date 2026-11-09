@@ -592,3 +592,6 @@ button.danger { color: var(--sev-high); border-color: var(--sev-high); }
 .allow-box[open] { padding-bottom: 6px; }
 .allow-box .check, .allow-box .field { display: block; margin: 4px 0; }
 .allow-box input[type=text] { width: 100%; }
+
+.pane-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+#draft-project-row .field { display: block; margin-bottom: 8px; }
