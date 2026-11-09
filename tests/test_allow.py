@@ -281,3 +281,19 @@ def test_git_ignores_bare_repositories_claude_could_make(tmp_path: Path):
     marker.unlink()
     subprocess.run(["git", "status"], cwd=evil, env={**base, **sdk.safe_git_env(base)}, capture_output=True)
     assert not marker.exists()
+
+
+def test_claude_is_told_what_runs_without_asking(deck: FlightDeck, tmp_path: Path):
+    p = make_repo(tmp_path / "Mod", {"a.txt": "a\n"})
+    pid = deck.add_project(str(p))["projects"][0]["id"]
+    deck.room.set_allowances(pid, read=True, groups=["java"], commands="awk")
+    s = deck.start_session(pid, "job", send_task=False)
+    append = ALL_CLIENTS[-1].options.system_prompt["append"]
+    assert "## Permissions in this project" in append
+    assert "javap" in append and "awk" in append and "$( )" in append and "Read, Grep, Glob and Edit" in append
+    # A change while it runs reaches Claude with the next message.
+    deck.room.set_allowances(pid, commands="awk, sed")
+    deck.send(s["id"], "hello")
+    wait(deck, s["id"])
+    told = ALL_CLIENTS[-1].contexts[-1]
+    assert "changed what runs without asking" in told and "sed" in told

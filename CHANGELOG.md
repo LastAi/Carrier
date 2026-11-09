@@ -4,6 +4,13 @@ All notable changes are listed here. Format: [Keep a Changelog](https://keepacha
 
 ## Unreleased
 
+- **Claude knows what runs without asking.** Each session's instructions now
+  include a *Permissions in this project* section generated from the
+  project's pre-approved actions, asking Claude to use the file tools, keep
+  commands simple with literal paths, and only ask for more when the task
+  needs it or it saves many steps. Changes reach running sessions with the
+  next message.
+
 - **⏸ Pause a session** when you switch focus. Claude Code disconnects, the
   task stays with the session, and other sessions stop treating it as active.
   **Resume** carries on the same conversation, and Claude is told which files

@@ -46,6 +46,55 @@ def _rule_sets(store: Store, ids: list[int]) -> list[dict[str, Any]]:
     return out
 
 
+def permissions_section(store: Store, project_id: int | None) -> str:
+    """What runs without asking in this project, so Claude can work without needless prompts.
+
+    Generated from the project's pre-approved actions (Ready Room). It is guidance: what
+    actually runs without asking is still decided by Carrier's checks
+    (flightdeck/sdk.preapproved and flightdeck/shellcheck)."""
+    from carrier.flightdeck.sdk import ALLOW_DEFAULT, group_entries
+    from carrier.flightdeck.shellcheck import valid_entries
+
+    saved = store.get_setting(f"project:{project_id}:allow", {}) if project_id is not None else {}
+    allow = {**ALLOW_DEFAULT, **{k: v for k, v in (saved or {}).items() if k in ALLOW_DEFAULT}}
+    allow["commands"] = valid_entries(list(allow.get("commands") or []))
+    free = []
+    if allow.get("read"):
+        free.append("reading and searching files in the project's folders")
+    if allow.get("edit"):
+        free.append("creating and editing files in its work folders (not .git, .claude, .vscode and the like)")
+    if allow.get("web_search"):
+        free.append("web searches")
+    if allow.get("web_fetch"):
+        sites = allow.get("sites") or []
+        free.append("fetching web pages" + (f" from {', '.join(sites)}" if sites else ""))
+    programs = group_entries(allow)
+    if allow.get("tools"):
+        free.append("these tools: " + ", ".join(allow["tools"]))
+    lines = ["## Permissions in this project"]
+    if free or programs:
+        lines.append("These run without asking the user: " + ("; ".join(free) if free else "no file or web actions")
+                     + ".")
+        if programs:
+            lines.append("Shell programs that run without asking (pipes and && between them are fine): "
+                         + ", ".join(programs) + ".")
+    else:
+        lines.append("Nothing is pre-approved for this project.")
+    if programs:
+        lines.append("A shell command still asks the user if it uses $( ) or backticks, loops or if, a "
+                     "here-document, a variable it doesn't set itself, cd outside the project's folders, settings "
+                     "such as PATH=, JAVA_HOME= or GIT_…=, or any program not listed above.")
+    else:
+        lines.append("Shell commands ask the user (unless the session's permission mode allows them).")
+    lines += [
+        "So: use the Read, Grep, Glob and Edit tools for files rather than cat, grep or sed in the shell; keep "
+        "commands to one job with literal paths (write a tool's full path rather than looking it up with $( )); "
+        "and only use something that needs approval when the task requires it, or when it saves many steps — "
+        "then say why in one line before the command.",
+    ]
+    return "\n".join(lines)
+
+
 def _rules_block(own: str, sets: list[dict[str, Any]]) -> str:
     parts = []
     if own.strip():
@@ -114,6 +163,9 @@ def build(store: Store, project_id: int | None, task: dict[str, Any] | None,
                                 _rule_sets(store, store.get_setting("global_rule_sets", [])))
     if global_block:
         sections.append("## Global rules\n" + global_block)
+
+    if not for_review:
+        sections.append(permissions_section(store, project["id"] if project else None))
 
     if project:
         done = store.tasks(project["id"], statuses=("done",))[:HISTORY_ITEMS]

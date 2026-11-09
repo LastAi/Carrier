@@ -304,6 +304,11 @@ class ReadyRoom:
         self.store.set_setting(f"project:{pid}:allow", cur)
         if notes:
             self.store.log_project_event(pid, "allow", "pre-approved actions — " + "; ".join(notes))
+            # Running sessions read this at their start: tell them with the next message.
+            text = context.permissions_section(self.store, pid).replace(
+                "## Permissions in this project", "The user changed what runs without asking in this project. Now:", 1)
+            for s in self.store.sessions(pid, active_only=True):
+                self.store.add_event(s["id"], None, "allow_changed", text)
         self.sync_claude_settings(pid)
         return self.project(pid)
 

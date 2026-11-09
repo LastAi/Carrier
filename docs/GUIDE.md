@@ -205,6 +205,16 @@ code or touch other files still ask (`git -c`, `git config`,
 Pre-approving a build tool or runtime lets Claude run code it wrote; that's
 usually the point, but it's worth knowing.
 
+**Claude is told the list.** Each session's instructions include a short
+*Permissions in this project* section, generated from these settings: what
+runs without asking, what still asks (`$( )`, loops, `PATH=` …), and to work
+accordingly — use the Read, Grep, Glob and Edit tools for files, keep shell
+commands to one job with literal paths (a tool's full path rather than
+looking it up with `$( )`), and only ask for more when the task needs it or
+it saves many steps, saying why in one line. If you change the settings while
+a session runs, Claude is told with your next message. It's guidance: what
+actually runs without asking is still decided by Carrier's checks.
+
 Everything else still asks. Files outside the project's folders always ask,
 edits in reference folders stay blocked, and Claude Code's own settings and
 the session's **Permissions** setting still apply. A permission card shows
