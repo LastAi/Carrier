@@ -1639,7 +1639,14 @@ function fdPermissionCard(ev) {
       const why = await promptText("Tell Claude why (optional):", {});
       if (why !== null) answer("deny", why);
     };
-    actions.append(a, aa, d);
+    actions.append(a, aa);
+    if (ev.project_label) {
+      const ap = el("button", "ghost", ev.project_label);
+      ap.title = "Adds this to the project's pre-approved actions (Ready Room), for all its sessions from now on";
+      ap.onclick = () => answer("allow_project");
+      actions.appendChild(ap);
+    }
+    actions.appendChild(d);
   } else {
     actions.appendChild(el("span", "muted small", "No longer waiting."));
     card.classList.add("done");
@@ -1694,6 +1701,7 @@ function fdPermissionDone(card, decision) {
   const actions = card.querySelector(".pactions");
   actions.replaceChildren(el("span", "muted small",
     ({ deny: "Denied.", allow_always: "Allowed for this session.", allow: "Allowed.",
+       allow_project: "Allowed, and pre-approved for this project.",
        cancelled: "Withdrawn by Claude Code.", interrupt: "Stopped." })[decision] || decision));
 }
 
@@ -2660,6 +2668,18 @@ function rrSetDirty(on) {
   show($("#rrp-dirty"), on);
 }
 
+function rrRenderAllow() {
+  const a = rr.proj.allow || {};
+  document.querySelectorAll("#rrp-allow-box [data-allow]").forEach((c) => { c.checked = !!a[c.dataset.allow]; });
+  document.querySelectorAll("#rrp-allow-box [data-allow-list]").forEach((i) => { i.value = (a[i.dataset.allowList] || []).join(", "); });
+  $("#rrp-allow-sites").disabled = !a.web_fetch;
+  const on = [a.read && "read files", a.edit && "edit files", a.web_search && "web search",
+              a.web_fetch && (a.sites.length ? "fetch from " + a.sites.length + " site" + (a.sites.length > 1 ? "s" : "") : "fetch any site"),
+              a.commands.length && a.commands.join(", "), a.tools.length && a.tools.length + " other tool" + (a.tools.length > 1 ? "s" : "")]
+    .filter(Boolean);
+  $("#rrp-allow-sum").textContent = on.length ? "— " + on.join(" · ") : "— none; Claude asks each time";
+}
+
 function rrRenderProject() {
   const p = rr.proj;
   $("#rrp-name").value = p.name;
@@ -2672,6 +2692,7 @@ function rrRenderProject() {
   rrFillPresets($("#rrp-preset"), p.preset_id);
   rrSetDirty(false);
   $("#rrp-images").checked = p.images !== false;
+  rrRenderAllow();
   rrRenderCopies();
   rrRenderTasks();
   rrRenderLinks();
@@ -4078,6 +4099,19 @@ function rrBind() {
     const out = await api("rr_start_history", rr.pid);
     for (const w of out.warnings || []) banner(w);
     rrRenderRoutines();
+  });
+  document.querySelectorAll("#rrp-allow-box [data-allow]").forEach((c) => {
+    c.onchange = guarded(async () => {
+      rr.proj = await api("rr_set_allow", rr.pid, { [c.dataset.allow]: c.checked });
+      rrRenderAllow();
+    });
+  });
+  document.querySelectorAll("#rrp-allow-box [data-allow-list]").forEach((i) => {
+    i.onchange = guarded(async () => {
+      try {
+        rr.proj = await api("rr_set_allow", rr.pid, { [i.dataset.allowList]: i.value });
+      } finally { rrRenderAllow(); }
+    });
   });
   $("#rrp-images").onchange = guarded(async (e) => {
     rr.proj = await api("rr_set_images", rr.pid, e.target.checked);

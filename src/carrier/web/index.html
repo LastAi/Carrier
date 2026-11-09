@@ -260,6 +260,27 @@
           of the conversation — like your messages and the code Claude reads. Turn this off to keep a project's
           sessions text only (Claude also can't open image files then).</span>
       </div>
+      <details class="rr-sub allow-box" id="rrp-allow-box">
+        <summary>Pre-approved actions <span id="rrp-allow-sum" class="muted small"></span></summary>
+        <p class="muted small">What this project's sessions may do without asking you. Everything else still asks,
+          and Claude Code's own settings and the session's Permissions setting still apply. Edits in reference
+          folders stay blocked.</p>
+        <label class="check small"><input type="checkbox" data-allow="read"> Read files in the project's folders
+          <span class="muted">(work, reference and workspace folders)</span></label>
+        <label class="check small"><input type="checkbox" data-allow="edit"> Create and edit files in the work folders</label>
+        <label class="check small"><input type="checkbox" data-allow="web_search"> Search the web</label>
+        <label class="check small"><input type="checkbox" data-allow="web_fetch"> Fetch web pages</label>
+        <label class="field small">… only from these sites <span class="muted">— comma-separated, empty for any site;
+          a site includes its subdomains</span>
+          <input id="rrp-allow-sites" data-allow-list="sites" type="text" spellcheck="false" placeholder="docs.python.org, github.com"></label>
+        <label class="field small">Shell commands <span class="muted">— program names, comma-separated. Only simple
+          commands: anything with ; &amp; | &gt; &lt; or $( ) still asks.</span>
+          <input id="rrp-allow-commands" data-allow-list="commands" type="text" spellcheck="false" placeholder="git, npm, pytest"></label>
+        <label class="field small">Other tools <span class="muted">— exact tool names, comma-separated</span>
+          <input id="rrp-allow-tools" data-allow-list="tools" type="text" spellcheck="false" placeholder="mcp__github__get_issue"></label>
+        <p class="muted small">Tip: a permission card in Flight Deck can add to this list with
+          <b>Always allow … in this project</b>.</p>
+      </details>
 
       <div class="card">
         <h3>Long-term goal</h3>

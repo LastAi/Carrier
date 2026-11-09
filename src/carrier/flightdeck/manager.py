@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from carrier.core import gitutil, usage, usersettings
-from carrier.flightdeck import coordination, worktrees
+from carrier.flightdeck import coordination, sdk, worktrees
 from carrier.readyroom import context as rr_context
 from carrier.readyroom.manager import ReadyRoom, RoomError
 from carrier.core.db import ACTIVE, Store, default_path, folder_kind
@@ -200,6 +200,18 @@ class FlightDeck:
         if inside(session["cwd"]) or any(inside(r) for _, r in self.store.project_roots(project)):
             return None
         return next((f for f in project["folders"] if folder_kind(f) == "reference" and inside(f["path"])), None)
+
+    def preapproved(self, session: dict[str, Any], tool: str, tool_input: dict[str, Any]) -> str:
+        """Which of the session's project pre-approvals covers this tool call ("" = ask)."""
+        project = self.store.project(session["project_id"]) if session["project_id"] is not None else None
+        if project is None:
+            return ""
+        allow = self.room.allowances(project["id"])
+        if not any(allow.values()):
+            return ""
+        editable = [session["cwd"]] + [r for _, r in self.store.project_roots(project)]
+        readable = editable + [r for _, r in self.store.project_roots(project, include_reference=True)]
+        return sdk.preapproved(tool, tool_input, allow, Path(session["cwd"]), readable, editable)
 
     def workspace_target(self, session: dict[str, Any], file_path: str) -> tuple[dict[str, Any], Path | None] | None:
         """For a file outside the session's work folders but inside one of its workspace
@@ -661,7 +673,7 @@ class FlightDeck:
         return True
 
     def answer(self, sid: int, req_id: str, decision: str, message: Any = "") -> bool:
-        if decision not in ("allow", "allow_always", "deny", "answers", "skip", "work", "change", "decline"):
+        if decision not in ("allow", "allow_always", "allow_project", "deny", "answers", "skip", "work", "change", "decline"):
             raise DeckError(f"Unknown decision: {decision}")
         runner = self._runner(sid)
 

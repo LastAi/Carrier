@@ -148,15 +148,34 @@ other's edits just like sessions in linked projects.
   main queue.
 * Backlog groups never start anything on their own.
 
-### Images, activity log and secrets
+### Images, pre-approved actions, activity log and secrets
 
+* **Pre-approved actions** (on the project page) are what the project's
+  sessions may do without asking you — the permission cards Flight Deck
+  would otherwise show:
+
+  | Option | Covers |
+  |---|---|
+  | Read files | Reading and searching inside the project's folders (work, reference and workspace) |
+  | Create and edit files | Writing and editing inside the session's folder and the work folders |
+  | Search the web | Web searches |
+  | Fetch web pages | Any site, or only the sites you list (a site includes its subdomains) |
+  | Shell commands | The programs you list (`git, npm, pytest`), for simple commands only: anything with `;` `&` `|` `>` `<` or `$( )` still asks |
+  | Other tools | Exact tool names, for example a connected tool such as `mcp__github__get_issue` |
+
+  Everything else still asks. Files outside the project's folders always ask,
+  edits in reference folders stay blocked, and Claude Code's own settings and
+  the session's **Permissions** setting still apply. A permission card can
+  add to the list with **Always allow … in this project**. Templates copy the
+  list, and changes appear in the activity log.
 * **Images:** a project switch allows or blocks pictures in its sessions.
   Pictures you paste, and pictures Claude shows or opens, are sent to
   Anthropic as part of the conversation, like your messages; with the switch
   off, sessions are text only and Claude can't open image files.
 * **Activity log** (on the project page) lists everything recorded for the
   project, newest first: every task change, and changes to its goal, rules,
-  rule sets, folders, task groups, routines and skills, the images switch,
+  rule sets, folders, task groups, routines and skills, the images switch and
+  pre-approved actions,
   rules and skills Claude suggested that you added, and finished reviews.
 * **Secrets:** the Routines card warns about likely secrets in the project's
   files (keys, tokens, passwords, private keys) and about key or `.env` files
@@ -369,7 +388,9 @@ task.
 * **Chat:** Claude's replies, its thinking and each tool it uses appear as
   they happen. Type to guide it at any point.
 * **Permissions:** prompts appear as buttons — **Allow**, **Allow for this
-  session**, or **Deny** with a reason. The header's **Permissions** setting
+  session**, **Always allow … in this project** (adds it to the project's
+  [pre-approved actions](#images-pre-approved-actions-activity-log-and-secrets)),
+  or **Deny** with a reason. The header's **Permissions** setting
   can also be *Ask before acting*, *Auto-accept edits*, *Plan only (no
   changes)*, or *Never ask* (which needs confirming).
 * **Questions:** when Claude needs you to choose, its questions appear as a

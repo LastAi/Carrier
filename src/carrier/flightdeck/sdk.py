@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -318,6 +320,93 @@ def allow_key(name: str, inp: dict[str, Any]) -> tuple[str, str]:
         host = urlparse(str(inp.get("url", ""))).netloc
         return f"WebFetch:{host}", f"Allow fetching from {host} for this session"
     return name, f"Allow {name} for this session"
+
+
+# -- pre-approved actions (a project's "Pre-approved actions", readyroom/manager.py) --------
+
+READ_TOOLS = ("Read", "Glob", "Grep", "LS", "NotebookRead")
+EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+# A pre-approved program only covers a simple command: anything that chains, pipes,
+# redirects or substitutes could run something else, so it still asks.
+_SHELL_OPS = re.compile(r"[;&|`<>\n\r]|\$\(")
+ALLOW_DEFAULT: dict[str, Any] = {"read": False, "edit": False, "web_search": False, "web_fetch": False,
+                                 "sites": [], "commands": [], "tools": []}
+
+
+def _tool_path(name: str, inp: dict[str, Any]) -> str | None:
+    for k in ("file_path", "notebook_path", "path"):
+        if inp.get(k):
+            return str(inp[k])
+    return None
+
+
+def _host_matches(host: str, sites: list[str]) -> bool:
+    host = host.lower().split(":")[0]
+    return any(host == s or host.endswith("." + s) for s in (x.lower().strip().lstrip(".") for x in sites) if s)
+
+
+def preapproved(name: str, inp: dict[str, Any], allow: dict[str, Any], cwd: Path,
+                readable: list[str], editable: list[str]) -> str:
+    """Which of the project's pre-approvals covers this tool call ("" if none).
+
+    Files count only inside the project's folders: ``editable`` (the session's folder
+    and work folders) for edits, those plus reference and workspace folders for reads.
+    """
+    def inside(roots: list[str]) -> bool:
+        p = _tool_path(name, inp)
+        target = Path(p) if p else cwd  # no path: the tool works in the session's folder
+        if not target.is_absolute():
+            target = cwd / target
+        t = os.path.normcase(os.path.realpath(target))
+        for r in roots:
+            root = os.path.normcase(os.path.realpath(r))
+            if t == root or t.startswith(root.rstrip(os.sep) + os.sep):
+                return True
+        return False
+
+    if name in READ_TOOLS and allow.get("read") and inside(readable):
+        return "read"
+    if name in EDIT_TOOLS and allow.get("edit") and inside(editable):
+        return "edit"
+    if name == "WebSearch" and allow.get("web_search"):
+        return "web_search"
+    if name == "WebFetch" and allow.get("web_fetch"):
+        from urllib.parse import urlparse
+
+        sites = allow.get("sites") or []
+        if not sites or _host_matches(urlparse(str(inp.get("url", ""))).netloc, sites):
+            return "web_fetch"
+    if name == "Bash":
+        cmd = str(inp.get("command", "")).strip()
+        prog = cmd.split()[0] if cmd else ""
+        if prog and prog in (allow.get("commands") or []) and not _SHELL_OPS.search(cmd):
+            return "commands"
+    if name in (allow.get("tools") or []):
+        return "tools"
+    return ""
+
+
+def project_allow(name: str, inp: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
+    """What "always allow in this project" adds for this tool call, and the button's label."""
+    if name in READ_TOOLS:
+        return {"read": True}, "Always allow reading files in this project"
+    if name in EDIT_TOOLS:
+        return {"edit": True}, "Always allow editing files in this project"
+    if name == "WebSearch":
+        return {"web_search": True}, "Always allow web searches in this project"
+    if name == "WebFetch":
+        from urllib.parse import urlparse
+
+        host = urlparse(str(inp.get("url", ""))).netloc.split(":")[0]
+        return ({"web_fetch": True, "sites": [host]}, f"Always allow fetching from {host} in this project") \
+            if host else None
+    if name == "Bash":
+        cmd = str(inp.get("command", "")).strip().split()
+        prog = cmd[0] if cmd else ""
+        return ({"commands": [prog]}, f"Always allow simple `{prog}` commands in this project") if prog else None
+    if name in ("AskUserQuestion",) or name.startswith("mcp__carrier__"):
+        return None
+    return {"tools": [name]}, f"Always allow {name} in this project"
 
 
 def summarize_tool(name: str, inp: dict[str, Any], cwd: Path | None = None) -> str:

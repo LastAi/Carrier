@@ -190,6 +190,55 @@ class ReadyRoom:
         self.store.log_project_event(pid, "images", "turned images " + ("on" if on else "off"))
         return self.project(pid)
 
+    # -- pre-approved actions -------------------------------------------------------------
+
+    def allowances(self, pid: int | None) -> dict[str, Any]:
+        """What this project's sessions may do without asking (see flightdeck/sdk.preapproved)."""
+        from carrier.flightdeck.sdk import ALLOW_DEFAULT
+
+        saved = self.store.get_setting(f"project:{pid}:allow", {}) if pid is not None else {}
+        out = {k: (list(v) if isinstance(v, list) else v) for k, v in ALLOW_DEFAULT.items()}
+        for k, v in (saved or {}).items():
+            if k in out and isinstance(v, type(out[k])):
+                out[k] = v
+        return out
+
+    def set_allowances(self, pid: int, **changes: Any) -> dict[str, Any]:
+        """Change pre-approvals: booleans for read / edit / web_search / web_fetch, lists
+        (or comma-separated text) for sites / commands / tools."""
+        from carrier.flightdeck.sdk import ALLOW_DEFAULT
+
+        self._project(pid)
+        cur = self.allowances(pid)
+        notes = []
+        for k, v in changes.items():
+            if k not in ALLOW_DEFAULT:
+                raise RoomError(f"Unknown setting: {k}")
+            if isinstance(ALLOW_DEFAULT[k], bool):
+                v = bool(v)
+            else:
+                items = v.split(",") if isinstance(v, str) else list(v or [])
+                v = []
+                for x in (str(i).strip() for i in items):
+                    if x and x not in v:
+                        v.append(x)
+                if k == "commands" and any(re.search(r"\s|[;&|`<>$]", x) for x in v):
+                    raise RoomError("List program names only (like git, npm, pytest), not whole commands.")
+            if cur[k] != v:
+                notes.append(f"{k.replace('_', ' ')}: {v if not isinstance(v, bool) else ('on' if v else 'off')}")
+            cur[k] = v
+        self.store.set_setting(f"project:{pid}:allow", cur)
+        if notes:
+            self.store.log_project_event(pid, "allow", "pre-approved actions — " + "; ".join(notes))
+        return self.project(pid)
+
+    def add_allowance(self, pid: int, change: dict[str, Any]) -> dict[str, Any]:
+        """Add to the pre-approvals (lists are extended, not replaced): "always allow in this project"."""
+        cur = self.allowances(pid)
+        merged = {k: (cur[k] + [x for x in v if x not in cur[k]]) if isinstance(v, list) else v
+                  for k, v in change.items()}
+        return self.set_allowances(pid, **merged)
+
     # -- task groups ---------------------------------------------------------------------
 
     def save_group(self, pid: int, name: str, priority: str = "normal", tags: list[str] | str | None = None,
@@ -283,6 +332,7 @@ class ReadyRoom:
                             for f in p["folders"]],
                 "rule_set_ids": self.store.project_rule_set_ids(pid),
                 "images": self.images_allowed(pid),
+                "allow": self.allowances(pid),
                 "tasks": self.store.tasks(pid, statuses=OPEN),
                 "groups": self.store.task_groups(pid),
                 "history": self.store.tasks(pid, statuses=("done",)),
@@ -779,6 +829,8 @@ class ReadyRoom:
                        for sk in skills.list_skills(p["path"])["project"]],
             "agents": [{k: a.get(k) for k in self.store.AGENT_FIELDS if k != "project_id"}
                        for a in self.store.review_agents(pid)],
+            "allow": self.allowances(pid),
+            "images": self.images_allowed(pid),
         }
 
     def _apply_template_extras(self, pid: int, extras: dict[str, Any]) -> list[str]:
@@ -788,6 +840,10 @@ class ReadyRoom:
         from carrier.readyroom import routines
 
         notes = []
+        if isinstance(extras.get("allow"), dict):
+            self.set_allowances(pid, **{k: v for k, v in extras["allow"].items() if k in self.allowances(pid)})
+        if extras.get("images") is False:
+            self.store.set_setting(f"project:{pid}:images", False)
         ids: dict[str, int] = {}
         for g in extras.get("groups") or []:
             self.save_group(pid, g["name"], g.get("priority", "normal"), g.get("tags"))

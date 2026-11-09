@@ -586,3 +586,9 @@ button.danger { color: var(--sev-high); border-color: var(--sev-high); }
 .usage-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .usage-row .num { font-variant-numeric: tabular-nums; text-align: right; }
 #modal-usage { max-height: 84vh; overflow: auto; }
+
+/* ---- pre-approved actions ---- */
+.allow-box > summary { cursor: pointer; font-size: 13px; }
+.allow-box[open] { padding-bottom: 6px; }
+.allow-box .check, .allow-box .field { display: block; margin: 4px 0; }
+.allow-box input[type=text] { width: 100%; }

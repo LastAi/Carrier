@@ -4,6 +4,13 @@ All notable changes are listed here. Format: [Keep a Changelog](https://keepacha
 
 ## Unreleased
 
+- **Pre-approved actions** per project (Ready Room): let its sessions read
+  files, create and edit files, search the web, fetch pages (any site or
+  listed sites), run listed programs (simple commands only) and use named
+  tools without asking. Files outside the project's folders still ask. A
+  Flight Deck permission card can add to the list with **Always allow … in
+  this project**; templates copy it.
+
 ## 0.8.0 — Usage and limits (alpha)
 
 - **Usage and limits.** A Usage button on every tab shows how full Claude's

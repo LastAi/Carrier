@@ -511,6 +511,9 @@ class SessionRunner:
         key, allow_label = sdk.allow_key(tool, tool_input)
         if key in self.always_allow:
             return sdk.allow(tool_input)
+        if self.deck.preapproved(self.row, tool, tool_input):  # the project's pre-approved actions
+            return sdk.allow(tool_input)
+        proj = sdk.project_allow(tool, tool_input) if self.row["project_id"] is not None else None
         req_id = f"p{next(_req_ids)}"
         loop = asyncio.get_running_loop()
         future: asyncio.Future[tuple[str, str]] = loop.create_future()
@@ -518,7 +521,8 @@ class SessionRunner:
         reason = getattr(context, "decision_reason", None) or ""
         self.pending[req_id] = {"future": future, "tool": tool, "summary": summary, "reason": reason}
         self.emit({"type": "permission", "req_id": req_id, "tool": tool, "summary": summary,
-                   "reason": reason, "input": sdk._trim_input(tool_input), "allow_label": allow_label})
+                   "reason": reason, "input": sdk._trim_input(tool_input), "allow_label": allow_label,
+                   "project_label": proj[1] if proj else ""})
         self.set_status("needs_you")
         try:
             decision, message = await future
@@ -531,9 +535,17 @@ class SessionRunner:
             if self.row["status"] == "needs_you" and not self.pending:
                 self.set_status("working")
         self.emit({"type": "permission_done", "req_id": req_id, "decision": decision})
-        if decision in ("allow", "allow_always"):
+        if decision in ("allow", "allow_always", "allow_project"):
             if decision == "allow_always":
                 self.always_allow.add(key)
+            if decision == "allow_project" and proj:
+                try:
+                    self.deck.room.add_allowance(self.row["project_id"], proj[0])
+                    self.emit({"type": "notice", "kind": "allow",
+                               "text": f"Pre-approved for this project: {proj[1].removeprefix('Always allow ')}. "
+                                       "Change it in the Ready Room."})
+                except Exception as exc:  # still allow this one
+                    self.emit({"type": "notice", "kind": "allow", "text": f"Couldn't save the pre-approval: {exc}"})
             return sdk.allow(tool_input)
         if decision == "interrupt":
             return sdk.deny(message, interrupt=True)

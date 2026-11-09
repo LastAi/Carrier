@@ -863,6 +863,11 @@ class DesktopApi:
         return self._rr().set_images_allowed(pid, bool(on))
 
     @_guard
+    def rr_set_allow(self, pid: int, changes: dict[str, Any]) -> dict[str, Any]:
+        """Change a project's pre-approved actions (see readyroom.manager.set_allowances)."""
+        return self._rr().set_allowances(pid, **dict(changes or {}))
+
+    @_guard
     def rr_project_log(self, pid: int) -> list[dict[str, Any]]:
         """The project's activity log: every task change and project event, newest first."""
         return self._rr().project_log(pid)

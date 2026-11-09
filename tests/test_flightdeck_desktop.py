@@ -496,3 +496,42 @@ def test_usage_limits_in_the_page(fdpage):
     s = usersettings.load()
     assert s["usage_hold_at"] == 70 and s["usage_auto_resume"] is False
     page.screenshot(path="/tmp/carrier-shots/usage.png")
+
+
+def test_preapproved_actions(fdpage):
+    page, srv = fdpage
+    page.click(".tool[data-tool='readyroom']")
+    page.wait_for_selector("#rr-pane-intro:not(.hidden)")
+    rr_new_project(page, "ApiServer", "A small API server.", "write notes.md hi")
+    # A permission card offers to pre-approve it for the whole project.
+    page.click(".tool[data-tool='flightdeck']")
+    page.click(".fd-project:has(.name:text-is('ApiServer')) >> text=▶ Start")
+    page.click("#fdn-start")
+    page.click(".perm .pactions >> text=Always allow editing files in this project")
+    page.wait_for_selector(".perm .pactions >> text=pre-approved for this project")
+    page.wait_for_selector("#fd-transcript .notice >> text=Pre-approved for this project")
+    # The Ready Room shows it, and more can be added there.
+    page.click(".tool[data-tool='readyroom']")
+    page.click("#rr-pane-project >> text=Pre-approved actions")
+    page.wait_for_selector("#rrp-allow-sum:text-matches('edit files')")
+    assert page.is_checked("#rrp-allow-box [data-allow='edit']")
+    assert page.is_disabled("#rrp-allow-sites")
+    page.check("#rrp-allow-box [data-allow='read']")
+    page.fill("#rrp-allow-commands", "git, npm,git")
+    page.press("#rrp-allow-commands", "Tab")
+    page.wait_for_selector("#rrp-allow-sum:text-matches('git, npm')")
+    assert page.input_value("#rrp-allow-commands") == "git, npm"
+    page.fill("#rrp-allow-commands", "git status")
+    page.press("#rrp-allow-commands", "Tab")
+    page.wait_for_selector("text=List program names only")  # refused, and the field shows what's saved
+    import time
+
+    deadline = time.time() + 5
+    while page.input_value("#rrp-allow-commands") != "git, npm" and time.time() < deadline:
+        time.sleep(0.05)
+    assert page.input_value("#rrp-allow-commands") == "git, npm"
+    deck = page.carrier_api._fd()
+    pid = deck.store.projects()[0]["id"]
+    a = deck.room.allowances(pid)
+    assert a["read"] and a["edit"] and a["commands"] == ["git", "npm"]
+    page.screenshot(path="/tmp/carrier-shots/allow.png")
