@@ -53,6 +53,11 @@ class ProjectSpec:
     criteria: list[Criterion] | None = None
     task_lookup: Callable[[str, float | None], list[dict[str, Any]]] | None = None
     add_fix_task: Callable[..., dict[str, Any]] | None = None
+    # Per folder label ("" = the main folder): what the review agents are told about it
+    # (shared with other projects, the user's note, which changes are reviewed).
+    folder_notes: dict[str, str] = field(default_factory=dict)
+    # Is a changed file (``<label>/<path>``) the project's own? See readyroom.ownership.
+    keep_file: Callable[[str, float | None], bool] | None = None
 
 
 # -- review agents -------------------------------------------------------------------
@@ -260,30 +265,89 @@ def task_scope_text(store: Store, pid: int, main: Path) -> str:
 
 def project_spec(store: Store, pid: int) -> ProjectSpec:
     from carrier.readyroom import context as rr_context
+    from carrier.readyroom import ownership
     from carrier.readyroom.manager import ReadyRoom
 
     p = store.project(pid)
     if p is None:
         raise ValueError("Unknown project.")
-    extras = [(lbl, Path(path)) for lbl, path in store.project_roots(p)[1:]]  # work folders only
+    room = ReadyRoom(store)
+    settings = {f["path"]: f for f in p.get("folders") or []}
+    # Work folders only, minus the ones the user left out of reviews.
+    extras = [(lbl, Path(path)) for lbl, path in store.project_roots(p)[1:]
+              if settings.get(path, {}).get("review", "all") != "skip"]
+    shared_labels = [lbl for lbl, path in extras if settings.get(str(path), {}).get("share") == "shared"]
+    foreign = ownership.foreign_mains(store, p)
+    folder_notes: dict[str, str] = {}
+    for lbl, path in [("", Path(p["path"]))] + extras:
+        bits = []
+        f = settings.get(str(path), {})
+        others = room.shared_with(pid, str(path), work_only=True)
+        if lbl in shared_labels:
+            part = ", ".join(f.get("part") or [])
+            bits.append("A shared space other projects work in too"
+                        + (f" ({', '.join(others)})" if others else "")
+                        + ". Only this project's part is in this review: "
+                        + (f"files matching {part}, " if part else "")
+                        + "files it created there, and files its sessions changed.")
+        inner = [q["name"] for q in foreign if ownership._inside(q["path"], str(path))]
+        others = [n for n in others if n not in inner]
+        if lbl not in shared_labels and others:
+            bits.append(f"Other projects ({', '.join(others)}) also use this folder; their changes are not "
+                        "this project's work.")
+        if inner:
+            bits.append(f"Main folders of other projects inside it ({', '.join(inner)}) are left out.")
+        note = (f.get("note") or "").strip()
+        if note:
+            bits.append(f"The user's note about this folder: {note}")
+        if bits:
+            folder_notes[lbl] = " ".join(bits)
     text = rr_context.build(store, pid, None, for_review=True)
     scope = task_scope_text(store, pid, Path(p["path"]))
     if scope:
         text += "\n\n" + scope
-    if extras:
+    if extras or folder_notes:
         text += "\n\n## Folders in this review\nFiles named `<label>/…` are in the project's extra folders:\n" + \
-            "\n".join(f"- {lbl}/ = {path}" for lbl, path in extras)
+            "\n".join(f"- {lbl or '(main folder)'}/ = {path}" + (f" — {folder_notes[lbl]}" if lbl in folder_notes else "")
+                      for lbl, path in [("", Path(p["path"]))] + extras if lbl or lbl in folder_notes)
 
     def task_lookup(path: str, since: float | None) -> list[dict[str, Any]]:
+        """The tasks whose sessions edited ``path``. An edit in a folder shared with other projects
+        is logged for each of them: tasks of another project are marked with that project's name."""
         out: dict[int, dict[str, Any]] = {}
         for e in store.edits(pid, path=path, since=since or 0):
             s = store.session(e["session_id"])
             t = store.task(s["task_id"]) if s and s.get("task_id") else None
             if t and t["id"] not in out:
-                out[t["id"]] = {"id": t["id"], "title": t["title"], "session": s["id"], "status": t["status"]}
+                info = {"id": t["id"], "title": t["title"], "session": s["id"], "status": t["status"]}
+                if s.get("project_id") != pid:
+                    other = store.project(s["project_id"]) if s.get("project_id") is not None else None
+                    info["other_project"] = other["name"] if other else "a standalone task"
+                out[t["id"]] = info
         return list(out.values())
 
-    room = ReadyRoom(store)
+    roots = {"": Path(p["path"]), **{lbl: path for lbl, path in extras}}
+    labels = {lbl for lbl in roots if lbl}
+
+    def keep_file(path: str, since: float | None) -> bool:
+        """Is this changed file the project's own? Not in another project's main folder, and in a
+        shared space only its part, files it created there and files its sessions changed."""
+        head, _, rest = path.partition("/")
+        lbl, rel = (head, rest) if rest and head in labels else ("", path)
+        root = roots[lbl]
+        full = str(root / rel)
+        if any(ownership._inside(full, q["path"]) for q in foreign):
+            return False
+        if lbl not in shared_labels:
+            return True
+        f = settings.get(str(root), {})
+        if ownership.matches(rel, f.get("part") or []) or ownership.is_claimed(store, pid, str(root), rel):
+            return True
+        for e in store.edits(pid, path=path, since=since or 0):
+            s = store.session(e["session_id"])
+            if s and s.get("project_id") == pid:
+                return True
+        return False
 
     def add_fix_task(title: str, details: str, review_id: str = "") -> dict[str, Any]:
         project = room.add_task(pid, title, details, first=True, fix_review=review_id or "review")
@@ -291,7 +355,8 @@ def project_spec(store: Store, pid: int) -> ProjectSpec:
 
     return ProjectSpec(id=pid, name=p["name"], path=Path(p["path"]), extras=extras, context=text,
                        criteria=effective_criteria(store, pid, Path(p["path"])),
-                       task_lookup=task_lookup, add_fix_task=add_fix_task)
+                       task_lookup=task_lookup, add_fix_task=add_fix_task, folder_notes=folder_notes,
+                       keep_file=keep_file)
 
 
 def project_kwargs(repo: Path, store: Store | None = None) -> dict[str, Any]:
@@ -320,7 +385,8 @@ def project_kwargs(repo: Path, store: Store | None = None) -> dict[str, Any]:
 
     return {"extras": [(lbl, path) for lbl, path in spec.extras if gitutil.in_repo(path)],
             "project": {"id": spec.id, "name": spec.name}, "context": spec.context,
-            "criteria": spec.criteria, "task_lookup": spec.task_lookup}
+            "criteria": spec.criteria, "task_lookup": spec.task_lookup, "folder_notes": spec.folder_notes,
+            "keep_file": spec.keep_file}
 
 
 def _key(path: str | Path) -> str:

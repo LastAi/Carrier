@@ -164,6 +164,8 @@ class ChangeItem:
     # Flight Deck tasks whose sessions edited this item's files in the
     # reviewed range: [{"id", "title", "session"}]. Empty outside Carrier projects.
     tasks: list[dict[str, Any]] = field(default_factory=list)
+    # What the project says about the folder(s) these files are in (shared, the user's note).
+    folder_note: str = ""
 
     @property
     def top_severity(self) -> str | None:

@@ -38,6 +38,7 @@ from typing import Any
 
 from carrier.core import gitutil, usage, usersettings
 from carrier.flightdeck import coordination, folderscan, sdk, worktrees
+from carrier.readyroom import ownership
 from carrier.readyroom import context as rr_context
 from carrier.readyroom.manager import ReadyRoom, RoomError
 from carrier.core.db import ACTIVE, Store, default_path, folder_kind
@@ -222,10 +223,24 @@ class FlightDeck:
         scope = self._allow_scope(session)
         if scope is None:  # a standalone task: its own folder only, nothing pre-approved
             return {"entries": [], "readable": [session["cwd"]], "editable": [session["cwd"]],
-                    "can_edit": False, "can_read": False}
+                    "can_edit": False, "can_read": False, "no_write": None}
         allow, readable, editable = scope
         return {"entries": sdk.group_entries(allow), "readable": readable, "editable": editable,
-                "can_edit": bool(allow.get("edit")), "can_read": bool(allow.get("read"))}
+                "can_edit": bool(allow.get("edit")), "can_read": bool(allow.get("read")),
+                "no_write": self._no_write(session)}
+
+    def file_owner(self, session: dict[str, Any], path: str) -> dict[str, Any]:
+        """Whose a file is, for this session's project (readyroom/ownership.classify)."""
+        project = self.store.project(session["project_id"]) if session["project_id"] is not None else None
+        if project is None:
+            return {"kind": "own", "folder": None, "rel": "", "owner": ""}
+        if not os.path.isabs(path):  # relative to the session's folder, as Claude Code reads it
+            path = os.path.join(session["cwd"], path)
+        return ownership.classify(self.store, project, path)
+
+    def _no_write(self, session: dict[str, Any]) -> Any:
+        """For shell commands: writing here would change another project's (or the shared space's) files."""
+        return lambda p: self.file_owner(session, p)["kind"] in ("foreign", "other")
 
     def preapproved(self, session: dict[str, Any], tool: str, tool_input: dict[str, Any]) -> str:
         """Which of the session's project pre-approvals covers this tool call ("" = ask)."""
@@ -233,7 +248,12 @@ class FlightDeck:
         if scope is None:
             return ""
         allow, readable, editable = scope
-        return sdk.preapproved(tool, tool_input, allow, Path(session["cwd"]), readable, editable)
+        if tool in sdk.EDIT_TOOLS:
+            path = tool_input.get("file_path") or tool_input.get("notebook_path")
+            if path and self.file_owner(session, str(path))["kind"] in ("foreign", "other"):
+                return ""  # another project's files: always ask
+        return sdk.preapproved(tool, tool_input, allow, Path(session["cwd"]), readable, editable,
+                               no_write=self._no_write(session))
 
     def project_allow(self, session: dict[str, Any], tool: str, tool_input: dict[str, Any]) -> dict[str, Any] | None:
         """For a permission card: what "always allow in this project" would add, and for a
@@ -242,7 +262,12 @@ class FlightDeck:
         if scope is None:
             return None
         allow, readable, editable = scope
-        return sdk.project_allow(tool, tool_input, allow, Path(session["cwd"]), readable, editable)
+        if tool in sdk.EDIT_TOOLS:
+            path = tool_input.get("file_path") or tool_input.get("notebook_path")
+            if path and self.file_owner(session, str(path))["kind"] in ("foreign", "other"):
+                return None  # can't be pre-approved: another project's files
+        return sdk.project_allow(tool, tool_input, allow, Path(session["cwd"]), readable, editable,
+                                 no_write=self._no_write(session))
 
     def workspace_target(self, session: dict[str, Any], file_path: str) -> tuple[dict[str, Any], Path | None] | None:
         """For a file outside the session's work folders but inside one of its workspace

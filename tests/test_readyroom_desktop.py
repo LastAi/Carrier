@@ -233,3 +233,47 @@ def test_draft_a_new_project(rrpage, tmp_path):
     assert p["name"] == "Strategy Game" and p["rules"] == "- Keep old save files loading."
     assert p["tags"] == ["game", "python"] and "Add a test" in p["tasks"][0]["details"]
     assert pg.locator("#rrp-goal b").count() == 0  # shown as text
+
+
+def test_shared_folder_review_settings(rrpage, tmp_path):
+    pg, api, _backend = rrpage
+    shared = tmp_path / "Shared"
+    shared.mkdir()
+    (tmp_path / "Anim").mkdir()
+    room = api._rr()
+    pid = room.create_project("Game", str(tmp_path / "Game"))["id"]
+    room.add_folder(pid, str(shared))
+    oid = room.create_project("Anim", str(tmp_path / "Anim"))["id"]
+    room.add_folder(oid, str(shared))
+    pg.click(".tool[data-tool=readyroom]")
+    pg.click("#rr-list .rr-item:has-text('Game')")
+    chip = "#rrp-folders .folder-chip"
+    pg.wait_for_selector(f"{chip} >> text=shared with Anim")
+    assert pg.input_value(f"{chip} select[aria-label='Sharing of Shared']") == "shared"
+    pg.click(f"{chip} >> text=Part…")
+    pg.fill("#prompt-input", "ships/**\ndata/ship_*.csv")
+    pg.click("#prompt-ok")
+    pg.wait_for_selector(f"{chip} >> text=Part ✓")
+    pg.check(f"{chip} input[aria-label='Leave Shared out of reviews']")
+    pg.wait_for_function("document.querySelector(\"#rrp-folders input[type=checkbox]\").checked")
+    pg.click(f"{chip} >> text=Note…")
+    pg.fill("#prompt-input", "Animation's export folder; only ships/ is ours.")
+    pg.click("#prompt-ok")
+    pg.wait_for_selector(f"{chip} >> text=Note ✓")
+    f = room.project(pid)["folders"][0]
+    assert f["part"] == ["ships/**", "data/ship_*.csv"] and f["review"] == "skip"
+    assert f["note"].startswith("Animation's export folder")
+    # Making it this project's alone is refused while Anim works there too.
+    pg.select_option(f"{chip} select[aria-label='Sharing of Shared']", "own")
+    pg.wait_for_selector("#banner >> text=stays a shared space")
+    assert room.project(pid)["folders"][0]["share"] == "shared"
+    # Adding Game's main folder (what the picker returns) to Anim as a work folder offers a reference folder.
+    pg.click("#rr-list .rr-item:has-text('Anim')")
+    pg.wait_for_selector(f"{chip} >> text=Shared")
+    pg.click("#rrp-addfolder-btn")
+    pg.wait_for_selector("#confirm-text >> text=Game's main folder")
+    pg.click("#confirm-ok")
+    pg.wait_for_selector(f"{chip}.ref")
+    kinds = {f["label"]: f["kind"] for f in room.project(oid)["folders"]}
+    assert kinds["Game"] == "reference"
+    pg.screenshot(path="/tmp/carrier-shots/shared-folder.png")

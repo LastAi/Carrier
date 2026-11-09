@@ -109,8 +109,8 @@ def test_shell_commands(tmp_path: Path):
     def check(cmd: str, entries: list[str], **kw) -> S.Verdict:
         return S.check(cmd, entries, work, [str(work)], [str(work)], **kw)
 
-    java = ('JP="/c/Program Files/Java/jdk-17/bin/javap.exe"; CORE=/d/Starsector/starsector-core; '
-            '"$JP" -p -c -cp "$CORE/starfarer_obf.jar" \'com.fs.starfarer.util.return\' '
+    java = ('JP="/c/Program Files/Java/jdk-17/bin/javap.exe"; CORE=/d/Games/engine-core; '
+            '"$JP" -p -c -cp "$CORE/engine.jar" \'com.example.util.Loader\' '
             '| awk \'/private static java.io.File/,/publ/\'')
     v = check(java, ["javap"])
     assert not v.ok and v.missing == ["awk"]

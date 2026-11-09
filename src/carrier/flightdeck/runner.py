@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import os
 import threading
 import time
 import traceback
@@ -55,6 +56,7 @@ class SessionRunner:
         self._ask_uses: dict[str, Any] = {}  # AskUserQuestion tool-use id -> its questions
         self.always_allow: set[str] = set()  # sdk.allow_key() values allowed for the rest of the session
         self.session_programs: list[str] = []  # shell programs allowed for the rest of the session
+        self._claims: dict[str, dict[str, Any]] = {}  # new files being written in shared spaces
         self._claim_lock = threading.Lock()
         # Claude Code reports cost per connection (and restarts it on /clear);
         # the stored total is base + the current connection's running cost.
@@ -510,9 +512,17 @@ class SessionRunner:
         if tool == "AskUserQuestion":
             return await self._ask_user(tool_input)
         key, allow_label = sdk.allow_key(tool, tool_input)
-        if key in self.always_allow or (tool == "Bash" and "Bash=" + str(tool_input.get("command", "")) in self.always_allow):
+        not_ours = False
+        if tool in sdk.EDIT_TOOLS:
+            path = self._file_path({"tool_input": tool_input})
+            not_ours = bool(path) and self.deck.file_owner(self.row, path)["kind"] in ("foreign", "other")
+        if not_ours:
+            # Another project's file (or outside this project's part of a shared space): ask every
+            # time — no "for this session" approval and no pre-approval covers it.
+            key, allow_label = "", ""
+        elif key in self.always_allow or (tool == "Bash" and "Bash=" + str(tool_input.get("command", "")) in self.always_allow):
             return sdk.allow(tool_input)
-        if self.deck.preapproved(self.row, tool, tool_input):  # the project's pre-approved actions
+        elif self.deck.preapproved(self.row, tool, tool_input):  # the project's pre-approved actions
             return sdk.allow(tool_input)
         session_add: list[str] = []
         if tool == "Bash":  # "for this session" means programs, as in the project's list
@@ -520,7 +530,8 @@ class SessionRunner:
 
             sc = self.deck.shell_scope(self.row)
             v = shellcheck.check(str(tool_input.get("command", "")), sc["entries"] + self.session_programs,
-                                 self.cwd, sc["readable"], sc["editable"], sc["can_edit"], sc["can_read"])
+                                 self.cwd, sc["readable"], sc["editable"], sc["can_edit"], sc["can_read"],
+                                 no_write=sc.get("no_write"))
             if v.ok:
                 return sdk.allow(tool_input)
             if v.missing and sdk._only_programs_missing(v):
@@ -537,6 +548,7 @@ class SessionRunner:
         self.pending[req_id] = {"future": future, "tool": tool, "summary": summary, "reason": reason}
         self.emit({"type": "permission", "req_id": req_id, "tool": tool, "summary": summary,
                    "reason": reason, "input": sdk._trim_input(tool_input), "allow_label": allow_label,
+                   "no_always": not_ours,
                    "project_label": (proj or {}).get("label", "") if (proj or {}).get("change") else "",
                    "programs": (proj or {}).get("programs") or [], "why": (proj or {}).get("reason", "")})
         self.set_status("needs_you")
@@ -552,7 +564,7 @@ class SessionRunner:
                 self.set_status("working")
         self.emit({"type": "permission_done", "req_id": req_id, "decision": decision})
         if decision in ("allow", "allow_always", "allow_project"):
-            if decision == "allow_always":
+            if decision == "allow_always" and not not_ours:
                 if session_add:
                     self.session_programs += [m for m in session_add if m not in self.session_programs]
                 else:
@@ -601,7 +613,10 @@ class SessionRunner:
 
     def _file_path(self, data: dict[str, Any]) -> str | None:
         inp = data.get("tool_input") or {}
-        return inp.get("file_path") or inp.get("notebook_path")
+        path = inp.get("file_path") or inp.get("notebook_path")
+        if path and not os.path.isabs(str(path)):  # Claude Code resolves it in the session's folder
+            path = os.path.join(str(self.cwd), str(path))
+        return path
 
     async def _before_edit(self, data: dict[str, Any], tool_use_id: str | None, ctx: Any) -> dict[str, Any]:
         path = self._file_path(data)
@@ -629,6 +644,35 @@ class SessionRunner:
                        "text": f"Added the new folder {f['label']} ({f['path']}) to this project as a work folder."})
             return sdk.pre_tool_output(context=f"[Carrier Flight Deck] The new folder {f['path']} is now one of this "
                                                f"project's work folders (files there are named {f['label']}/…).")
+        owner = self.deck.file_owner(self.row, path)
+        if owner["kind"] == "foreign":
+            self.emit({"type": "notice", "kind": "reference",
+                       "text": f"Blocked an edit in {owner['owner']}'s main folder (it belongs to that project)."})
+            return sdk.pre_tool_output(
+                decision="deny",
+                reason=f"[Carrier Flight Deck] {owner['owner_path']} is the main folder of the project "
+                       f"{owner['owner']}: it belongs to that project alone and is read only here. If the task "
+                       "really needs a change there, tell the user.")
+        if owner["kind"] == "other":
+            f = owner["folder"]
+            if (self.deck.store.session(self.sid) or self.row).get("mode") == "bypassPermissions":
+                # "Never ask" mode may not stop to ask: block it rather than let it through.
+                self.emit({"type": "notice", "kind": "shared",
+                           "text": f"Blocked an edit of {f['label']}/{owner['rel']}: it's outside this project's "
+                                   f"part of the shared space {f['label']}, and this session never asks."})
+                return sdk.pre_tool_output(
+                    decision="deny",
+                    reason=f"[Carrier Flight Deck] {f['label']}/{owner['rel']} is outside this project's part of the "
+                           f"shared folder {f['label']}; editing it needs the user's OK, and this session is in "
+                           "never-ask mode. Tell the user what you need to change there.")
+            self.emit({"type": "notice", "kind": "shared",
+                       "text": f"{f['label']}/{owner['rel']} is outside this project's part of the shared space "
+                               f"{f['label']}: asking you first."})
+            return sdk.pre_tool_output(
+                decision="ask",
+                reason=f"Outside this project's part of the shared folder {f['label']} ({f['label']}/{owner['rel']}).")
+        if owner["kind"] == "new" and tool_use_id:
+            self._claims[tool_use_id] = owner  # claimed in _after_edit, for this very call only
         ref = self.deck.reference_folder(self.row, path)
         if ref is not None:
             self.emit({"type": "notice", "kind": "reference",
@@ -680,6 +724,11 @@ class SessionRunner:
                     notified.append(n)
         rel = owners[0][1]
         self.deck.store.update_session(self.sid, last_activity=time.time())
+        claim = self._claims.pop(tool_use_id, None) if tool_use_id else None
+        if claim and path and os.path.exists(path) and self.row["project_id"] is not None:  # created in a shared space
+            from carrier.readyroom import ownership
+
+            ownership.claim(self.deck.store, self.row["project_id"], claim["folder"]["path"], claim["rel"])
         try:
             self.deck.notify_ref_watchers(self.row, path)
         except Exception:

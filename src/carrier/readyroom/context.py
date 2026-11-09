@@ -125,9 +125,26 @@ def build(store: Store, project_id: int | None, task: dict[str, Any] | None,
             head += f"\nLong-term goal (what this project is):\n{_cap(project['goal'], 3000)}"
         work = [f for f in project.get("folders") or [] if folder_kind(f) == "work"]
         ref = [f for f in project.get("folders") or [] if folder_kind(f) == "reference"]
-        if work:
+        own_work = [f for f in work if f.get("share") != "shared"]
+        shared = [f for f in work if f.get("share") == "shared"]
+        if own_work:
             head += ("\nThis project also works in these folders (read and edit them when the task "
-                     "needs it):\n" + "\n".join(f"- {f['label']}: {f['path']}" for f in work))
+                     "needs it):\n" + "\n".join(f"- {f['label']}: {f['path']}" for f in own_work))
+        if shared:
+            lines = []
+            for f in shared:
+                part = ", ".join(f.get("part") or []) or "none listed"
+                lines.append(f"- {f['label']}: {f['path']} — this project's part: {part}")
+            head += ("\nShared spaces — other projects work in these folders too. This project owns only its part "
+                     "(and new files it creates there, which become its own). Changing other existing files there "
+                     "needs the user's OK each time, so stay within your part unless the task truly needs more:\n"
+                     + "\n".join(lines))
+        from carrier.readyroom import ownership
+
+        foreign = ownership.foreign_mains(store, project)
+        if foreign:
+            head += ("\nOther projects' folders inside this project's folders — READ ONLY (each belongs to its "
+                     "project alone; edits are blocked):\n" + "\n".join(f"- {q['name']}: {q['path']}" for q in foreign))
         if ref:
             head += ("\nReference folders — READ ONLY. Look things up there to understand or complete "
                      "the task, but never create, edit or delete files in them (edits are blocked):\n"

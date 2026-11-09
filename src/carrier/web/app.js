@@ -1672,7 +1672,8 @@ function fdPermissionCard(ev) {
       const why = await promptText("Tell Claude why (optional):", {});
       if (why !== null) answer("deny", why);
     };
-    actions.append(a, aa);
+    actions.append(a);
+    if (!ev.no_always) actions.append(aa);
     if (ev.project_label) {
       const ap = el("button", "ghost", ev.project_label);
       ap.title = "Adds this to the project's pre-approved actions (Ready Room), for all its sessions from now on";
@@ -2765,7 +2766,8 @@ function rrRenderAllow() {
 function rrRenderProject() {
   const p = rr.proj;
   $("#rrp-name").value = p.name;
-  $("#rrp-folder").textContent = p.path + (p.folder_exists ? "" : "  (folder missing)");
+  $("#rrp-folder").textContent = p.path + (p.folder_exists ? "" : "  (folder missing)") +
+    ((p.main_shared_with || []).length ? `  · read by ${p.main_shared_with.join(", ")}` : "");
   rrRenderFolders();
   $("#rrp-goal").value = p.goal;
   $("#rrp-tags").value = tagsText(p.tags);
@@ -2810,11 +2812,74 @@ function rrRenderFolders() {
       try { rr.proj = await api("rr_set_folder_kind", rr.pid, f.path, kind.value); }
       finally { rrRenderFolders(); }
     });
+    const row2 = el("span", "fc-row");  // ownership: this project's, or a shared space
+    const row3 = el("span", "fc-row");  // reviews: how Debrief treats the folder
+    const setOpts = async (opts) => {
+      try { rr.proj = await api("rr_set_folder_options", rr.pid, f.path, opts); }
+      finally { rrRenderFolders(); }
+    };
+    if (f.kind === "work") {
+      const share = el("select", "kind-select");
+      share.setAttribute("aria-label", `Sharing of ${f.label}`);
+      share.title = "This project's: everything in the folder is this project's. Shared space: other projects " +
+        "work in it too, so this project owns only its part (patterns you set, and files it creates there); " +
+        "editing anything else in it always asks you first, and Debrief reviews only this project's part.";
+      for (const [v, t] of [["own", "This project's"], ["shared", "Shared space"]]) {
+        share.appendChild(Object.assign(el("option", "", t), { value: v }));
+      }
+      share.value = f.share || "own";
+      share.onchange = guarded(() => setOpts({ share: share.value }));
+      row2.appendChild(share);
+      if (f.share === "shared") {
+        const part = el("button", "fc-remove", f.part.length ? "Part ✓" : "Part…");
+        part.title = (f.part.length ? "This project's part: " + f.part.join(", ") : "No part set yet") +
+          (f.claimed ? ` · ${f.claimed} file(s) it created here` : "");
+        part.onclick = guarded(async () => {
+          const text = await promptText(`This project's part of ${f.label}: folder patterns, one per line ` +
+            "(like ships/** or data/ship_*.csv). Files it creates there are its own too.", { value: f.part.join("\n") });
+          if (text === null) return;
+          await setOpts({ part: text });
+        });
+        row2.appendChild(part);
+      }
+      const skip = el("label", "small fc-skip");
+      const cb = Object.assign(el("input"), { type: "checkbox", checked: f.review === "skip" });
+      cb.setAttribute("aria-label", `Leave ${f.label} out of reviews`);
+      cb.onchange = guarded(() => setOpts({ review: cb.checked ? "skip" : "all" }));
+      skip.append(cb, document.createTextNode(" Leave out of reviews"));
+      skip.title = "Debrief doesn't review or scan this folder.";
+      row3.appendChild(skip);
+    }
+    const nb = el("button", "fc-remove", f.note ? "Note ✓" : "Note…");
+    nb.title = f.note ? "For the review agents: " + f.note
+      : "Tell the review agents what this folder is, and what in it belongs to this project";
+    nb.onclick = guarded(async () => {
+      const text = await promptText(`Note about ${f.label} for Debrief's review agents — what the folder is, ` +
+        "and what in it belongs to this project (empty to remove):", { value: f.note || "" });
+      if (text === null) return;
+      await setOpts({ note: text });
+    });
+    row3.appendChild(nb);
+    const notes = [];
+    if ((f.shared_with || []).length) {
+      const sh = el("span", "fc-shared muted small", "shared with " + f.shared_with.join(", "));
+      sh.title = "Other projects use this folder too. Changes their sessions make are marked as theirs.";
+      chip.dataset.shared = "1";
+      notes.push(sh);
+    }
+    if ((f.foreign || []).length) {
+      const fo = el("span", "fc-shared muted small", "holds " + f.foreign.join(", ") + "'s main folder (read only)");
+      fo.title = "A project's main folder is that project's alone: this project can read it but never edits it.";
+      notes.push(fo);
+    }
     const rm = el("button", "fc-remove", "Remove");
     rm.title = `Remove ${f.label} from this project (the folder is not touched)`;
     rm.onclick = guarded(async () => { rr.proj = await api("rr_remove_folder", rr.pid, f.path); rrRenderFolders(); });
-    row.append(kind, rm);
+    row.insertBefore(kind, row.firstChild);
+    row.appendChild(rm);
     chip.append(name, row);
+    if (row2.childNodes.length) chip.appendChild(row2);
+    chip.append(row3, ...notes);
     box.appendChild(chip);
   }
 }
@@ -4287,7 +4352,13 @@ function rrBind() {
   for (const [btn, kind] of [["#rrp-addfolder-btn", "work"], ["#rrp-addref-btn", "reference"],
                              ["#rrp-addws-btn", "workspace"]]) {
     $(btn).onclick = guarded(async () => {
-      const p = await api("rr_add_folder", rr.pid, kind);
+      let p = await api("rr_add_folder", rr.pid, kind);
+      if (p && p.needs_reference) {
+        if (!await confirmDialog("Another project's main folder",
+          `That's ${p.needs_reference}'s main folder (or inside it), which belongs to that project alone. ` +
+          "Add it as a reference folder instead? This project can read it but not edit it.", "Add as reference")) return;
+        p = await api("rr_add_reference", rr.pid, p.path);
+      }
       if (p) { rr.proj = p; rrRenderFolders(); }
     });
   }

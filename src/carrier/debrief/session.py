@@ -286,7 +286,8 @@ class ReviewSession:
         p = self.project
         extra_args: dict[str, Any] = {} if p is None else {
             "extras": p.extras, "project": {"id": p.id, "name": p.name}, "context": p.context,
-            "criteria": p.criteria, "task_lookup": p.task_lookup, "scope": self.scope}
+            "criteria": p.criteria, "task_lookup": p.task_lookup, "scope": self.scope,
+            "folder_notes": p.folder_notes, "keep_file": p.keep_file}
         if scan:
             from carrier.debrief.criteria import load_criteria
 
@@ -355,7 +356,8 @@ class ReviewSession:
                     "severity": i.top_severity,
                     "flags": len(i.flags),
                     "decision": i.decision.action if i.decision else None,
-                    "tasks": [t["title"] for t in i.tasks],
+                    "tasks": [t["title"] + (f" ({t['other_project']})" if t.get("other_project") else "")
+                              for t in i.tasks],
                 }
                 for i in r.items
             ],

@@ -552,11 +552,29 @@ class DesktopApi:
         if self._pick_folder is None:
             raise S.SessionError("Folder picker unavailable.")
         path = self._pick_folder()
-        return self._rr().add_folder(pid, path, kind=kind) if path else None
+        if not path:
+            return None
+        room = self._rr()
+        if kind == "work" and (owner := room._main_of_other(pid, str(Path(path).expanduser().resolve()))):
+            # Another project's main folder is that project's alone: offer it as a reference folder.
+            return {"needs_reference": owner["name"], "path": path}
+        return room.add_folder(pid, path, kind=kind)
+
+    @_guard
+    def rr_add_reference(self, pid: int, path: str) -> dict[str, Any]:
+        """Add a folder picked earlier as a reference folder (see rr_add_folder)."""
+        return self._rr().add_folder(pid, path, kind="reference")
 
     @_guard
     def rr_set_folder_kind(self, pid: int, path: str, kind: str) -> dict[str, Any]:
         return self._rr().set_folder_kind(pid, path, kind)
+
+    @_guard
+    def rr_set_folder_options(self, pid: int, path: str, options: dict[str, Any]) -> dict[str, Any]:
+        """A work folder's sharing (own / shared + this project's part), reviews and note."""
+        o = dict(options or {})
+        return self._rr().set_folder_options(pid, path, share=o.get("share"), part=o.get("part"),
+                                             review=o.get("review"), note=o.get("note"))
 
     @_guard
     def rr_remove_folder(self, pid: int, path: str) -> dict[str, Any]:

@@ -342,33 +342,40 @@ def test_project_review_robustness(repo: Path, claude_home: Path, tmp_path: Path
 
 
 def test_projects_keep_their_own_checkpoints(repo: Path, claude_home: Path, tmp_path: Path):
-    """Project B reviews project A's main folder as a work folder: finishing B's
-    review must not mark A's changes as reviewed."""
+    """Projects A and B both work in one shared folder: finishing B's review must not
+    mark A's changes there as reviewed."""
+    import subprocess
+
     from carrier.core import gitutil
     from carrier.core.db import Store
     from carrier.debrief.projects import project_spec
     from carrier.readyroom.manager import ReadyRoom
 
-    other = tmp_path / "b"
-    other.mkdir()
+    mains = {}
+    for name in ("a", "b"):
+        d = tmp_path / name
+        d.mkdir()
+        for args in (["init", "-q"], ["config", "user.email", "t@e.com"], ["config", "user.name", "T"]):
+            subprocess.run(["git", *args], cwd=d, check=True)
+        (d / "x.txt").write_text("1\n")
+        mains[name] = d
     store = Store(tmp_path / "c.db")
     room = ReadyRoom(store)
-    a = room.create_project("A", str(repo))["id"]
-    b = room.create_project("B", str(other))["id"]
-    room.add_folder(b, str(repo), label="a")
-    import subprocess
-    for args in (["init", "-q"], ["config", "user.email", "t@e.com"], ["config", "user.name", "T"]):
-        subprocess.run(["git", *args], cwd=other, check=True)
-    (other / "x.txt").write_text("1\n")
-    sb = ReviewSession(other, backend=None, project=project_spec(store, b))
+    a = room.create_project("A", str(mains["a"]))["id"]
+    b = room.create_project("B", str(mains["b"]))["id"]
+    room.add_folder(a, str(repo), label="app")
+    room.add_folder(b, str(repo), label="app")
+    room.set_folder_options(a, str(repo), part="**")
+    room.set_folder_options(b, str(repo), part="**")
+    sb = ReviewSession(mains["b"], backend=None, project=project_spec(store, b))
     ov = sb.start()
-    assert any(p.startswith("a/") for it in ov["items"] for p in it["paths"])
+    assert any(p.startswith("app/") for it in ov["items"] for p in it["paths"])
     sb.finish()
     sb.close()
     assert gitutil.resolve(repo, gitutil.checkpoint_ref(str(b)))  # B's own marker moved…
     assert gitutil.get_checkpoint(repo, str(a)) is None          # …A's did not
-    sa = ReviewSession(repo, backend=None, project=project_spec(store, a))
-    assert sa.start()["items"]  # A still has everything to review
+    sa = ReviewSession(mains["a"], backend=None, project=project_spec(store, a))
+    assert any(p.startswith("app/") for it in sa.start()["items"] for p in it["paths"])  # A still has it all
     sa.close()
 
 
@@ -473,3 +480,111 @@ def test_whole_project_scan(tmp_path: Path, claude_home: Path):
     s.finish()
     s.close()
     assert gitutil.get_checkpoint(proj, str(pid)) is None  # a scan doesn't mark anything reviewed
+
+
+def test_shared_folders_in_project_reviews(repo: Path, claude_home: Path, tmp_path: Path):
+    """A work folder shared with another project: the agents are told, changes by the other
+    project's sessions are marked as that project's work, and the folder can be limited to this
+    project's own changes, given a note, or left out of reviews."""
+    import subprocess
+
+    from carrier.core.db import Store
+    from carrier.debrief.projects import project_spec
+    from carrier.readyroom import ownership
+    from carrier.readyroom.manager import ReadyRoom, RoomError
+
+    from .conftest import scripted_handler
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    for args in (["init", "-q"], ["config", "user.email", "t@e.com"], ["config", "user.name", "T"]):
+        subprocess.run(["git", *args], cwd=shared, check=True)
+    for name in ("mine.py", "theirs.py", "hand.py"):
+        (shared / name).write_text("A = 1\n")
+    subprocess.run(["git", "add", "-A"], cwd=shared, check=True)
+    subprocess.run(["git", "commit", "-qm", "x"], cwd=shared, check=True)
+    for name in ("mine.py", "theirs.py", "hand.py"):
+        (shared / name).write_text("A = 2\n")
+
+    store = Store(tmp_path / "c.db")
+    room = ReadyRoom(store)
+    pid = room.create_project("App", str(repo))["id"]
+    room.add_folder(pid, str(shared))
+    other_main = tmp_path / "anim"
+    other_main.mkdir()
+    oid = room.create_project("Animation", str(other_main))["id"]
+    room.add_folder(oid, str(shared))
+    assert room.project(pid)["folders"][0]["shared_with"] == ["Animation"]
+    # Edits in a shared folder are logged for every project using it.
+    mine_t = store.add_task("Add ship formats", pid)
+    their_t = store.add_task("New animation format", oid)
+    s_mine = store.add_session(project_id=pid, task="t", cwd=str(repo), task_id=mine_t, status="ended")
+    s_their = store.add_session(project_id=oid, task="t", cwd=str(other_main), task_id=their_t, status="ended")
+    for p in (pid, oid):
+        store.add_edit(s_mine, p, "shared/mine.py", "Edit")
+        store.add_edit(s_their, p, "shared/theirs.py", "Edit")
+
+    assert room.project(pid)["folders"][0]["share"] == "shared"  # two projects work in it
+    with pytest.raises(RoomError, match="Animation"):
+        room.set_folder_options(pid, str(shared), share="own")
+
+    # A shared space: only this project's part (none yet) and files its sessions changed.
+    backend = FakeBackend(scripted_handler)
+    s = ReviewSession(repo, backend=backend, project=project_spec(store, pid))
+    ov = s.start()
+    paths = {p for it in ov["items"] for p in it["paths"]}
+    assert "shared/mine.py" in paths and "shared/theirs.py" not in paths and "shared/hand.py" not in paths
+    s.close()
+
+    # Its part (patterns) and the files it created there are its own too.
+    room.set_folder_options(pid, str(shared), part="theirs.py", note="Only ships/ and mine.py are ours.")
+    ownership.claim(store, pid, str(shared), "hand.py")
+    backend = FakeBackend(scripted_handler)
+    s = ReviewSession(repo, backend=backend, project=project_spec(store, pid))
+    ov = s.start(fresh=True)
+    tasks = {p: it["tasks"] for it in ov["items"] for p in it["paths"]}
+    assert {"shared/mine.py", "shared/theirs.py", "shared/hand.py"} <= set(tasks)
+    assert tasks["shared/theirs.py"] == ["New animation format (Animation)"]
+    prompts = "\n".join(c["prompt"] for c in backend.calls)
+    assert "shared space other projects work in too (Animation)" in prompts
+    assert "files matching theirs.py" in prompts and "Only ships/ and mine.py are ours." in prompts
+    assert "Edited by another project's session: Animation" in prompts
+    s.close()
+
+    # Not reviewed at all.
+    room.set_folder_options(pid, str(shared), review="skip")
+    s = ReviewSession(repo, backend=None, project=project_spec(store, pid))
+    ov = s.start(fresh=True)
+    assert not any(p.startswith("shared/") for it in ov["items"] for p in it["paths"])
+    s.close()
+
+
+def test_reviews_leave_out_other_projects_main_folders(tmp_path: Path, claude_home: Path):
+    """A work folder that holds another project's main folder: that one isn't reviewed."""
+    import subprocess
+
+    from carrier.core.db import Store
+    from carrier.debrief.projects import project_spec
+    from carrier.readyroom.manager import ReadyRoom
+
+    ws, main = tmp_path / "ws", tmp_path / "outer"
+    (ws / "tools" / "inner").mkdir(parents=True)
+    main.mkdir()
+    for d in (ws, main):
+        for args in (["init", "-q"], ["config", "user.email", "t@e.com"], ["config", "user.name", "T"]):
+            subprocess.run(["git", *args], cwd=d, check=True)
+    (main / "m.txt").write_text("1\n")
+    (ws / "top.txt").write_text("1\n")
+    (ws / "tools" / "inner" / "in.txt").write_text("1\n")
+    store = Store(tmp_path / "c.db")
+    room = ReadyRoom(store)
+    outer = room.create_project("Outer", str(main))["id"]
+    room.create_project("Inner", str(ws / "tools" / "inner"))
+    room.add_folder(outer, str(ws), label="ws")
+    assert room.project(outer)["folders"][0]["foreign"] == ["Inner"]
+    spec = project_spec(store, outer)
+    assert "Inner" in spec.folder_notes.get("ws", "")
+    s = ReviewSession(main, backend=None, project=spec)
+    paths = sorted(p for it in s.start()["items"] for p in it["paths"])
+    assert paths == ["m.txt", "ws/top.txt"]
+    s.close()

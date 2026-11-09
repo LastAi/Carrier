@@ -4,6 +4,29 @@ All notable changes are listed here. Format: [Keep a Changelog](https://keepacha
 
 ## Unreleased
 
+- **Folder ownership.** A project's main folder is now its own alone: other
+  projects can use it only as a reference folder (adding it as a work folder
+  offers a reference folder instead, and older setups are converted when
+  Carrier starts). A work folder that more than one project works in is a
+  **shared space**: each project owns its part (patterns set with **Part…**
+  on the folder's card) and the files it creates there. Editing anything else
+  in a shared space always asks, even when editing is pre-approved; another
+  project's main folder inside a work folder is read only. Claude is told
+  which part is its own.
+- **Reviews follow ownership.** Debrief leaves out other projects' main
+  folders and, in shared spaces, files outside the project's part that its
+  sessions didn't change; changes made by another project's sessions are
+  marked as that project's work. Each work folder can be left out of reviews
+  and can carry a note for the review agents. (This replaces the earlier
+  "review only this project's changes" setting, which becomes a shared space.)
+- **Import:** a planned work folder inside another project's main folder is
+  added as a reference folder.
+- **Pre-approved commands that change files are checked too.** `cp`, `mv`,
+  `rm`, `tee`, `touch`, `mkdir`, `dd`, `git checkout`/`restore`/`reset` and
+  the like run without asking only when every file they change is one the
+  session may edit (inside the project's work folders, not protected, not
+  another project's); otherwise they ask, even if the program is pre-approved.
+
 - **Claude knows what runs without asking.** Each session's instructions now
   include a *Permissions in this project* section generated from the
   project's pre-approved actions, asking Claude to use the file tools, keep

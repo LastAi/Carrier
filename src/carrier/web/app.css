@@ -407,7 +407,7 @@ select.na { opacity: .5; }
 
 /* Extra-folder cards: name on top, type and remove underneath */
 #rrp-folders { display: inline-flex; flex-wrap: wrap; gap: 8px; }
-.folder-chip { display: inline-flex; flex-direction: column; gap: 4px; padding: 6px 10px; min-width: 150px; max-width: 260px;
+.folder-chip { display: inline-flex; flex-direction: column; gap: 4px; padding: 6px 10px; min-width: 150px; max-width: 320px;
   border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); }
 .folder-chip.ref { border-style: dashed; }
 .folder-chip .fc-name { font-weight: 600; overflow-wrap: anywhere; }
@@ -605,3 +605,5 @@ button.danger { color: var(--sev-high); border-color: var(--sev-high); }
 .allow-group .group-note { margin-left: 22px; }
 .task-row .handoff { margin-top: 4px; font-size: 13px; }
 .task-row .handoff summary { cursor: pointer; color: var(--accent); }
+.folder-chip .fc-shared { display: block; margin-top: 2px; }
+.folder-chip .fc-skip { display: inline-flex; gap: 4px; align-items: center; flex: 1; }

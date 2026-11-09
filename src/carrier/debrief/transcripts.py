@@ -293,8 +293,20 @@ def describe_events(item: ChangeItem, include_rationale: bool = True) -> str:
     the change against what was *asked*, not against the author's
     justification (which tends to be persuasive).
     """
-    tasks = ("Carrier task(s) whose sessions edited these files: "
-             + "; ".join(repr(t["title"]) for t in item.tasks)) if item.tasks else ""
+    own = [t for t in item.tasks if not t.get("other_project")]
+    others = [t for t in item.tasks if t.get("other_project")]
+    lines = []
+    if getattr(item, "folder_note", ""):
+        lines.append("About the folder: " + item.folder_note)
+    if own:
+        lines.append("Carrier task(s) of this project whose sessions edited these files: "
+                     + "; ".join(repr(t["title"]) for t in own))
+    if others:
+        lines.append("Edited by another project's session: "
+                     + "; ".join(f"{t['other_project']} — {t['title']!r}" for t in others)
+                     + ". That is the other project's work in a shared folder, not a change this project made or "
+                       "asked for: don't judge it against this project's requests.")
+    tasks = "\n".join(lines)
     if not item.events:
         none = "(no Claude Code session record for these files — possibly edited by hand)"
         return f"{tasks}\n{none}" if tasks else none

@@ -95,6 +95,15 @@ PATTERN_FIRST = {"grep", "egrep", "fgrep", "rg", "awk", "sed"}
 SCOPED_READERS = {"cat", "head", "tail", "grep", "egrep", "fgrep", "rg", "wc", "sort", "uniq", "cut", "tr",
                   "ls", "dir", "tree", "file", "stat", "du", "diff", "cmp", "less", "more", "nl", "od",
                   "xxd", "hexdump", "strings", "md5sum", "sha1sum", "sha256sum", "awk", "sed", "which"}
+# Programs that change the files they're given: every file must be one the session may edit
+# without asking (inside the editable folders, not protected, not another project's).
+FILE_WRITERS = {"rm", "rmdir", "unlink", "touch", "mkdir", "tee", "truncate", "shred", "chmod", "chown",
+                "chgrp", "mv", "cp", "install", "ln", "rsync", "dd", "patch"}
+# Of these, only the destination changes (the last plain argument, or -t DIR).
+_DEST_ONLY = {"cp", "install", "ln", "rsync"}
+# git commands that change files in the working tree.
+GIT_WORKTREE_WRITERS = {"checkout", "restore", "reset", "clean", "stash", "apply", "am", "rm", "mv", "switch",
+                        "merge", "rebase", "pull", "cherry-pick", "revert", "add", "commit", "worktree"}
 # sed scripts that only print or delete lines, or substitute without the e/w flags.
 _SAFE_SED = re.compile(r"^(?:(?:\d+|\$)(?:,(?:\d+|\$))?[pd]|/[^/\n]*/(?:,/[^/\n]*/)?[pd]"
                        r"|s(.)(?:(?!\1)[^\n])*\1(?:(?!\1)[^\n])*\1[gpI0-9]*)$")
@@ -480,8 +489,10 @@ class Verdict:
 
 
 def check(command: str, entries: list[str], cwd: Path, readable: list[str], editable: list[str],
-          can_edit: bool = False, can_read: bool = False) -> Verdict:
-    """Is ``command`` covered by the pre-approved ``entries``? Every program in it must be."""
+          can_edit: bool = False, can_read: bool = False, no_write: Any = None) -> Verdict:
+    """Is ``command`` covered by the pre-approved ``entries``? Every program in it must be.
+    ``no_write(path)``: files inside ``editable`` that still mustn't be written without asking
+    (another project's files in a shared space)."""
     try:
         parts = split(command)
     except Unreadable as exc:
@@ -514,7 +525,8 @@ def check(command: str, entries: list[str], cwd: Path, readable: list[str], edit
                 if op == "<<<" or (can_read and _inside(path, readable)):
                     continue
                 reasons.append(f"it reads {target.text}")
-            elif can_edit and _inside(path, editable) and not protected(path, editable):
+            elif can_edit and _inside(path, editable) and not protected(path, editable) \
+                    and not (no_write and no_write(path)):
                 continue
             else:
                 reasons.append(f"it writes to {target.text}")
@@ -580,12 +592,66 @@ def check(command: str, entries: list[str], cwd: Path, readable: list[str], edit
                 outside = _outside_args(low, part.words[len(entry):], here, readable)
                 if outside:
                     info.update(listed=False, why=f"it reads {outside}, outside the project's folders", entry=None)
+            if info["listed"]:
+                blocked = _write_problem(low, part.words[1:], here, editable, can_edit, no_write)
+                if blocked:
+                    info.update(listed=False, why=f"{name} {blocked}", entry=None)
         v.programs.append(info)
     if reasons or any(not p["listed"] for p in v.programs):
         v.ok = False
         whys = reasons + [p["why"] or f"{p['name']} isn't pre-approved" for p in v.programs if not p["listed"]]
         v.reason = "; ".join(dict.fromkeys(whys))
     return v
+
+
+def _write_problem(prog: str, words: list[Word], here: Path, editable: list[str], can_edit: bool,
+                   no_write: Any) -> str:
+    """Why a file-changing program needs asking ("" if every file it changes may be edited)."""
+    def bad(w: Word) -> str:
+        if w.unresolved or w.glob or not w.text:
+            return f"changes {w.text or 'a file'} that can't be checked"
+        path = _resolve(w.text, here)
+        if not (can_edit and _inside(path, editable)) or protected(path, editable) or (no_write and no_write(path)):
+            return f"changes {w.text}"
+        return ""
+
+    if prog == "git":
+        plain = [w for w in words if not w.text.startswith("-")]
+        if not plain or plain[0].text not in GIT_WORKTREE_WRITERS:
+            return ""
+        # Paths after "--" (or plain arguments that are files); with none, the whole working tree.
+        rest = [w for w in words[words.index(plain[0]) + 1:]]
+        if any(w.text == "--" for w in rest):
+            targets = rest[[w.text for w in rest].index("--") + 1:]
+        else:
+            targets = []
+        return next((b for b in map(bad, targets) if b), "") if targets else bad(Word("."))
+    if prog not in FILE_WRITERS:
+        return ""
+    if prog == "dd":
+        targets = [Word(w.text[3:], w.unresolved, w.glob) for w in words if w.text.startswith("of=")]
+    else:
+        plain, targets, after = [], [], False
+        it = iter(words)
+        for w in it:
+            t = w.text
+            if t == "--" and not after:
+                after = True
+            elif not after and t.startswith("-") and len(t) > 1:
+                if t in ("-t", "--target-directory"):
+                    targets.append(next(it, Word("", unresolved=True)))
+                elif t.startswith("--target-directory="):
+                    targets.append(Word(t.split("=", 1)[1], w.unresolved, w.glob))
+            else:
+                plain.append(w)
+        if prog in _DEST_ONLY:
+            if not targets and plain:
+                targets = [plain[-1]]
+        elif prog == "patch":
+            targets = plain[:1] or [Word(".")]  # patch FILE, or files named in the patch: the folder
+        else:
+            targets += plain
+    return next((b for b in map(bad, targets) if b), "")
 
 
 def protected(path: str, roots: list[str]) -> bool:

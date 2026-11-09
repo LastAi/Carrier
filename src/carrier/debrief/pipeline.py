@@ -129,6 +129,8 @@ async def prepare(
     task_lookup: TaskLookup | None = None,
     scope: Path | None = None,
     scan: bool = False,
+    folder_notes: dict[str, str] | None = None,
+    keep_file: Callable[[str, float | None], bool] | None = None,
 ) -> Review:
     """Prepare a review of ``repo`` (plus a Carrier project's extra folders).
 
@@ -140,6 +142,9 @@ async def prepare(
     ``task_lookup(path, since)`` names the Flight Deck tasks that edited a
     file, so each item can say which task it came from. ``scope`` is the main
     folder when it is a subfolder of ``repo``: only its changes are reviewed.
+    ``folder_notes`` (by folder label, "" = main) are told to the agents with each item in
+    that folder. ``keep_file(path, since)`` decides which changed files are the project's
+    (other projects' main folders and files outside its part of a shared space are not).
     """
     cfg = load_config(repo)
     # A project keeps its own checkpoints (see gitutil.checkpoint_ref).
@@ -169,14 +174,6 @@ async def prepare(
         main_how = resolve_base(repo, cfg, from_ref, ns)[1]
         raise NothingToReview(f"No changes {main_how}.")
 
-    # 4. reuse an identical prepared review
-    fingerprint = hashlib.sha256(("scan\n" if scan else "") .encode() + "\n".join(
-        f"{pt['label']}\n{pt['base']}\n{pt['raw']}" for pt in parts).encode()).hexdigest()[:16]
-    existing = find_by_fingerprint(cfg, fingerprint) if reuse else None
-    if existing and not is_stale(cfg, existing):
-        progress("Already prepared — reusing it.")
-        return existing
-
     # Parse every folder's diff; extra folders' paths get their label, and
     # hunk ids are numbered across all folders so they stay unique.
     files = []
@@ -192,6 +189,34 @@ async def prepare(
                 if pt["label"]:
                     h.path = f"{pt['label']}/{h.path}"
             files.append(f)
+    left = 0
+    if keep_file is not None:  # only the project's own files (folder ownership)
+        labels = {pt["label"] for pt in parts if pt["label"]}
+        since: dict[str, float | None] = {}
+        for pt in parts:
+            bt = None if scan else gitutil.commit_time(pt["repo"], pt["base"])
+            since[pt["label"]] = bt - TRANSCRIPT_SLACK_SECONDS if bt else None
+        kept = []
+        for f in files:
+            if not keep_file(f.path, since[_label_of(f.path, labels)]):
+                left += 1
+                continue
+            kept.append(f)
+        files = kept
+        if not files:
+            raise NothingToReview("No changes in this project's own files (the other changes are in other "
+                                  "projects' main folders, or in shared spaces outside this project's part).")
+
+    # 4. reuse an identical prepared review (same changes, and the same files kept)
+    fingerprint = hashlib.sha256(("scan\n" if scan else "").encode() + "\n".join(
+        f"{pt['label']}\n{pt['base']}\n{pt['raw']}" for pt in parts).encode()
+        + ("\nkept\n" + "\n".join(f.path for f in files) if keep_file is not None else "").encode()
+    ).hexdigest()[:16]
+    existing = find_by_fingerprint(cfg, fingerprint) if reuse else None
+    if existing and not is_stale(cfg, existing):
+        progress("Already prepared — reusing it.")
+        return existing
+
     if scan:
         files, dropped = scan_files(files)
         if dropped:
@@ -206,6 +231,9 @@ async def prepare(
         notes.insert(0, Note(path="carrier:project", text=context.strip()))
     if scan:
         warnings += warnings_scan
+    if left:
+        warnings.append(f"{left} changed file(s) that aren't this project's were left out (in other projects' "
+                        "main folders, or in shared spaces outside this project's part).")
     since_by_label: dict[str, float | None] = {}
     events = []
     for pt in parts if not scan else []:  # a scan has no history to explain
@@ -270,8 +298,16 @@ async def prepare(
     try:
         # 8. link events (and Flight Deck tasks) to items
         link_events(review, events)
+        labels = {pt["label"] for pt in parts if pt["label"]}
+        if folder_notes:
+            for item in review.items:
+                notes_here: list[str] = []
+                for path in item.paths:
+                    n = folder_notes.get(_label_of(path, labels))
+                    if n and n not in notes_here:
+                        notes_here.append(n)
+                item.folder_note = " ".join(notes_here)
         if task_lookup is not None:
-            labels = {pt["label"] for pt in parts if pt["label"]}
             for item in review.items:
                 seen: dict[int, dict] = {}
                 for path in item.paths:

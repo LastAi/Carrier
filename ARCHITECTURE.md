@@ -216,6 +216,7 @@ Paths are relative to `src/carrier/`.
 | **readyroom/** | **setting projects up** | |
 | `readyroom/manager.py` | **Ready Room's front-end API**: projects, tasks, links, rules, rule sets, presets, templates, tags | no |
 | `readyroom/context.py` | goal + task + rules + history → the text added to Claude Code's system prompt | no |
+| `readyroom/ownership.py` | folder ownership: main folders, shared spaces and their parts, who a file belongs to (used by Flight Deck and Debrief) | no |
 | `readyroom/drafting.py` | "Draft with Claude": rules and review agents from a description (one tool-less call) | yes |
 | **desktop/** + **web/** | | |
 | `desktop/api.py` | methods the desktop page may call (`{ok, data}` / `{ok, error}`) | via the sessions |

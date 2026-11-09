@@ -35,7 +35,7 @@ PLAN = {
 @pytest.fixture
 def impage(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-home"))
-    ws = tmp_path / "ModTools"
+    ws = tmp_path / "Workspace"
     for d in ("mods/Anim", "mods/AnimDemo", "mods/Voice"):
         (ws / d).mkdir(parents=True)
         (ws / d / "README.md").write_text(f"{d}\n")

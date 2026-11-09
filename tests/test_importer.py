@@ -33,7 +33,7 @@ def _git(cwd: Path, *args: str) -> str:
 @pytest.fixture
 def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A modding workspace with three strands of work in one repository."""
-    ws = tmp_path / "ModTools"
+    ws = tmp_path / "Workspace"
     files = {
         "CLAUDE.md": "# Workspace\n- Never write outside this folder.\n",
         ".claude/settings.json": json.dumps({"permissions": {"allow": ["Bash(npm:*)"]}, "env": {"TOKEN": "secret"}}),
@@ -322,7 +322,7 @@ def test_questions_and_rule_proposals_in_replies(workspace: Path):
                             "options": [{"label": "In place (Recommended)", "description": "Nothing moves."},
                                         "Reorganise"]}, {"no": "question"}])
              + "\n```\n```carrier-rule\n"
-             + json.dumps({"text": "- Never edit D:/Starsector.", "rule_set": "Modding", "why": "You said so"})
+             + json.dumps({"text": "- Never edit D:/GameInstall.", "rule_set": "Modding", "why": "You said so"})
              + "\n```")
     text, plan, extras = importer.split_reply(reply)
     assert text == "Two things." and plan is None

@@ -30,7 +30,7 @@ from typing import Any
 from carrier.core.db import ACTIVE, FOLDER_KINDS, Store, default_path, folder_kind
 from carrier.core.llm import EFFORTS
 from carrier.flightdeck.sdk import GROUPS
-from carrier.readyroom import context
+from carrier.readyroom import context, ownership
 
 OPEN = ("planned", "active")
 MODES = ("default", "acceptEdits", "plan", "bypassPermissions")
@@ -72,9 +72,30 @@ def clean_globs(globs: list[str] | str | None) -> list[str]:
     return [g.strip() for g in globs or [] if g and g.strip()]
 
 
+_NORMALIZED: set[str] = set()  # stores whose folders have been checked against the ownership rules
+
+
 class ReadyRoom:
     def __init__(self, store: Store | None = None) -> None:
         self.store = store or Store(default_path())
+        key = str(getattr(self.store, "path", id(self.store)))
+        if key not in _NORMALIZED:  # once per database: folders saved before the ownership rules
+            _NORMALIZED.add(key)
+            try:
+                self.normalize_folders()
+            except Exception:  # never stop the app over this
+                import traceback
+
+                traceback.print_exc()
+
+    def normalize_folders(self) -> list[str]:
+        """Main folders are their project's alone; folders projects work in together are shared
+        spaces (readyroom/ownership.py)."""
+        return ownership.normalize(self.store, log=lambda pid, msg: self.store.log_project_event(pid, "folder", msg))
+
+    def _main_of_other(self, pid: int, path: str) -> dict[str, Any] | None:
+        """Another project whose main folder is ``path`` or contains it."""
+        return next((q for q in self.store.projects() if q["id"] != pid and ownership._inside(path, q["path"])), None)
 
     # -- helpers ---------------------------------------------------------------
 
@@ -426,8 +447,15 @@ class ReadyRoom:
                           "other": names.get(l["project_b"] if mine_a else l["project_a"]),
                           "mine": l["contracts_a"] if mine_a else l["contracts_b"],
                           "theirs": l["contracts_b"] if mine_a else l["contracts_a"]})
-        return {**p, "folder_exists": Path(p["path"]).is_dir(),
-                "folders": [{**f, "kind": folder_kind(f), "exists": Path(f["path"]).is_dir()}
+        foreign = ownership.foreign_mains(self.store, p)
+        return {**p, "folder_exists": Path(p["path"]).is_dir(), "main_shared_with": self.shared_with(pid, p["path"]),
+                "folders": [{**f, "kind": folder_kind(f), "exists": Path(f["path"]).is_dir(),
+                             "review": "skip" if f.get("review") == "skip" else "all", "note": f.get("note", ""),
+                             "share": f.get("share", "own") if folder_kind(f) == "work" else None,
+                             "part": f.get("part") or [],
+                             "claimed": len(ownership.claimed(self.store, pid, f["path"])),
+                             "shared_with": self.shared_with(pid, f["path"]),
+                             "foreign": [q["name"] for q in foreign if ownership._inside(q["path"], f["path"])]}
                             for f in p["folders"]],
                 "rule_set_ids": self.store.project_rule_set_ids(pid),
                 "images": self.images_allowed(pid),
@@ -492,6 +520,8 @@ class ReadyRoom:
         except Exception:
             self.store.remove_project(pid)  # don't leave a half-made project behind
             raise
+        # Its main folder is its own now: another project working inside it only reads it from here on.
+        self.normalize_folders()
         return self.project(pid)
 
     def update_project(self, pid: int, **fields: Any) -> dict[str, Any]:
@@ -518,6 +548,8 @@ class ReadyRoom:
         rule_set_ids = fields.pop("rule_set_ids", None)
         before = self._project(pid)
         self.store.update_project(pid, **fields)
+        if "path" in fields and fields["path"] != before.get("path"):
+            self.normalize_folders()  # other projects' work folders in this new main folder become reference
         for key, label in (("name", "name"), ("path", "main folder"), ("goal", "goal"), ("rules", "rules"),
                            ("tags", "tags"), ("preset_id", "default preset")):
             if key in fields and fields[key] != before.get(key):
@@ -563,6 +595,9 @@ class ReadyRoom:
         if not folder.is_dir():
             raise RoomError(f"Folder not found: {path}")
         folder = folder.resolve()
+        if kind == "work" and (owner := self._main_of_other(pid, str(folder))):
+            raise RoomError(f"That's {owner['name']}'s main folder (or inside it), which belongs to that project "
+                            "alone. Add it as a reference folder to read it.")
         own = [Path(r).resolve() for _, r in self.store.project_roots(p, include_reference=True)]
         if folder in own:
             raise RoomError("That folder is already part of this project.")
@@ -588,6 +623,7 @@ class ReadyRoom:
         self.store.update_project(pid, folders=[*p["folders"], {"path": str(folder), "label": label,
                                                                 "kind": kind}])
         self.store.log_project_event(pid, "folder", f"added the {kind} folder {label}", detail=str(folder))
+        self.normalize_folders()  # another project working there too: a shared space
         return self.project(pid)
 
     def set_folder_kind(self, pid: int, path: str, kind: str) -> dict[str, Any]:
@@ -605,10 +641,72 @@ class ReadyRoom:
                      if here in Path(r).resolve().parents]
             if inner:
                 raise RoomError(f"{', '.join(inner)} is inside this folder, so it can only be a workspace folder.")
+        if kind == "work" and (owner := self._main_of_other(pid, path)):
+            raise RoomError(f"That's {owner['name']}'s main folder (or inside it), which belongs to that project "
+                            "alone: it can only be a reference folder here.")
         self.store.update_project(pid, folders=[{**f, "kind": kind} if f["path"] == path else f
                                                 for f in p["folders"]])
         self.store.log_project_event(pid, "folder", f"made {path} a {kind} folder")
+        self.normalize_folders()
         return self.project(pid)
+
+    def set_folder_options(self, pid: int, path: str, share: str | None = None,
+                           part: list[str] | str | None = None, review: str | None = None,
+                           note: str | None = None) -> dict[str, Any]:
+        """A work folder's ownership and review settings (readyroom/ownership.py):
+
+        * ``share`` — "own" (everything in it is this project's) or "shared" (a shared space:
+          the project owns its ``part`` and the files it creates there);
+        * ``part`` — patterns for this project's part of a shared space (``ships/**``);
+        * ``review`` — "all" (the default) or "skip" (left out of reviews and scans);
+        * ``note`` — what the folder is, for Debrief's review agents.
+        Sessions may be running; Flight Deck applies changes from their next action."""
+        p = self._project(pid)
+        f0 = next((f for f in p["folders"] if f["path"] == path), None)
+        if f0 is None:
+            raise RoomError("That folder isn't part of this project.")
+        if share is not None and share not in ownership.SHARES:
+            raise RoomError("Unknown sharing setting.")
+        if review is not None and review not in ("all", "skip"):
+            raise RoomError("Unknown review setting.")
+        if share == "own" and (others := self.shared_with(pid, path, work_only=True)):
+            raise RoomError(f"{', '.join(others)} also works in this folder, so it stays a shared space. Give this "
+                            "project its part of it instead.")
+        if part is not None:
+            try:
+                part = ownership.clean_patterns(part)
+            except ValueError as exc:
+                raise RoomError(str(exc)) from None
+        notes = []
+        f = dict(f0)
+        for key, value, say in (("share", share, lambda v: "this project's" if v == "own" else "a shared space"),
+                                ("part", part, lambda v: "this project's part: " + (", ".join(v) or "(none)")),
+                                ("review", review, lambda v: "reviewed" if v == "all" else "left out of reviews"),
+                                ("note", note.strip()[:2000] if note is not None else None,
+                                 lambda v: "note for reviews: " + (v or "(none)"))):
+            if value is not None and value != f.get(key, {"share": "own", "review": "all", "part": [], "note": ""}[key]):
+                f[key] = value
+                notes.append(say(value))
+        self.store.update_project(pid, folders=[f if g["path"] == path else g for g in p["folders"]])
+        if notes:
+            self.store.log_project_event(pid, "folder", f"{f['label']}: " + "; ".join(notes))
+        return self.project(pid)
+
+    def shared_with(self, pid: int, path: str, work_only: bool = False) -> list[str]:
+        """Other projects that also use this folder (as their main folder or an extra folder;
+        ``work_only``: as a work folder)."""
+        here = os.path.normcase(os.path.realpath(path))
+        out = []
+        for q in self.store.projects():
+            if q["id"] == pid:
+                continue
+            roots = [os.path.normcase(os.path.realpath(r)) for _, r in self.store.project_roots(q, include_reference=not work_only)]
+            if work_only:
+                roots = roots[1:]  # their extra work folders, not their main folder
+            if any(here == r or here.startswith(r.rstrip(os.sep) + os.sep) or r.startswith(here.rstrip(os.sep) + os.sep)
+                   for r in roots):
+                out.append(q["name"])
+        return out
 
     def remove_folder(self, pid: int, path: str) -> dict[str, Any]:
         p = self._project(pid)

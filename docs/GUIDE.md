@@ -335,8 +335,9 @@ extra folders of two kinds.
 
 | Folder | Claude can | Reviewed by Debrief | Shared with other projects |
 |---|---|---|---|
-| Main folder | Read and edit | Yes | No — each main folder belongs to one project |
-| Work folder | Read and edit | Yes, with the main folder | Yes |
+| Main folder | Read and edit | Yes | Only as a reference folder — each main folder belongs to one project |
+| Work folder (this project's) | Read and edit | Yes | No |
+| Work folder (shared space) | Read; edit its part and new files freely, anything else only after asking you | Its part, files it created there, files its sessions changed | Yes, as a work folder of each |
 | Reference folder | Read only; edits are blocked | No | Yes |
 | Workspace folder | Read only, except new folders it creates there — those join the project as work folders | Only the new folders, as work folders | Yes |
 
@@ -348,9 +349,46 @@ extra folders of two kinds.
   folder — a release tool, a publish folder — Claude creates it there and
   Carrier adds it to the project as a work folder (a notice says so). A
   workspace folder may contain the project's main folder.
-* **Sharing:** a project can use another project's main folder as a work or
-  reference folder. An edit there is recorded for both projects, so their
-  sessions warn each other.
+
+### Who owns what
+
+* **A main folder is its project's alone.** Another project can use it (or
+  anything inside it) only as a *reference folder*: read, never edited. Adding
+  it as a work folder offers a reference folder instead. Projects set up
+  before this rule are fixed when Carrier starts: such a work folder becomes a
+  reference folder, and the project's log says so.
+* **Another project's main folder inside a work folder** (a workspace-like
+  folder holding several projects) stays that project's: edits there are
+  blocked, and Debrief leaves it out. The folder's card says *holds …'s main
+  folder (read only)*.
+* **This project's work folder:** everything in it is the project's.
+* **Shared space:** a work folder other projects work in too. Carrier marks a
+  work folder as shared as soon as a second project adds it, and it stays
+  shared while they both do. In a shared space the project owns **its part**:
+
+  | What | How it's set |
+  |---|---|
+  | Files matching its patterns | **Part…** on the folder's card, one pattern per line: `ships` or `ships/**` (a folder and everything in it), `data/ship_*.csv`, `*.md` (that name in any folder) |
+  | Files it created there | Automatic: a new file a session creates in the shared space becomes the project's |
+  | Files its sessions changed | Counted for reviews only |
+
+  **Editing outside its part always asks you**, even when editing is
+  pre-approved for the project and even in Claude Code's "accept edits" mode:
+  the permission card says the file is outside this project's part, and has
+  no "for this session" button — each such edit asks. In "never ask" mode
+  these edits are blocked instead, and Claude tells you what it needed.
+  Shell commands that change files there (`cp`, `mv`, `rm`, `tee`, `touch`,
+  `git checkout`, a `>` redirect …) ask too. Claude is told which part is
+  its own.
+* **Reviews of a shared space** cover only the project's part, the files it
+  created there and the files its sessions changed; the rest is left out and
+  the review says how many. A change another project's Flight Deck session
+  made is marked as that project's work (the item shows *task (Animation)*),
+  and the agents are told not to judge it against this project's requests.
+* Each work folder's card also has **Leave out of reviews** (Debrief neither
+  reviews nor scans it) and **Note…**, which tells the review agents what the
+  folder is, for example *"Animation's export folder; only ships/ is ours"*.
+  They see it with every change in that folder.
 * **Separate reviews:** each project keeps its own record of where its last
   review ended, so reviewing one project never marks the other's changes as
   reviewed.

@@ -2,13 +2,17 @@
 # Copyright (C) 2026 Thomas and Carrier contributors
 """Flight Deck end to end with a fake Claude Code client (tests/fakeclaude.py)."""
 
+import asyncio
+import os
 import subprocess
 import time
 from pathlib import Path
 
 import pytest
 
+from carrier.flightdeck import sdk
 from carrier.flightdeck.manager import DeckError, FlightDeck
+from carrier.readyroom.manager import RoomError
 
 from .fakeclaude import ALL_CLIENTS, FakeClaudeClient
 
@@ -294,6 +298,9 @@ def test_task_sessions_rules_presets_and_completion(deck: FlightDeck, projects):
     # Mark done: Claude writes the summary, saved to history; next task becomes current.
     room.add_task(pid, "Next thing")
     deck.complete_task(s["id"])
+    end = time.time() + 10  # the session may still read "idle" before the summary turn starts
+    while deck.store.task(task["id"])["status"] != "done" and time.time() < end:
+        time.sleep(0.02)
     wait(deck, s["id"])
     done = deck.store.task(task["id"])
     assert done["status"] == "done" and done["summary"].startswith("Done:")
@@ -422,37 +429,68 @@ def test_model_and_effort_for_tasks(deck: FlightDeck, projects):
 
 
 def test_shared_and_reference_folders(deck: FlightDeck, projects, tmp_path: Path):
-    """An edit in a folder that is one project's main folder and another's work
-    folder is logged for both; edits in reference folders are blocked."""
+    """An edit in a folder two projects work in is logged for both; another
+    project's main folder is read only; edits in reference folders are blocked."""
     room = deck.room
     api_id, web_id = projects["ApiServer"], projects["WebClient"]
     api_path = Path(deck.store.project(api_id)["path"])
-    room.add_folder(web_id, str(api_path), label="server")           # work: ApiServer's main folder
+    with pytest.raises(RoomError, match="main folder"):
+        room.add_folder(web_id, str(api_path), label="server")     # another project's main folder
+    room.add_folder(web_id, str(api_path), kind="reference", label="server")
+    shared = make_repo(tmp_path / "assets", {"logo.svg": "x\n"})
+    room.add_folder(web_id, str(shared), label="assets")
+    room.add_folder(api_id, str(shared), label="assets")
     ref = make_repo(tmp_path / "specs", {"spec.md": "x\n"})
     room.add_folder(web_id, str(ref), kind="reference")
     room.add_task(web_id, "touch both")
     s = deck.start_task(room.current_task(web_id)["id"], send_task=False)
     wait(deck, s["id"])
     row = deck.store.session(s["id"])
-    assert deck.owners(row, str(api_path / "schema" / "user.json")) == [
-        (web_id, "server/schema/user.json"), (api_id, "schema/user.json")]
+    assert sorted(deck.owners(row, str(shared / "icons" / "a.svg"))) == sorted([
+        (web_id, "assets/icons/a.svg"), (api_id, "assets/icons/a.svg")])
     assert str(ref.resolve()) in [str(Path(d).resolve()) for d in ALL_CLIENTS[-1].options.add_dirs]
     assert "READ ONLY" in ALL_CLIENTS[-1].options.system_prompt["append"]
     runner = deck.runners[s["id"]]
 
-    async def edit(path: Path) -> dict:
+    ids = iter(range(1000))
+
+    async def edit(path: Path | str) -> dict:
+        tid = f"tool{next(ids)}"
         data = {"tool_name": "Write", "tool_input": {"file_path": str(path)}}
-        out = await runner._before_edit(data, None, None)
+        out = await runner._before_edit(data, tid, None)
         if (out.get("hookSpecificOutput") or {}).get("permissionDecision") != "deny":
-            await runner._after_edit(data, None, None)  # the edit went ahead (maybe with a warning)
+            full = Path(runner._file_path(data))
+            full.parent.mkdir(parents=True, exist_ok=True)
+            full.write_text("y\n")
+            await runner._after_edit(data, tid, None)  # the edit went ahead (maybe after asking)
         return out
 
     blocked = deck._run(edit(ref / "spec.md"))
     assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "reference folder" in blocked["hookSpecificOutput"]["permissionDecisionReason"]
-    deck._run(edit(api_path / "schema" / "user.json"))
+    # A file already in the shared space that isn't this project's: always ask.
+    asked = deck._run(edit(shared / "logo.svg"))
+    assert asked["hookSpecificOutput"]["permissionDecision"] == "ask"
+    # A relative path is the session's folder's (as Claude Code reads it), and still asks.
+    rel = os.path.relpath(shared / "logo.svg", runner.cwd)
+    assert deck._run(edit(rel))["hookSpecificOutput"]["permissionDecision"] == "ask"
+    # "Allow … for this session" never covers it, and the card doesn't offer it.
+    runner.always_allow.add(sdk.allow_key("Write", {"file_path": str(shared / "x")})[0])
+    room.set_allowances(web_id, edit=True)
+    fut = asyncio.run_coroutine_threadsafe(
+        runner._can_use_tool("Write", {"file_path": str(shared / "logo.svg")}, None), deck._loop)
+    wait(deck, s["id"], "needs_you")
+    card = events(deck, s["id"], "permission")[-1]
+    assert card["no_always"] and "logo.svg" in card["summary"]
+    deck.answer(s["id"], card["req_id"], "allow_always")
+    fut.result(5)
+    assert deck.preapproved(row, "Write", {"file_path": str(shared / "logo.svg")}) == ""
+    # A new file becomes this project's, so the next edit doesn't ask.
+    deck._run(edit(shared / "icons" / "a.svg"))
+    again = deck._run(edit(shared / "icons" / "a.svg"))
+    assert (again.get("hookSpecificOutput") or {}).get("permissionDecision") != "ask"
     logged = {(e["project_id"], e["path"]) for e in deck.store._q("SELECT project_id, path FROM edits")}
-    assert {(web_id, "server/schema/user.json"), (api_id, "schema/user.json")} <= logged
+    assert {(web_id, "assets/icons/a.svg"), (api_id, "assets/icons/a.svg")} <= logged
     deck.end_session(s["id"])
 
 
@@ -504,7 +542,7 @@ def test_questions_and_proposed_rules(deck: FlightDeck, projects):
 def test_workspace_folders_claim_new_folders(deck: FlightDeck, projects, tmp_path: Path):
     """A workspace folder's existing contents are read only; a new folder Claude
     creates there joins the project as a work folder."""
-    ws = tmp_path / "ModTools"
+    ws = tmp_path / "Workspace"
     (ws / "mods" / "Other").mkdir(parents=True)
     (ws / "mods" / "Other" / "a.txt").write_text("x\n")
     main = ws / "mods" / "Voice"
@@ -525,7 +563,7 @@ def test_workspace_folders_claim_new_folders(deck: FlightDeck, projects, tmp_pat
     wait(deck, s["id"])
     assert (ws / "tools" / "release" / "export.sh").read_text() == "echo hi\n"
     folders = {f["label"]: f for f in room.project(pid)["folders"]}
-    assert folders["tools"]["kind"] == "work" and folders["ModTools"]["kind"] == "workspace"
+    assert folders["tools"]["kind"] == "work" and folders["Workspace"]["kind"] == "workspace"
     assert any("Added the new folder tools" in e["text"] for e in events(deck, s["id"], "notice"))
     # Its files are now the project's own: a second write needs no new folder.
     deck.send(s["id"], f"write {ws / 'tools' / 'release' / 'more.sh'} echo 2")

@@ -64,6 +64,10 @@ The first start sets everything up (about a minute). Then:
   resume Claude is told exactly which files changed meanwhile. Ending a
   session leaves a note for the next one on the task, and projects that build
   on another project's files can hear about changes there with every message.
+- **Clear folder ownership.** A project's main folder is its own; other
+  projects only read it. Folders several projects work in are shared spaces
+  where each project owns its part, and editing someone else's files there
+  always asks you first. Reviews cover only what's the project's own.
 - **Safety nets.** A local secrets scan before anything is published, alerts
   when Claude needs you, and a backup of your data before every upgrade.
 - **Fewer permission prompts, safely.** Pre-approve what each project's

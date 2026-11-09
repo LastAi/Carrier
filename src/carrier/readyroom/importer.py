@@ -414,7 +414,7 @@ question text itself in the block only (don't repeat it in your prose).
 ## Proposing a rule
 When the user states something that should hold for future work ("never…", "always…", "from now on…"),
 propose it with a fenced ```carrier-rule block; the user edits and approves it into the plan:
-{"text": "- Never edit files in D:/Starsector.", "project": "project name from the plan, or empty",
+{"text": "- Never edit files in D:/GameInstall.", "project": "project name from the plan, or empty",
  "rule_set": "rule set name if it belongs in a shared set, else empty", "why": "one line"}
 
 ## The plan
@@ -429,7 +429,9 @@ Whenever you have a complete proposal (and every time it changes), end your repl
                "tasks": [{"title": "…", "details": "…"}]}]}
 Paths are relative to the workspace (forward slashes) unless outside it; main and folder paths are where
 things will be AFTER the moves. Rules are short imperative "- " bullets. Tasks are the next real pieces of
-work, most important first (at most eight per project). "moves" is [] when working in place."""
+work, most important first (at most eight per project). "moves" is [] when working in place.
+A project's main folder belongs to that project alone: another project can only have it (or anything
+inside it) as a reference folder. A work folder used by two projects is a shared space."""
 
 MODES = {
     "in_place": "The user wants to split the work IN PLACE: nothing moves; projects use existing folders.",
@@ -949,7 +951,10 @@ def apply_plan(room: Any, root: str | Path, plan: dict[str, Any], *, baseline: b
                                       rule_set_ids=[rs_names[n.lower()] for n in p["rule_sets"]])["id"]
             made_projects.append(pid)
             for f in p["folders"]:
-                room.add_folder(pid, f["_path"], label=f["label"], kind=f["kind"])
+                kind = f["kind"]
+                if kind == "work" and room._main_of_other(pid, str(Path(f["_path"]).resolve())):
+                    kind = "reference"  # another project's main folder belongs to that project alone
+                room.add_folder(pid, f["_path"], label=f["label"], kind=kind)
             for t in p["tasks"]:
                 room.add_task(pid, t["title"], t["details"])
     except Exception as exc:

@@ -397,7 +397,7 @@ def _host_matches(host: str, sites: list[str]) -> bool:
 
 
 def preapproved(name: str, inp: dict[str, Any], allow: dict[str, Any], cwd: Path,
-                readable: list[str], editable: list[str]) -> str:
+                readable: list[str], editable: list[str], no_write: Callable[[str], bool] | None = None) -> str:
     """Which of the project's pre-approvals covers this tool call ("" if none).
 
     Files count only inside the project's folders: ``editable`` (the session's folder
@@ -436,7 +436,8 @@ def preapproved(name: str, inp: dict[str, Any], allow: dict[str, Any], cwd: Path
     if name == "Bash":
         entries = group_entries(allow)
         if entries and shellcheck.check(str(inp.get("command", "")), entries, cwd, readable, editable,
-                                        can_edit=bool(allow.get("edit")), can_read=bool(allow.get("read"))).ok:
+                                        can_edit=bool(allow.get("edit")), can_read=bool(allow.get("read")),
+                                        no_write=no_write).ok:
             return "commands"
     if name in (allow.get("tools") or []):
         return "tools"
@@ -444,7 +445,8 @@ def preapproved(name: str, inp: dict[str, Any], allow: dict[str, Any], cwd: Path
 
 
 def project_allow(name: str, inp: dict[str, Any], allow: dict[str, Any] | None = None, cwd: Path | None = None,
-                  readable: list[str] | None = None, editable: list[str] | None = None) -> dict[str, Any] | None:
+                  readable: list[str] | None = None, editable: list[str] | None = None,
+                  no_write: Callable[[str], bool] | None = None) -> dict[str, Any] | None:
     """What "always allow in this project" would add for this tool call.
 
     ``{"change": {...}, "label": "...", "programs": [...], "reason": "..."}``; for a shell
@@ -469,7 +471,7 @@ def project_allow(name: str, inp: dict[str, Any], allow: dict[str, Any] | None =
         allow = allow or dict(ALLOW_DEFAULT)
         v = shellcheck.check(str(inp.get("command", "")), group_entries(allow), cwd or Path.cwd(),
                              readable or [], editable or [], can_edit=bool(allow.get("edit")),
-                             can_read=bool(allow.get("read")))
+                             can_read=bool(allow.get("read")), no_write=no_write)
         out = {"programs": v.programs, "reason": v.reason, "change": None, "label": ""}
         missing = v.missing
         blockers = [p for p in v.programs if not p["listed"] and not p.get("entry")]
