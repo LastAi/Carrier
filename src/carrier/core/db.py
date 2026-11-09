@@ -244,6 +244,37 @@ CREATE TABLE IF NOT EXISTS usage_entries (    -- one row per Claude reply: token
     cache_read  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS usage_by_ts ON usage_entries(ts);
+CREATE TABLE IF NOT EXISTS health_runs (       -- Debrief health checks: one row per agent per run
+    id          INTEGER PRIMARY KEY,
+    project_id  INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    agent       TEXT NOT NULL,
+    started     REAL NOT NULL,
+    finished    REAL,
+    status      TEXT NOT NULL DEFAULT 'running',  -- running | ok | failed | cancelled
+    error       TEXT NOT NULL DEFAULT '',
+    files       INTEGER NOT NULL DEFAULT 0,       -- files looked at
+    left_out    INTEGER NOT NULL DEFAULT 0,       -- files over the budget
+    state       TEXT NOT NULL DEFAULT '',         -- the code's state when it ran (health.code_state)
+    rules       TEXT NOT NULL DEFAULT ''          -- hash of the rules when it ran
+);
+CREATE TABLE IF NOT EXISTS health_findings (
+    id          INTEGER PRIMARY KEY,
+    project_id  INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    agent       TEXT NOT NULL,
+    key         TEXT NOT NULL,                    -- the same problem across runs (health.finding_key)
+    file        TEXT NOT NULL DEFAULT '',
+    line        INTEGER NOT NULL DEFAULT 0,
+    title       TEXT NOT NULL,
+    detail      TEXT NOT NULL DEFAULT '',
+    suggestion  TEXT NOT NULL DEFAULT '',
+    severity    TEXT NOT NULL DEFAULT 'medium',
+    first_seen  REAL NOT NULL,
+    last_seen   REAL NOT NULL,
+    seen_run    INTEGER NOT NULL DEFAULT 0,       -- the run that last reported it
+    status      TEXT NOT NULL DEFAULT 'open',     -- open | gone | accepted | dismissed | tasked
+    task_id     INTEGER,
+    UNIQUE (project_id, agent, key)
+);
 """
 
 # Sessions in these states hold the deck: they count for coordination.

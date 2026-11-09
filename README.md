@@ -49,6 +49,10 @@ The first start sets everything up (about a minute). Then:
 - **Reviews that know why.** Debrief links each change to what you asked for
   and which task made it, groups edits into logical changes, and has review
   agents flag what deserves a closer look.
+- **Health checks.** A periodic look at the whole project — security, rules,
+  tests, structure, duplication, dead code, docs drift and more. They show as
+  due rather than running by themselves, with a cost estimate, and each finding
+  can become a task.
 - **You set the thoroughness.** Choose the model and effort for each session
   and each review agent — Opus at high effort for a security check on
   sensitive code, Sonnet at low effort for a throwaway tool.

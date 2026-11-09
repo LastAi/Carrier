@@ -36,6 +36,11 @@ EVIL = '<img src=x onerror="window.__pwned=1"> **bold**'
 def handler(system: str, prompt: str) -> str:
     if "Reviewer's question" in prompt:
         return EVIL  # model output must never become live HTML
+    if prompt.startswith("# Health check: Security sweep"):
+        return json.dumps({"findings": [{"file": "save.py", "line": 1, "title": "Path from the user is opened as is",
+                                         "detail": EVIL, "suggestion": "Check the path first.", "severity": "high"}]})
+    if prompt.startswith("# Health check:"):
+        return json.dumps({"findings": []})
     return scripted_handler(system, prompt)
 
 
@@ -293,3 +298,36 @@ def test_edit_menu_is_switched_on_before_the_first_page_load(monkeypatch):
     e.load_html("<p>again</p>", "")
     assert order[:3] == [("AreDefaultContextMenusEnabled", True), ("handler", "_filter"), ("navigate", "<p>page</p>")]
     assert order.count(("handler", "_filter")) == 1  # once per window
+
+
+def test_health_check_panel(page):
+    page.wait_for_selector("#view-flightdeck:not(.hidden)")
+    page.click(".tool[data-tool='debrief']")
+    page.wait_for_selector("#db-projects button:has-text('health: 12 due')")
+    page.click("#db-projects button:has-text('App')")
+    page.click("#health-box summary")
+    page.wait_for_selector("#health-due >> text=12 due")
+    assert page.locator("#health-agents .hc-agent").count() == 12
+    # Only security this time: untick the rest.
+    for cb in page.locator("#health-agents input[type=checkbox]").all():
+        if cb.get_attribute("aria-label") != "Run Security sweep":
+            cb.uncheck()
+    assert "1 check(s)" in page.inner_text("#health-est")
+    # Settings: a longer interval for this project.
+    row = page.locator(".hc-agent", has_text="Security sweep")
+    row.locator("button:has-text('Settings')").click()
+    page.fill("input[aria-label='Every Security sweep']", "21")
+    page.press("input[aria-label='Every Security sweep']", "Tab")
+    page.wait_for_selector("button:has-text('Use defaults')")
+    page.click("#btn-health")
+    page.wait_for_selector(".hc-finding >> text=Path from the user is opened as is")
+    assert page.evaluate("window.__pwned") is None  # model output is text, never HTML
+    assert "save.py:1" in page.inner_text(".hc-finding")
+    assert page.is_visible("#health-due") and "11 due" in page.inner_text("#health-due")
+    page.screenshot(path="/tmp/carrier-shots/health.png", full_page=True)
+    page.click(".hc-finding button:has-text('Make a task')")
+    page.wait_for_selector(".hc-finding >> text=task made")
+    page.click(".hc-finding button:has-text('Dismiss')")
+    page.wait_for_function("!document.querySelector('.hc-finding')")
+    page.check("text=Show accepted, dismissed and not found again")
+    page.wait_for_selector(".hc-finding.quiet >> text=dismissed")

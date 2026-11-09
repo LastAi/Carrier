@@ -195,6 +195,7 @@ Paths are relative to `src/carrier/`.
 | `debrief/segment.py` | group hunks into logical items (with deterministic fallback) | yes |
 | `debrief/criteria.py`, `criteria_builtin/` | load criteria markdown (built-in + project) | no |
 | `debrief/flagging.py` | run criteria agents in parallel batches → `Flag`s | yes |
+| `debrief/health.py`, `health_builtin/` | health checks: periodic whole-project agents, when they are due, findings compared run to run | yes |
 | `debrief/ranking.py` | dedupe flags, order items | no |
 | `debrief/guide.py` | explain an item; answer questions | yes |
 | `debrief/pipeline.py` | orchestrates *prepare* (read this one first); cancel-safe | via the above |
@@ -225,7 +226,7 @@ Paths are relative to `src/carrier/`.
 
 Rule of thumb: **only `core/llm.py` (one-shot calls) and `flightdeck/sdk.py`
 (interactive sessions) import the Agent SDK**, and only the agent
-modules (`segment`, `flagging`, `guide`, and `readyroom/drafting`) call `Backend.ask`. Everything else
+modules (`segment`, `flagging`, `guide`, `health` and `readyroom/drafting`) call `Backend.ask`. Everything else
 is deterministic and unit-tested without a model.
 
 ## Key design decisions

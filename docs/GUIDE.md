@@ -705,6 +705,68 @@ like any other — approve, request fixes — but it doesn't change what counts
 as reviewed, and it sits beside an open change review rather than replacing
 it.
 
+### Health checks
+
+A review looks at what changed; a **health check** looks at the whole
+project now and then — the kind of problems that build up slowly across many
+changes. Open **Health check** below the review options. Each check looks at
+the project's own files only: its main folder and work folders (not those
+left out of reviews), without other projects' main folders, and in shared
+spaces only the project's part. Lock files, generated, binary and very large
+files are left out.
+
+| Check | Theme | How it works | Due again |
+|---|---|---|---|
+| Security sweep | Safety | Reads the files | Every 14 days, changes or not |
+| Rules compliance | Rules | Reads the files, against the project's and your global rules | Every 14 days, changes or not, and as soon as the rules change |
+| Error handling and robustness | Reliability | Reads the files | 21 days after the last check, once the code changed |
+| Tests | Reliability | Explores the project | 21 days, once the code changed |
+| Cross-platform | Reliability | Reads the files | 30 days, once the code changed |
+| Performance hotspots | Reliability | Reads the files | 30 days, once the code changed |
+| Structure and boundaries | Design | Explores the project | 30 days, once the code changed |
+| Duplication | Design | Explores the project | 30 days, once the code changed |
+| Magic numbers and config | Design | Reads the files | 30 days, once the code changed |
+| Dead code and leftovers | Upkeep | Explores the project | 30 days, once the code changed |
+| Docs drift | Upkeep | Explores the project | 21 days, once the code changed |
+| Dependencies and build | Upkeep | Explores the project | 30 days, once the code changed |
+
+* **Nothing runs by itself.** A check shows as **Due** when it's worth running
+  again, and the project list in Debrief says *health: N due*. Due checks are
+  ticked; tick or untick any, then **Run selected checks**. **Cancel** stops
+  a run; checks that finished keep their results.
+* **Two kinds.** Checks that *read the files* go through them in parts, with
+  line numbers. Checks that *explore the project* get the list of its files
+  and read-only tools (Read, Grep, Glob) to search and read what matters —
+  for questions about the whole, such as duplication or untested code.
+* **Cost.** Each check shows a rough token count before you run it, and the
+  total for the ticked ones. **Settings ▾** on a check sets, for this project:
+  on or off, the model (Sonnet by default), the effort, how many days until it's
+  due again, and for checks that read the files a budget — **Read up to …
+  KB of code per run**; over it, the most recently changed files go first and
+  the rest wait for the next run. **Use defaults** clears the project's
+  settings.
+* **The report** groups findings by theme, most serious first. Each says
+  where (file and line), what's wrong, and what to do. A run is compared with
+  the last one: a finding is **new**, still **open**, or **not found again**
+  (likely fixed). For each finding:
+
+  | Button | What it does |
+  |---|---|
+  | Make a task | Adds it to the project's task queue in the Ready Room, with the details |
+  | Accept | Keeps it as it is: it stays in the report but isn't counted, even when found again |
+  | Dismiss | Not a real problem: hidden, even when found again |
+  | Reopen | Counts an accepted or dismissed finding as open again |
+
+  **Show accepted, dismissed and not found again** shows the quiet ones.
+* **Failures.** If part of a check fails (a time-out, say), the findings in
+  the files it couldn't read are kept as they were, the run is marked
+  *incomplete*, and the check stays due. A check that fails doesn't stop the
+  others. One health check runs at a time.
+* **Tasks from findings** are marked as written by a health check, and their
+  details tell Claude to verify the finding before acting on it — the text
+  comes from an AI that read the project's files, so check it before you
+  start the task.
+
 ### How a review is prepared
 
 1. **Snapshot.** Each folder — including uncommitted and new files — is
@@ -999,7 +1061,7 @@ Linux:
 
 | File | Holds |
 |---|---|
-| `carrier.db` | Projects, tasks, rules, presets, templates, review agents, links, sessions and transcripts, and token counts (numbers only, 60 days) |
+| `carrier.db` | Projects, tasks, rules, presets, templates, review agents, links, sessions and transcripts, health checks and their findings, and token counts (numbers only, 60 days) |
 | `models.json` | The model list from Claude Code |
 | `settings.json` | Theme, colours, overlap, alert, layout and usage settings |
 | `desktop.log` | Errors and diagnostics from the desktop app |

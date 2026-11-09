@@ -665,6 +665,22 @@
       <pre id="progress-log" class="log hidden"></pre>
       <button id="btn-cancel" class="ghost hidden">Cancel</button>
     </div>
+    <details id="health-box" class="scan-box hidden">
+      <summary>Health check <span id="health-due" class="hc-due hidden"></span>
+        <span class="muted small">— a periodic look at the whole project, not just what changed</span></summary>
+      <p class="muted small">Each check looks at the project's own files as they are now. Checks never run by
+        themselves: they show as <b>due</b> when it's worth running them again — security and rules
+        compliance after a set time even with no changes (rules compliance also when the rules change), the
+        others after a set time once the code has changed. Due checks are ticked; token counts are rough.</p>
+      <div id="health-agents" class="hc-agents"></div>
+      <div class="hc-run">
+        <button id="btn-health" class="ghost">Run selected checks</button>
+        <span id="health-est" class="muted small"></span>
+        <button id="btn-health-cancel" class="ghost hidden">Cancel</button>
+      </div>
+      <pre id="health-log" class="log hidden"></pre>
+      <div id="health-report"></div>
+    </details>
   </section>
 </main>
 

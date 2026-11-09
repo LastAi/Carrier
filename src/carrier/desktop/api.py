@@ -82,6 +82,9 @@ class DesktopApi:
         self._deck_factory = deck_factory
         self._deck_lock = threading.Lock()  # JS calls arrive on parallel threads
         self._emit: Emit = lambda _kind, _data: None
+        self._hc_cancel: threading.Event | None = None  # set while a health check runs
+        self._hc_lock = threading.Lock()
+        self._hc_pid: int | None = None
         self._backend_factory = backend_factory
         self._pick_folder = pick_folder
         self._pick_file: Callable[[str, str], str | None] | None = None
@@ -160,8 +163,108 @@ class DesktopApi:
             info = S.inspect_folder(main["path"], str(p["id"])) if main["is_repo"] else {"is_repo": False}
             out.append({"id": p["id"], "name": p["name"], "path": p["path"], "folders": folders,
                         "open_review": info.get("open_review") if main["is_repo"] else None,
-                        "ready": all(f["is_repo"] for f in folders)})
+                        "ready": all(f["is_repo"] for f in folders), "health_due": self._health_due(p["id"])})
         return out
+
+    def _health_due(self, pid: int) -> int:
+        from carrier.debrief import health
+
+        try:
+            return health.due_count(self._store(), pid)
+        except Exception:  # never break the project list over this
+            traceback.print_exc()
+            return 0
+
+    # -- health checks (debrief/health.py) ---------------------------------------
+
+    @_guard
+    def hc_view(self, pid: int) -> dict[str, Any]:
+        """The project's health checks (due, estimate, settings) and its health report."""
+        from carrier.debrief import health
+
+        if self._store().project(pid) is None:
+            raise S.SessionError("Unknown project.")
+        with self._hc_lock:
+            if self._hc_cancel is None:
+                health.clear_stale(self._store())  # left "running" by a run that never finished
+        return {**health.view(self._store(), pid), **self._hc_running(pid)}
+
+    def _hc_running(self, pid: int) -> dict[str, Any]:
+        """Is a health check running — for this project, or another one?"""
+        other = self._hc_pid if self._hc_cancel is not None and self._hc_pid != pid else None
+        name = (self._store().project(other) or {}).get("name") if other is not None else None
+        return {"running": self._hc_cancel is not None and self._hc_pid == pid, "running_other": name}
+
+    @_guard
+    def hc_run(self, pid: int, names: list[str]) -> dict[str, Any]:
+        """Run the chosen health checks now (blocks until done; progress arrives as "health" events)."""
+        import asyncio
+
+        from carrier.core.llm import AgentSDKBackend
+        from carrier.debrief import health
+
+        if self._store().project(pid) is None:
+            raise S.SessionError("Unknown project.")
+        with self._hc_lock:
+            if self._hc_cancel is not None:
+                raise S.SessionError("A health check is already running.")
+            self._hc_cancel, self._hc_pid = threading.Event(), pid
+        cancel = self._hc_cancel
+        out: dict[str, Any] = {}
+        try:
+            backend = self._backend(True)
+            if backend == "auto" or backend is None:
+                backend = AgentSDKBackend(concurrency=4)
+
+            def work() -> None:  # its own thread and event loop, whatever thread the page called from
+                try:
+                    out["r"] = asyncio.run(health.run(self._store(), pid, backend, list(names or []),
+                                                      progress=lambda m: self._emit("health", m), cancel=cancel))
+                except BaseException as exc:  # noqa: BLE001 - re-raised below
+                    out["e"] = exc
+
+            t = threading.Thread(target=work, name="health-check", daemon=True)
+            t.start()
+            t.join()
+            if "e" in out:
+                raise out["e"]
+            results = out["r"]
+        except asyncio.CancelledError:
+            raise S.SessionError("Cancelled — the checks that finished kept their results.") from None
+        finally:
+            with self._hc_lock:
+                self._hc_cancel, self._hc_pid = None, None
+        return {**health.view(self._store(), pid), **self._hc_running(pid), "results": results}
+
+    @_guard
+    def hc_cancel(self) -> bool:
+        ev = self._hc_cancel
+        if ev is None:
+            return False
+        ev.set()
+        return True
+
+    @_guard
+    def hc_act(self, pid: int, fid: int, action: str) -> dict[str, Any]:
+        """Accept, dismiss, reopen a finding, or make a task of it (added to the project's queue)."""
+        from carrier.debrief import health
+
+        def add_task(title: str, details: str) -> int:
+            p = self._rr().add_task(pid, title, details, by="health check")
+            return max(t["id"] for t in p["tasks"] if t["title"] == title.strip())
+
+        health.act(self._store(), pid, fid, action, add_task=add_task)
+        return health.report(self._store(), pid)
+
+    @_guard
+    def hc_set_option(self, pid: int | None, name: str, key: str, value: Any) -> dict[str, Any] | None:
+        """One setting of a health check, for a project (or globally with pid None)."""
+        from carrier.debrief import health
+
+        if pid is not None and self._store().project(pid) is None:
+            raise S.SessionError("Unknown project.")
+        health.set_option(self._store(), pid, name, key, value)
+        return {**health.view(self._store(), pid), **self._hc_running(pid)} if pid is not None else None
 
     @_guard
     def db_project(self, pid: int) -> dict[str, Any]:

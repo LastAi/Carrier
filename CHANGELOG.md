@@ -4,6 +4,17 @@ All notable changes are listed here. Format: [Keep a Changelog](https://keepacha
 
 ## Unreleased
 
+- **Health checks in Debrief.** Twelve agents that look at the whole project
+  now and then rather than at one set of changes: security, rules compliance,
+  error handling, tests, cross-platform, performance, structure, duplication,
+  magic numbers, dead code, docs drift, and dependencies. Checks never run by
+  themselves; they show as due (security and rules compliance on a timer,
+  rules compliance also when the rules change; the rest once the code has
+  changed), with a token estimate, per-project settings (model, effort,
+  interval, file budget) and a report by theme that marks findings new, still
+  open or not found again. Each finding can become a task, or be accepted or
+  dismissed.
+
 - **Folder ownership.** A project's main folder is now its own alone: other
   projects can use it only as a reference folder (adding it as a work folder
   offers a reference folder instead, and older setups are converted when

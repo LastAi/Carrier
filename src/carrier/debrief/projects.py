@@ -29,6 +29,7 @@ API (``ReadyRoom``, ``context.build``) and the shared store.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -328,6 +329,7 @@ def project_spec(store: Store, pid: int) -> ProjectSpec:
 
     roots = {"": Path(p["path"]), **{lbl: path for lbl, path in extras}}
     labels = {lbl for lbl in roots if lbl}
+    claimed_by_label: dict[str, set[str]] = {}
 
     def keep_file(path: str, since: float | None) -> bool:
         """Is this changed file the project's own? Not in another project's main folder, and in a
@@ -341,7 +343,11 @@ def project_spec(store: Store, pid: int) -> ProjectSpec:
         if lbl not in shared_labels:
             return True
         f = settings.get(str(root), {})
-        if ownership.matches(rel, f.get("part") or []) or ownership.is_claimed(store, pid, str(root), rel):
+        if ownership.matches(rel, f.get("part") or []):
+            return True
+        if lbl not in claimed_by_label:  # read once per folder, not per file
+            claimed_by_label[lbl] = {os.path.normcase(c) for c in ownership.claimed(store, pid, str(root))}
+        if os.path.normcase(rel) in claimed_by_label[lbl]:
             return True
         for e in store.edits(pid, path=path, since=since or 0):
             s = store.session(e["session_id"])

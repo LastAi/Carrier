@@ -124,6 +124,12 @@ function fallbackCopy(text) {
 
 /* Python -> page events (progress while preparing). */
 window.carrierEvent = (kind, data) => {
+  if (kind === "health" && hc.view && hc.view.running) {
+    const log = $("#health-log");
+    show(log);
+    log.textContent += data + "\n";
+    log.scrollTop = log.scrollHeight;
+  }
   if (kind === "progress") {
     const log = $("#progress-log");
     show(log);
@@ -220,6 +226,11 @@ async function renderReviewProjects() {
     const status = !p.ready ? "needs setup" : r && r.status === "in_progress"
       ? `review in progress: ${r.decided}/${r.items} decided` : "";
     b.appendChild(el("span", "path", p.path + extra + (status ? ` · ${status}` : "")));
+    if (p.health_due) {
+      const d = el("span", "hc-due", `health: ${p.health_due} due`);
+      d.title = "Health checks due for this project — see Health check below the review options";
+      b.appendChild(d);
+    }
     b.onclick = guarded(async () => showProject(await api("db_project", p.id)));
     box.appendChild(b);
   }
@@ -270,6 +281,196 @@ function showProject(info) {
   show($("#extras-note"), info.folders.length > 1);
   showFolder({ ...info, is_repo: info.ready }, info.name);
   renderScanAgents(info.id);
+  loadHealth(info.id);
+}
+
+/* ---- health checks (debrief/health.py) ---- */
+
+const hc = { pid: null, view: null, picked: null, open: new Set(), showQuiet: false };
+const kTokens = (n) => n >= 1000 ? `~${Math.round(n / 1000)}k tokens` : `~${n} tokens`;
+
+const loadHealth = guarded(async (pid) => {
+  show($("#health-box"), pid != null);
+  if (pid == null) return;
+  if (hc.pid !== pid) { hc.picked = null; hc.open.clear(); }
+  hc.pid = pid;
+  renderHealth(await api("hc_view", pid));
+});
+
+function renderHealth(view) {
+  hc.view = view;
+  if (hc.picked === null) hc.picked = new Set(view.agents.filter((a) => a.due && a.enabled).map((a) => a.name));
+  const dueN = view.agents.filter((a) => a.due && a.enabled).length;
+  const badge = $("#health-due");
+  badge.textContent = `${dueN} due`;
+  show(badge, dueN > 0);
+  const box = $("#health-agents");
+  box.replaceChildren();
+  for (const a of view.agents) {
+    const row = el("div", "hc-agent" + (a.enabled ? "" : " off"));
+    const cb = Object.assign(el("input"), { type: "checkbox", checked: a.enabled && hc.picked.has(a.name),
+                                            disabled: !a.enabled });
+    cb.setAttribute("aria-label", `Run ${a.title}`);
+    cb.onchange = () => { cb.checked ? hc.picked.add(a.name) : hc.picked.delete(a.name); healthEstimate(); };
+    const name = el("span", "");
+    const t = el("span", "hc-title", a.title);
+    t.title = a.instructions;
+    name.append(t, el("span", "muted small", ` · ${a.theme} · ${a.mode === "files" ? "reads the files" : "explores the project"}`));
+    const when = el("span", "hc-when small" + (a.due ? " due" : ""), (a.due ? "Due: " : "") + a.why);
+    if (a.last && a.last.status === "failed") when.appendChild(el("span", "muted", ` (last run failed: ${a.last.error})`));
+    if (a.last && a.last.status === "partial") when.appendChild(el("span", "muted", ` (last run incomplete: ${a.last.error})`));
+    if (a.last && a.last.left_out) when.appendChild(el("span", "muted", ` (${a.last.left_out} file(s) over the budget)`));
+    const est = el("span", "muted small", a.enabled ? kTokens(a.estimate) : "off");
+    const gear = el("button", "ghost small-btn", hc.open.has(a.name) ? "Settings ▴" : "Settings ▾");
+    gear.setAttribute("aria-expanded", String(hc.open.has(a.name)));
+    gear.onclick = () => { hc.open.has(a.name) ? hc.open.delete(a.name) : hc.open.add(a.name); renderHealth(hc.view); };
+    row.append(cb, name, when, est, gear);
+    box.appendChild(row);
+    if (hc.open.has(a.name)) box.appendChild(healthOptions(a, view));
+  }
+  healthEstimate();
+  renderHealthReport(view);
+}
+
+function healthOptions(a, view) {
+  const wrap = el("div", "hc-opts");
+  const set = (key, value) => guarded(async () => renderHealth(await api("hc_set_option", hc.pid, a.name, key, value)))();
+  const on = Object.assign(el("input"), { type: "checkbox", checked: a.enabled });
+  on.onchange = () => set("enabled", on.checked);
+  const onl = el("label", "check"); onl.append(on, document.createTextNode(" Use for this project"));
+  const sel = (label, values, cur, key, blank) => {
+    const l = el("label", "", label + " ");
+    const s = el("select");
+    s.setAttribute("aria-label", `${label} for ${a.title}`);
+    if (blank) s.appendChild(Object.assign(el("option", "", blank), { value: "" }));
+    for (const v of values) s.appendChild(Object.assign(el("option", "", v), { value: v }));
+    s.value = cur || "";
+    s.onchange = () => set(key, s.value);
+    l.appendChild(s);
+    return l;
+  };
+  const num = (label, cur, key, min, max, after) => {
+    const l = el("label", "", label + " ");
+    const n = Object.assign(el("input"), { type: "number", min, max, value: cur });
+    n.setAttribute("aria-label", `${label} ${a.title}`);
+    n.onchange = () => set(key, n.value);
+    l.append(n, document.createTextNode(" " + after));
+    return l;
+  };
+  wrap.append(onl, sel("Model", view.models, a.model, "model"), sel("Effort", view.efforts, a.effort, "effort", "default"),
+              num("Every", a.days, "days", 1, 365, a.due_rule === "changes" ? "days, once the code changed"
+                  : a.due_rule === "rules" ? "days, or when the rules change" : "days, changes or not"));
+  if (a.mode === "files") {
+    const b = num("Read up to", a.budget_kb, "budget_kb", 20, 20000, "KB of code per run (newest first)");
+    wrap.appendChild(b);
+  }
+  if (Object.keys(a.own || {}).length) {
+    const reset = el("button", "ghost small-btn", "Use defaults");
+    reset.onclick = guarded(async () => {
+      let v = null;
+      for (const k of Object.keys(a.own)) v = await api("hc_set_option", hc.pid, a.name, k, "");
+      if (v) renderHealth(v);
+    });
+    wrap.appendChild(reset);
+  }
+  return wrap;
+}
+
+function healthEstimate() {
+  const picked = hc.view.agents.filter((a) => a.enabled && hc.picked.has(a.name));
+  const v = hc.view;
+  $("#health-est").textContent = v.running ? "Running …"
+    : v.running_other ? `A health check of ${v.running_other} is running; one at a time.`
+    : picked.length ? `${picked.length} check(s), ${kTokens(picked.reduce((n, a) => n + a.estimate, 0))} in all · ${v.files} file(s) in scope`
+    : "Tick the checks to run.";
+  $("#btn-health").disabled = !picked.length || !!v.running || !!v.running_other;
+  show($("#btn-health-cancel"), !!v.running);
+}
+
+async function runHealth() {
+  const pid = hc.pid;  // the user may open another project while this runs
+  const names = hc.view.agents.filter((a) => a.enabled && hc.picked.has(a.name)).map((a) => a.name);
+  if (!names.length) return;
+  const log = $("#health-log");
+  hc.view = { ...hc.view, running: true };
+  healthEstimate();
+  log.textContent = "";
+  show(log);
+  try {
+    const v = await api("hc_run", pid, names);
+    const failed = (v.results || []).filter((r) => !r.ok);
+    banner(failed.length ? `${failed.length} health check(s) failed — see the list.` : "Health check finished.",
+           failed.length ? "error" : "info");
+    if (hc.pid === pid) { hc.picked = null; renderHealth(v); }
+  } catch (e) {
+    banner(e.message, /Cancelled/.test(e.message) ? "info" : "error");
+  } finally {
+    renderReviewProjects();
+    if (hc.pid != null) loadHealth(hc.pid);  // whichever project is open now
+  }
+}
+
+function renderHealthReport(view) {
+  const box = $("#health-report");
+  box.replaceChildren();
+  const c = view.counts;
+  if (!view.themes.length) {
+    box.appendChild(el("p", "muted small", "No findings yet."));
+    return;
+  }
+  const head = el("div", "hc-summary");
+  head.appendChild(el("b", "", `${c.open} open`));
+  head.appendChild(el("span", "muted", ` (${c.new} new) · ${c.tasked} made into tasks · ${c.accepted} accepted · ` +
+    `${c.dismissed} dismissed · ${c.gone} not found again`));
+  const quiet = Object.assign(el("input"), { type: "checkbox", checked: hc.showQuiet });
+  quiet.onchange = () => { hc.showQuiet = quiet.checked; renderHealthReport(hc.view); };
+  const ql = el("label", "check small"); ql.append(quiet, document.createTextNode(" Show accepted, dismissed and not found again"));
+  box.append(head, ql);
+  for (const t of view.themes) {
+    const items = t.findings.filter((f) => hc.showQuiet || f.status === "open" || f.status === "tasked");
+    if (!items.length) continue;
+    box.appendChild(el("h3", "hc-theme", t.theme));
+    for (const f of items) box.appendChild(healthFinding(f));
+  }
+}
+
+const HC_STATUS = { open: "open", tasked: "task made", accepted: "accepted", dismissed: "dismissed",
+                    gone: "not found again" };
+
+function healthFinding(f) {
+  const card = el("div", `hc-finding sev-${f.severity}` + (f.status === "open" || f.status === "tasked" ? "" : " quiet"));
+  const head = el("div", "hc-head");
+  head.append(el("span", "hc-badge", f.severity));
+  head.append(el("span", "hc-badge" + (f.new ? " new" : ""), f.new ? "new" : HC_STATUS[f.status] || f.status));
+  head.append(el("b", "", f.title));
+  card.appendChild(head);
+  const where = f.file ? f.file + (f.line ? `:${f.line}` : "") + " · " : "";
+  card.appendChild(el("div", "muted small", where + f.agent_title));
+  if (f.detail) card.appendChild(el("p", "", f.detail));
+  if (f.suggestion) card.appendChild(el("p", "muted", "Suggested: " + f.suggestion));
+  const actions = el("div", "hc-actions");
+  const act = (label, action, title) => {
+    const b = el("button", "ghost small-btn", label);
+    b.title = title;
+    b.onclick = guarded(async () => {
+      const rep = await api("hc_act", hc.pid, f.id, action);
+      hc.view = { ...hc.view, ...rep };
+      renderHealthReport(hc.view);
+      if (action === "task") banner("Added to the project's tasks.", "info");
+    });
+    actions.appendChild(b);
+  };
+  if (f.status === "open" || f.status === "gone") {
+    act("Make a task", "task", "Add it to the project's task queue in the Ready Room");
+  }
+  if (f.status === "open" || f.status === "tasked") {
+    act("Accept", "accept", "Keep it as it is: it stays in the report but isn't counted, even when found again");
+    act("Dismiss", "dismiss", "Not a real problem: hide it, even when found again");
+  } else if (f.status !== "gone") {
+    act("Reopen", "reopen", "Count it as an open finding again");
+  }
+  if (actions.childNodes.length) card.appendChild(actions);
+  return card;
 }
 
 const renderScanAgents = guarded(async (pid) => {
@@ -2320,6 +2521,7 @@ const fdDebriefThis = guarded(async () => {
     state.projectId = null;
     state.worktreeSid = fd.current;
     show($("#db-folders"), false); show($("#extras-note"), false);
+    show($("#scan-box"), false); show($("#health-box"), false);  // project-wide tools: not for one session's copy
     showFolder(await api("db_worktree", fd.current), `Own copy · ${t.task}`);
   }
   if (t.from_ref) {
@@ -4414,6 +4616,8 @@ async function init() {
   }).catch(() => {});
   $("#btn-start").onclick = () => startReview(state.freshStart);
   $("#btn-scan").onclick = startScan;
+  $("#btn-health").onclick = runHealth;
+  $("#btn-health-cancel").onclick = guarded(async () => { await api("hc_cancel"); });
   $("#btn-cancel").onclick = cancelStart;
   $("#btn-resume").onclick = () => startReview(false);
   $("#btn-new").onclick = () => { state.freshStart = true; show($("#resume-box"), false); show($("#start-box")); };
