@@ -4,6 +4,24 @@ All notable changes are listed here. Format: [Keep a Changelog](https://keepacha
 
 ## Unreleased
 
+- **Approve, follow up later** (`l`) in reviews: approves a change — the
+  review can clear and routines waiting for it can go on — and collects what
+  you write into one ordinary *Review follow-ups* task that holds nothing.
+- **Walk through health findings with Claude**: a conversation beside the
+  health report. Claude groups the findings, shows each one it talks about,
+  and proposes one task for a group, adding to an existing task, accepting or
+  dismissing — applied only when you say so, with findings you can untick.
+- **Tidy tasks with Claude** in the Ready Room: merge, move, re-order, split,
+  reword and drop tasks through suggestions you apply or skip. Dropped tasks
+  stay in the history with the reason.
+- **Tasks across linked projects**: sessions know their linked projects and
+  can propose work for them (you approve; it goes in that project's queue).
+  Tasks are linked both ways and can wait on each other; auto take-off leaves
+  a waiting task alone. Debrief's health report and walk-through can make a
+  task in a linked project.
+- **Watch reference folders one by one**: each reference or workspace folder
+  can be kept up to date with or not, beyond the project's switch.
+
 - **Health report like a review.** Findings on the left by theme, the code
   each one is about on the right with the lines marked (and more context on
   request), keys to move and decide. Fixed the report's colours, which filled

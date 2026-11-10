@@ -390,6 +390,7 @@ function hcVisible() {
 
 function openHealthReport() {
   hc.current = null;
+  if (hc.guide && hc.guide.pid !== hc.pid) { show($("#hc-guide"), false); hc.guide = null; }
   showDebriefView("#view-health");
   renderHealthView();
 }
@@ -454,10 +455,19 @@ const openFinding = guarded(async (id, scroll = true) => {
   body.replaceChildren();
   if (f.detail) { body.appendChild(el("h4", "", "What's wrong")); body.appendChild(el("p", "", f.detail)); }
   if (f.suggestion) { body.appendChild(el("h4", "", "Suggested")); body.appendChild(el("p", "", f.suggestion)); }
-  if (f.task_id) body.appendChild(el("p", "muted small", `A task was made of it (#${f.task_id}).`));
+  if (f.task_id) body.appendChild(el("p", "muted small", `A task was made of it (#${f.task_id}` +
+                                    (f.task_project ? ` in ${f.task_project}` : "") + ")."));
   const can = { task: f.status === "open" || f.status === "gone", accept: f.status === "open" || f.status === "tasked",
                 dismiss: f.status === "open" || f.status === "tasked", reopen: ["accepted", "dismissed"].includes(f.status) };
   show($("#hc-task"), can.task); show($("#hc-accept"), can.accept);
+  const tgt = $("#hc-task-target");
+  const linked = hc.view.linked || [];
+  const keepTgt = tgt.dataset.pid === String(hc.pid) ? tgt.value : "";
+  tgt.replaceChildren(Object.assign(el("option", "", "in this project"), { value: "" }),
+                      ...linked.map((q) => Object.assign(el("option", "", `in ${q.name}`), { value: q.id })));
+  tgt.value = linked.some((q) => String(q.id) === keepTgt) ? keepTgt : "";
+  tgt.dataset.pid = String(hc.pid);
+  show(tgt, can.task && linked.length > 0);
   show($("#hc-dismiss"), can.dismiss); show($("#hc-reopen"), can.reopen);
   $("#hc-state").textContent = f.status === "open" ? "" : `This finding is ${HC_STATUS[f.status]}.`;
   await renderExcerpt(f);
@@ -510,7 +520,9 @@ async function hcDecideNow(action) {
   if (!allowed[action]) return;
   const items = hcVisible();
   const next = items[items.findIndex((x) => x.id === id) + 1];
-  const rep = await api("hc_act", hc.pid, id, action);
+  const target = action === "task" && !$("#hc-task-target").classList.contains("hidden")
+    ? $("#hc-task-target").value || null : null;
+  const rep = await api("hc_act", hc.pid, id, action, target ? Number(target) : null);
   hc.view = { ...hc.view, ...rep };
   if (action === "task") banner("Added to the project's tasks in the Ready Room.", "info");
   // Like a review: deciding moves on to the next finding (unless it's still shown and was only reopened).
@@ -644,7 +656,7 @@ function enterReview(ov) {
   if (first) openItem(first.id);
 }
 
-const DEC = { approve: ["✓", "dec-approve"], fix: ["✎", "dec-fix"], revert: ["↺", "dec-revert"],
+const DEC = { approve: ["✓", "dec-approve"], later: ["✓⁺", "dec-approve"], fix: ["✎", "dec-fix"], revert: ["↺", "dec-revert"],
               skip: ["·", "dec-skip"] };
 const SEV_LETTER = { high: "H", medium: "M", low: "L" };
 
@@ -1041,6 +1053,12 @@ const decide = guarded(async (action) => {
       { value: state.item.decision ? state.item.decision.instruction : "", required: true,
         placeholder: "e.g. keep the retry but log each failure" });
     if (instruction === null) return;
+  } else if (action === "later") {
+    instruction = await promptText("Approved — what should be improved later? It goes into one follow-up task " +
+      "for this review, which doesn't hold routines waiting for a clear review.",
+      { value: state.item.decision ? state.item.decision.instruction : "", required: true,
+        placeholder: "e.g. rename the helper; add a test for empty files" });
+    if (instruction === null) return;
   } else if (action === "revert") {
     instruction = await promptText("Revert this change. Reason (optional):", { placeholder: "why it should be undone" });
     if (instruction === null) return; // cancelled: record nothing
@@ -1076,6 +1094,7 @@ function finishDialog() {
   body.replaceChildren();
   const counts = el("div", "finish-counts");
   counts.append(el("span", "dec-approve", `✓ ${count("approve")} approved`),
+                el("span", "dec-approve", `✓ ${count("later")} approved with a follow-up`),
                 el("span", "dec-fix", `✎ ${count("fix")} to fix`),
                 el("span", "dec-revert", `↺ ${count("revert")} to revert`),
                 el("span", "dec-skip", `· ${count("skip")} skipped`));
@@ -1120,6 +1139,13 @@ const doFinish = guarded(async () => {
     } else {
       body.appendChild(el("p", "", "Fixes were requested. Copy the fix list into a Claude Code session."));
     }
+  }
+  if (res.later_task) {
+    body.appendChild(el("p", "", `Follow-ups were added to ${res.project}'s queue as “${res.later_task.title}”. ` +
+      "It doesn't hold routines waiting for a clear review."));
+  } else if (res.later_text) {
+    body.appendChild(el("p", "", "Follow-ups for later:"));
+    body.appendChild(el("pre", "small", res.later_text));
   }
   const home = el("button", res.fixes ? "ghost" : "primary", "Back to projects");
   home.onclick = closeModal; // closeModal goes home once finished
@@ -1215,6 +1241,7 @@ function onKey(e) {
   }
   if (!$("#view-health").classList.contains("hidden")) {
     const text = typing && document.activeElement.type !== "checkbox";
+    if ($("#hc-guide").contains(document.activeElement)) return;  // typing to Claude
     if (e.key === "Escape") { if (typing) document.activeElement.blur(); showDebriefView("#view-start"); loadHealth(hc.pid); }
     else if (!text && !e.ctrlKey && !e.metaKey && !e.altKey) hcKey(e);
     return;
@@ -1229,7 +1256,7 @@ function onKey(e) {
   };
   const keys = {
     ArrowDown: () => move(1), j: () => move(1), ArrowUp: () => move(-1), k: () => move(-1),
-    a: () => decide("approve"), f: () => decide("fix"), r: () => decide("revert"), s: () => decide("skip"),
+    a: () => decide("approve"), l: () => decide("later"), f: () => decide("fix"), r: () => decide("revert"), s: () => decide("skip"),
     n: () => addNote(), v: () => setSplit(!state.split), "/": () => $("#ask-input").focus(),
     "?": () => openModal("#modal-help"),
   };
@@ -2259,7 +2286,10 @@ function fdWorkCard(ev) {
   const sg = ev.suggest || {};
   const card = el("div", "rcard");
   card.dataset.req = ev.req_id;
-  card.appendChild(el("div", "ptitle", "✎ New work came up — where should it go?"));
+  card.appendChild(el("div", "ptitle", ev.target ? `✎ Work for the linked project ${ev.target.name}`
+                                                   : "✎ New work came up — where should it go?"));
+  if (ev.target) card.appendChild(el("div", "small", `It goes in ${ev.target.name}'s queues, and the two tasks are ` +
+                                                     "linked. That project's sessions do the work."));
   if (ev.why) card.appendChild(el("div", "muted small", ev.why));
   const field = (label, node) => { card.append(el("label", "small-label", label), node); return node; };
   const title = field("Title", Object.assign(el("input"), { type: "text", value: ev.title || "" }));
@@ -2267,7 +2297,7 @@ function fdWorkCard(ev) {
   // Where: the current task, or a queue.
   const groupByName = (n) => (ev.queues || []).find((q) => q.group_id != null && q.name.toLowerCase() === String(n || "").toLowerCase());
   const where = el("select");
-  if (ev.current_task) where.appendChild(Object.assign(el("option", "", `Add to the current task (“${ev.current_task.title}”)`), { value: "current" }));
+  if (ev.current_task && !ev.target) where.appendChild(Object.assign(el("option", "", `Add to the current task (“${ev.current_task.title}”)`), { value: "current" }));
   where.appendChild(Object.assign(el("option", "", "Make it a new task"), { value: "task" }));
   field("Where", where);
   const queueRow = el("div", "agent-opts two");
@@ -2296,6 +2326,14 @@ function fdWorkCard(ev) {
   where.value = sg.suggest === "current" && ev.current_task ? "current" : "task";
   where.onchange = sync; queue.onchange = sync;
   sync();
+  let wait = null;
+  if (ev.target && ev.current_task) {
+    const lab = el("label", "check small");
+    wait = Object.assign(el("input"), { type: "checkbox", checked: !!ev.wait });
+    lab.append(wait, document.createTextNode(` “${ev.current_task.title}” waits until it's done`));
+    lab.title = "The current task shows that it's waiting, and auto take-off leaves it alone until the other task is done";
+    card.appendChild(lab);
+  }
   if (sg.reasoning) card.appendChild(el("div", "suggest", "Claude suggests: " +
     ({ current: "add it to the current task", main: "a new task in the main queue",
        group: `a new task in the group ${sg.group || ""}`, new_group: `a new group “${sg.new_group || ""}”` }[sg.suggest] || "")
@@ -2307,7 +2345,7 @@ function fdWorkCard(ev) {
       const choice = { title: title.value, details: details.value,
         where: where.value === "current" ? "current" : queue.value === "new" ? "new_group" : "queue",
         group_id: ["main", "new"].includes(queue.value) ? null : Number(queue.value),
-        new_group: gName.value, new_group_priority: gPrio.value, position: pos.value };
+        new_group: gName.value, new_group_priority: gPrio.value, position: pos.value, wait: !!(wait && wait.checked) };
       if (choice.where === "new_group" && !gName.value.trim()) { gName.focus(); return; }
       card.querySelectorAll("button").forEach((b) => (b.disabled = true));
       await api("fd_answer", sid, ev.req_id, "work", choice);
@@ -2868,7 +2906,7 @@ const rrLoad = guarded(async () => {
 function rrShow(pane) {
   rr.pane = pane;
   for (const n of ["intro", "new", "import", "project", "global", "rulesets", "skills", "presets", "templates", "agents",
-                   "health"]) {
+                   "health", "tidy"]) {
     show($(`#rr-pane-${n}`), n === pane);
   }
   document.querySelectorAll(".rr-navbtn").forEach((b) => b.classList.toggle("on", b.dataset.pane === pane));
@@ -3122,6 +3160,21 @@ function rrRenderFolders() {
       skip.title = "Debrief doesn't review or scan this folder.";
       row3.appendChild(skip);
     }
+    if (f.kind === "reference" || f.kind === "workspace") {
+      const wl = el("label", "small fc-skip");
+      const wc = Object.assign(el("input"), { type: "checkbox", checked: !!f.watched });
+      wc.setAttribute("aria-label", `Keep sessions up to date with ${f.label}`);
+      wc.onchange = guarded(() => setOpts({ watch: wc.checked }));
+      wl.append(wc, document.createTextNode(" Keep sessions up to date" + (f.watch_own === null ? " (project default)" : "")));
+      wl.title = "With each message (and after a pause), Claude is told which files changed in this folder. " +
+        "Without a setting of its own, a folder follows the project's switch below.";
+      row3.appendChild(wl);
+      if (f.watch_own !== null) {
+        const d = el("button", "fc-remove", "Use the project's switch");
+        d.onclick = guarded(() => setOpts({ watch: "default" }));
+        row3.appendChild(d);
+      }
+    }
     const nb = el("button", "fc-remove", f.note ? "Note ✓" : "Note…");
     nb.title = f.note ? "For the review agents: " + f.note
       : "Tell the review agents what this folder is, and what in it belongs to this project";
@@ -3305,6 +3358,24 @@ function rrTaskRow(t, i, queue) {
   body.appendChild(tt);
   if (t.details) body.appendChild(el("div", "d", t.details));
   if (t.origin === "standalone" && t.origin_path) body.appendChild(el("div", "origin", "Files: " + t.origin_path));
+  for (const l of t.links || []) {  // tasks in linked projects
+    const waits = l.kind === "waits_on";
+    const open = ["planned", "active"].includes(l.status);
+    const text = waits ? (l.direction === "out" ? (open ? "⏸ Waiting on " : "✓ Was waiting on ") : "⇢ Waited on by ")
+                       : (l.direction === "out" ? "⇢ Opened " : "⇠ Opened from ");
+    const line = el("div", "task-link small" + (waits && l.direction === "out" && open ? " waiting" : ""));
+    const go = el("button", "link", `${l.project} #${l.task_id} “${l.title}”`);
+    go.title = `Open ${l.project} (task is ${l.status})`;
+    go.onclick = guarded(async () => {
+      if (l.project_id == null) return;
+      if (rr.dirty && !(await rrLeave())) return;
+      await rrOpenProject(l.project_id, true);
+      const row = document.querySelector(`#rr-pane-project li.task-row[data-id="${l.task_id}"]`);
+      if (row) { row.scrollIntoView({ block: "center" }); row.classList.add("flash"); }
+    });
+    line.append(document.createTextNode(text), go, el("span", "muted", ` · ${l.status}`));
+    body.appendChild(line);
+  }
   if ((t.handoff || "").trim()) {  // left by the last session that ended on this task
     const h = el("details", "handoff");
     h.appendChild(el("summary", "small", "↪ Note for the next session"));
@@ -3837,6 +3908,270 @@ async function rrAgentsSummary() {
   } catch (_) { /* shown when opened */ }
 }
 
+/* ---- guided conversations with Claude (carrier/guided.py) ----
+ * A side chat: Claude's messages, the items it mentions as links, and proposal cards the
+ * user applies (unticking items) or skips. Used by the health walk-through and task tidying. */
+
+const GUIDE_KIND_LABEL = {
+  task: "One task for these findings", add_to_task: "Add them to a task", accept: "Accept", dismiss: "Dismiss",
+  merge: "Merge tasks", move: "Move to another queue", order: "Re-order a queue", split: "Split a task",
+  edit: "Reword a task", drop: "Drop tasks",
+};
+const REF_RE = /\b(F\d+)\b|(#\d+)\b/g;
+
+function guideChat(root, opts) {
+  // opts: { kind, pid, title, label(ref) → {text, title}|null, show(ref), applied() }
+  const g = { ...opts, turns: [], busy: false };
+  root.replaceChildren();
+  const head = el("div", "guide-head");
+  const reset = el("button", "ghost small-btn", "Start over");
+  reset.title = "Forget this conversation and start again";
+  head.append(el("b", "", opts.title), reset);
+  const log = el("div", "guide-log");
+  log.setAttribute("aria-live", "polite");
+  const form = el("div", "guide-form");
+  const input = el("textarea");
+  input.rows = 2;
+  input.placeholder = "Reply to Claude… (Ctrl+Enter to send)";
+  input.setAttribute("aria-label", "Your message to Claude");
+  const send = el("button", "primary", "Send");
+  form.append(input, send);
+  const status = el("div", "muted small guide-status");
+  root.append(head, log, status, form);
+
+  const refButton = (ref) => {
+    const lab = g.label(ref);
+    if (!lab) return document.createTextNode(ref);
+    const b = el("button", "guide-ref", ref);
+    b.title = lab.title || lab.text;
+    b.onclick = () => g.show(ref);
+    return b;
+  };
+  // Item ids in Claude's text become links: walk the rendered text, never parse it as HTML.
+  const linkRefs = (node) => {
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+    const texts = [];
+    while (walker.nextNode()) texts.push(walker.currentNode);
+    for (const t of texts) {
+      if (t.parentNode && t.parentNode.closest && t.parentNode.closest("code, pre, button")) continue;
+      const parts = t.nodeValue.split(REF_RE).filter((x) => x !== undefined);
+      if (parts.length < 2) continue;
+      const frag = document.createDocumentFragment();
+      for (const part of parts) {
+        frag.appendChild(/^(F\d+|#\d+)$/.test(part) ? refButton(part) : document.createTextNode(part));
+      }
+      t.parentNode.replaceChild(frag, t);
+    }
+  };
+
+  const proposalCard = (p) => {
+    const card = el("div", `guide-prop ${p.status}`);
+    card.appendChild(el("div", "guide-prop-kind", GUIDE_KIND_LABEL[p.kind] || p.kind));
+    const d = p.data;
+    const fields = {};
+    const ticks = new Map();
+    const text = (key, label, rows) => {
+      if (!(key in d) || (p.status !== "open" && !d[key])) return;
+      if (p.status !== "open") { card.appendChild(el("p", "small", `${label}: ${d[key]}`)); return; }
+      const lab = el("label", "field small", label);
+      const box = rows > 1 ? el("textarea") : el("input");
+      if (rows > 1) box.rows = rows; else box.type = "text";
+      box.value = d[key] || "";
+      lab.appendChild(box);
+      fields[key] = box;
+      card.appendChild(lab);
+    };
+    const refOf = (id) => (g.kind === "health" ? `F${id}` : `#${id}`);
+    if (p.kind === "merge") card.appendChild(el("p", "small")).append("Keep ", refButton(`#${d.into}`),
+                                                                       ` “${d.into_title || ""}”, merge into it:`);
+    if (p.kind === "add_to_task") card.appendChild(el("p", "small")).append("Into ", refButton(`#${d.task}`),
+                                                                             ` “${d.task_title || ""}”:`);
+    if (p.kind === "split") card.appendChild(el("p", "small")).append("Split ", refButton(`#${d.id}`));
+    if (p.kind === "edit") card.appendChild(el("p", "small")).append("Reword ", refButton(`#${d.id}`));
+    if (p.kind === "move") card.appendChild(el("p", "small", `To: ${d.queue.replace(/^new:/i, "a new queue: ")}` +
+                                                  (/^new:/i.test(d.queue) ? ` (priority ${d.priority || "normal"})` : "")));
+    if (p.kind === "task" && d.project) card.appendChild(el("p", "small", `In the linked project ${d.project.name}`));
+    if (p.kind === "order") card.appendChild(el("p", "small", `Queue: ${d.queue}, in this order:`));
+    if (Array.isArray(d.ids)) {
+      const list = el("ul", "guide-ids");
+      for (const id of d.ids) {
+        const li = el("li");
+        const ref = refOf(id);
+        const lab = g.label(ref);
+        if (p.status === "open" && p.kind !== "order") {
+          const cb = Object.assign(el("input"), { type: "checkbox", checked: true });
+          cb.setAttribute("aria-label", `Include ${ref}`);
+          ticks.set(id, cb);
+          li.appendChild(cb);
+        }
+        li.append(refButton(ref), document.createTextNode(" " + (lab ? lab.text : "")));
+        list.appendChild(li);
+      }
+      card.appendChild(list);
+    }
+    text("title", p.kind === "add_to_task" ? "What's added" : p.kind === "split" ? "New task" : "Title", 1);
+    text("details", "Details", 3);
+    text("keep", `What stays in #${d.id}`, 3);
+    if (d.why) card.appendChild(el("p", "muted small", "Why: " + d.why));
+    if (p.status === "open") {
+      const row = el("div", "guide-prop-actions");
+      const ok = el("button", "primary small-btn", "Apply");
+      const no = el("button", "ghost small-btn", "Skip");
+      ok.onclick = guarded(async () => {
+        const edits = {};
+        if (ticks.size) edits.ids = [...ticks].filter(([, cb]) => cb.checked).map(([id]) => id);
+        for (const [k, box] of Object.entries(fields)) edits[k] = box.value;
+        ok.disabled = no.disabled = true;
+        try {
+          const r = await api("guide_apply", g.kind, g.pid, p.id, edits);
+          Object.assign(p, r);
+          g.applied && g.applied(p);
+        } finally {
+          ok.disabled = no.disabled = false;
+          await reload();  // the server's view: open (nothing changed), applied or failed
+        }
+      });
+      no.onclick = guarded(async () => { Object.assign(p, await api("guide_skip", g.kind, g.pid, p.id)); render(); });
+      row.append(ok, no);
+      card.appendChild(row);
+    } else {
+      card.appendChild(el("p", "small guide-prop-result",
+        (p.status === "applied" ? "✓ " : p.status === "skipped" ? "Skipped" : "✕ ") + (p.result || "")));
+    }
+    return card;
+  };
+
+  const render = () => {
+    log.replaceChildren();
+    for (const t of g.turns) {
+      const m = el("div", `guide-msg ${t.role}`);
+      if (t.role === "claude") { setMd(m, t.text); linkRefs(m); } else m.textContent = t.text;
+      log.appendChild(m);
+      for (const p of t.proposals || []) log.appendChild(proposalCard(p));
+    }
+    status.textContent = g.busy ? "Claude is thinking…" : "";
+    send.disabled = input.disabled = g.busy;
+    log.scrollTop = log.scrollHeight;
+  };
+
+  const reload = async () => {
+    try { g.turns = (await api("guide_open", g.kind, g.pid)).turns; } catch (_) { /* keep what's shown */ }
+    render();
+  };
+  const say = guarded(async (text) => {
+    if (g.busy) return;
+    g.busy = true;
+    if (text) g.turns.push({ role: "user", text, proposals: [] });
+    render();
+    try {
+      const turn = await api("guide_say", g.kind, g.pid, text);
+      g.turns.push(turn);
+      if (turn.show && turn.show.length) g.show(turn.show[0], turn.show);
+    } catch (e) {
+      await reload();
+      throw e;
+    } finally { g.busy = false; render(); }
+  });
+  send.onclick = () => { const t = input.value.trim(); if (!t) return; input.value = ""; say(t); };
+  input.onkeydown = (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send.click(); } };
+  reset.onclick = guarded(async () => {
+    if (!(await confirmDialog("Start over", "Forget this conversation? Decisions already applied stay.", "Start over"))) return;
+    const v = await api("guide_reset", g.kind, g.pid);
+    g.turns = v.turns;
+    render();
+    say("");
+  });
+  (async () => {
+    try {
+      const v = await api("guide_open", g.kind, g.pid);
+      g.turns = v.turns;
+      render();
+      if (!g.turns.length) say("");
+    } catch (e) { banner(e.message, "error"); }
+  })();
+  return g;
+}
+
+/* The health walk-through, beside the report. */
+function hcLabel(ref) {
+  if (ref.startsWith("F")) {
+    const f = hcAllFindings().find((x) => `F${x.id}` === ref);
+    return f ? { text: f.title, title: `${f.title} — ${f.file || "whole project"}${f.line ? ":" + f.line : ""}` } : null;
+  }
+  return { text: "", title: "A task in the Ready Room" };
+}
+
+function hcAllFindings() {
+  return hc.view ? hc.view.themes.flatMap((t) => t.findings.map((f) => ({ ...f, theme: t.theme }))) : [];
+}
+
+function openHealthGuide() {
+  const box = $("#hc-guide");
+  show(box);
+  hc.guide = guideChat(box, {
+    kind: "health", pid: hc.pid, title: "Walk-through with Claude", label: hcLabel,
+    show: (ref) => {
+      if (!ref.startsWith("F")) return;
+      const id = Number(ref.slice(1));
+      const f = hcAllFindings().find((x) => x.id === id);
+      if (!f) return;
+      if (!(f.status === "open" || f.status === "tasked") && !hc.showQuiet) {
+        hc.showQuiet = true;
+        $("#hc-show-quiet").checked = true;
+        renderHealthView();
+      }
+      openFinding(id);
+    },
+    applied: async () => { hc.view = { ...hc.view, ...(await api("hc_view", hc.pid)) }; renderHealthView(); },
+  });
+}
+
+/* Tidying a project's tasks, in the Ready Room. */
+function tidyRender() {
+  const box = $("#tidy-queues");
+  box.replaceChildren();
+  const p = rr.proj;
+  const queues = [[null, "Main queue"], ...(p.groups || []).map((x) => [x.id, x.name])];
+  for (const [gid, name] of queues) {
+    const tasks = p.tasks.filter((t) => (t.group_id ?? null) === gid);
+    box.appendChild(el("h4", "", `${name} (${tasks.length})`));
+    const ol = el("ol", "tidy-list");
+    for (const t of tasks) {
+      const li = el("li", "", "");
+      li.id = `tidy-${t.id}`;
+      li.append(el("span", "muted small", `#${t.id} `), el("span", "", t.title));
+      if (t.details) li.title = t.details;
+      ol.appendChild(li);
+    }
+    box.appendChild(ol);
+  }
+}
+
+async function rrOpenTidy() {
+  const pid = rr.pid;
+  rrShow("tidy");
+  rr.pid = pid;
+  $("#tidy-title").textContent = `Tidy tasks with Claude — ${rr.proj.name}`;
+  tidyRender();
+  rr.tidy = guideChat($("#tidy-guide"), {
+    kind: "tasks", pid, title: "Claude",
+    label: (ref) => {
+      const t = rr.proj.tasks.find((x) => `#${x.id}` === ref);
+      return t ? { text: t.title, title: t.details || t.title } : { text: "(closed)", title: "No longer open" };
+    },
+    show: (ref, all) => {
+      document.querySelectorAll("#tidy-queues li.hl").forEach((li) => li.classList.remove("hl"));
+      for (const r of all || [ref]) {
+        const li = $(`#tidy-${String(r).replace("#", "")}`);
+        if (li) li.classList.add("hl");
+      }
+      const first = $(`#tidy-${String(ref).replace("#", "")}`);
+      if (first) first.scrollIntoView({ block: "nearest" });
+    },
+    applied: async () => { rr.proj = await api("rr_project", pid); tidyRender(); rrLoad(); },
+  });
+}
+
 /* ---- health checks (debrief/health.py), for every project or one project ---- */
 
 rr.healthScope = null;  // null = every project; a project id = that project's
@@ -4156,6 +4491,11 @@ function rrBindAgentsAndDrafts() {
   $("#rra-back").onclick = guarded(async () => { await rrOpenProject(rr.agentScope, true); });
   $("#rra-new").onclick = () => { rr.edit.agents = "new"; rrRenderAgents(); $("#rra-title-in").focus(); };
   $("#rrh-new").onclick = () => { rr.edit.health = "new"; rrRenderHealth(); $("#rrh-title-in").focus(); };
+  $("#rrp-tidy-btn").onclick = guarded(async () => {
+    if (rr.dirty && !(await rrLeave())) return;
+    await rrOpenTidy();
+  });
+  $("#tidy-back").onclick = guarded(async () => { await rrOpenProject(rr.pid ?? rr.tidy?.pid, true); });
   $("#rrh-save").onclick = rrSaveHealth;
   $("#rrh-delete").onclick = rrDeleteHealth;
   $("#rrh-mode").onchange = () => show($("#rrh-budget-row"), $("#rrh-mode").value === "files");
@@ -4897,6 +5237,11 @@ async function init() {
     if (rr.pid === pid) await rrOpenHealth(pid);
   });
   $("#hc-back").onclick = () => { showDebriefView("#view-start"); loadHealth(hc.pid); };
+  $("#hc-guide-btn").onclick = () => {
+    const box = $("#hc-guide");
+    if (!box.classList.contains("hidden") && hc.guide && hc.guide.pid === hc.pid) { show(box, false); return; }
+    openHealthGuide();
+  };
   $("#hc-show-quiet").onchange = (e) => { hc.showQuiet = e.target.checked; renderHealthView(); };
   $("#hc-more").onclick = guarded(async () => {
     hc.around = Math.min(192, hc.around * 3);

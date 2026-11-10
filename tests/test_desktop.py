@@ -41,6 +41,17 @@ def handler(system: str, prompt: str) -> str:
                                          "detail": EVIL, "suggestion": "Check the path first.", "severity": "high"}]})
     if prompt.startswith("# Health check:"):
         return json.dumps({"findings": []})
+    if "tidy its task queues" in system:
+        import re
+        ids = re.findall(r"- (#\d+) ", prompt)
+        return json.dumps({"message": f"{ids[0]} looks stale.", "show": ids[:1],
+                           "proposals": [{"kind": "drop", "ids": ids[:1], "why": "stale"}]})
+    if "findings of Debrief's" in system:  # the walk-through
+        import re
+        ids = re.findall(r"- (F\d+) ", prompt)
+        return json.dumps({"message": f"One group: {ids[0]} is real. <img src=x onerror=\"window.__pwned=1\">",
+                           "show": ids[:1], "proposals": [{"kind": "task", "ids": ids, "title": "Check paths",
+                                                           "details": "Validate the path."}]})
     return scripted_handler(system, prompt)
 
 
@@ -324,8 +335,17 @@ def test_health_check_panel(page):
     assert "save.py:1" in page.inner_text("#hc-where")
     assert page.evaluate("window.__pwned") is None  # model output is text, never HTML
     page.screenshot(path="/tmp/carrier-shots/health-report.png")
-    page.keyboard.press("t")  # make a task
+    # Walk through with Claude: its message links the finding, and a proposal card applies it.
+    page.click("#hc-guide-btn")
+    page.wait_for_selector("#hc-guide .guide-msg.claude >> text=One group")
+    assert page.evaluate("window.__pwned") is None
+    page.wait_for_selector("#hc-guide .guide-prop >> text=One task for these findings")
+    page.fill("#hc-guide .guide-prop input[type=text]", "Check user paths")
+    page.click("#hc-guide .guide-prop button:has-text('Apply')")
+    page.wait_for_selector("#hc-guide .guide-prop.applied >> text=finding(s) → task #")
     page.wait_for_selector("#hc-state >> text=task made")
+    page.click("#hc-guide-btn")  # hide it again
+    page.keyboard.press("o")  # nothing to reopen: no change
     page.keyboard.press("d")  # dismiss: hidden from the list
     page.wait_for_selector("#hc-list >> text=No open findings.")
     page.check("#hc-show-quiet")
@@ -349,3 +369,15 @@ def test_health_check_panel(page):
     page.click("#rrh-back")
     page.wait_for_selector("#rrp-health-summary >> text=12 of 12 built-in checks on")
     page.wait_for_selector("#rrp-health-summary >> text=1 for this project only")
+    # Tidy tasks with Claude: the task it talks about is highlighted; dropping keeps it in the history.
+    page.click("#rrp-tidy-btn")
+    page.wait_for_selector("#rr-pane-tidy:not(.hidden)")
+    page.wait_for_selector("#tidy-guide .guide-msg.claude >> text=looks stale")
+    page.wait_for_selector("#tidy-queues li.hl")
+    n = page.locator("#tidy-queues li").count()
+    page.click("#tidy-guide .guide-prop button:has-text('Apply')")
+    page.wait_for_selector("#tidy-guide .guide-prop.applied >> text=Dropped 1 task")
+    page.wait_for_function(f"document.querySelectorAll('#tidy-queues li').length === {n - 1}")
+    page.screenshot(path="/tmp/carrier-shots/tidy.png", full_page=True)
+    page.click("#tidy-back")
+    page.wait_for_selector("#rr-pane-project:not(.hidden)")

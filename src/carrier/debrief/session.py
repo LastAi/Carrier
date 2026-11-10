@@ -41,7 +41,7 @@ from carrier.debrief.models import ChangeItem, ChatTurn, Decision, Review, Selec
 from carrier.core.notes import Note, append_review_note, collect_notes
 from carrier.debrief.pipeline import NothingToReview, prepare
 from carrier.debrief.projects import ProjectSpec, review_matches
-from carrier.debrief.record import finish, render_fixes
+from carrier.debrief.record import finish, render_fixes, render_later
 from carrier.debrief.sidebyside import item_rows, selection_from_rows
 from carrier.debrief.store import is_stale, open_review, save_review, supersede
 
@@ -432,10 +432,12 @@ class ReviewSession:
     # -- decisions -----------------------------------------------------------
 
     def decide(self, item_id: str, action: str, instruction: str = "") -> dict[str, Any]:
-        if action not in ("approve", "fix", "revert", "skip", "clear"):
+        if action not in ("approve", "later", "fix", "revert", "skip", "clear"):
             raise SessionError(f"Unknown action: {action}")
         if action == "fix" and not instruction.strip():
             raise SessionError("Say what should change, so Claude Code knows what to fix.")
+        if action == "later" and not instruction.strip():
+            raise SessionError("Say what to follow up on later.")
         it = self._item(item_id)
         with self._lock:
             self._need_open_review()  # checked under the lock: finish() can't slip in between
@@ -476,8 +478,16 @@ class ReviewSession:
             n = sum(1 for i in r.items if i.decision and i.decision.action in ("fix", "revert"))
             fix_task = self.project.add_fix_task(f"Fix review findings ({n}) — review {r.id}",
                                                  render_fixes(r) or "", r.id)
+        later_task = None
+        later = render_later(r)
+        if later and self.project is not None and self.project.add_task is not None:
+            # Approved now, improved later: an ordinary task at the end of the queue (no review hold).
+            n = sum(1 for i in r.items if i.decision and i.decision.action == "later")
+            later_task = self.project.add_task(f"Review follow-ups ({n}) — review {r.id}", later)
         return {
             "fix_task": fix_task,
+            "later_task": later_task,
+            "later_text": later if self.project is None or self.project.add_task is None else None,
             "project": self.project.name if self.project else None,
             "record": str(result.record),
             "fixes": str(result.fixes) if result.fixes else None,
@@ -485,7 +495,7 @@ class ReviewSession:
             "checkpoint_moved": result.checkpoint_moved,
             "message": result.message,
             "counts": {a: sum(1 for i in r.items if i.decision and i.decision.action == a)
-                       for a in ("approve", "fix", "revert", "skip")},
+                       for a in ("approve", "later", "fix", "revert", "skip")},
             "undecided": len(r.items) - r.decided_count,
         }
 

@@ -174,6 +174,11 @@ def cmd_start(args: argparse.Namespace) -> int:
              "Hand it to Claude Code with:  debrief fixes --run")
     else:
         _say("No fixes requested.")
+    from carrier.debrief.record import render_later
+
+    later = render_later(review)
+    if later:
+        _say("Approved with follow-ups for later (add them to your task list):\n" + later)
     return 0
 
 

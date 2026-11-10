@@ -62,6 +62,8 @@ Carrier gives you tools (mcp__carrier__*):
 - list_tasks / propose_work: when work comes up that this task didn't ask
   for, don't just do it or drop it — ask with propose_work where it belongs
   (the current task, or a queue), with a suggestion based on list_tasks.
+  Work for a LINKED project (see Linked projects): propose_work with
+  project = its name; list_tasks with project shows its queues.
 - propose_task_change: when this task needs work planned in another task,
   or part of it belongs elsewhere, so the tasks match what is really done.
 - show_image: show the user a screenshot or picture you made.
@@ -119,8 +121,9 @@ TOOLS: dict[str, tuple[str, dict[str, Any]]] = {
     "list_tasks": (
         "Read this project's work: the main queue and each task group (priority, tags, tasks in order, with "
         "ids), the routines (trigger, group, review gate), and which task this session is on. Read it before "
-        "suggesting where new work belongs.",
-        {"type": "object", "properties": {}}),
+        "suggesting where new work belongs. With project: a LINKED project's queues instead (read only).",
+        {"type": "object", "properties": {
+            "project": {**_S, "description": "A linked project's name, to see its queues (optional)."}}}),
     "propose_work": (
         "New work came up that the current task didn't ask for. Ask the user where it belongs, with your "
         "suggestion: add it to the current task, or a new task in the main queue, an existing task group, or a "
@@ -131,6 +134,10 @@ TOOLS: dict[str, tuple[str, dict[str, Any]]] = {
             "title": {**_S, "description": "Short title for the work."},
             "details": {**_S, "description": "What to do and what 'done' means."},
             "why": {**_S, "description": "How it came up."},
+            "project": {**_S, "description": "For work a LINKED project should do: its name (then suggest is main, "
+                                             "group or new_group in THAT project's queues). Omit for this project."},
+            "wait": {"type": "boolean", "description": "With project: this session's task can't be finished until "
+                                                       "that work is done (it waits on it)."},
             "suggest": {**_S, "enum": ["current", "main", "group", "new_group"],
                         "description": "Where you think it belongs."},
             "group": {**_S, "description": "For suggest=group: the group's name."},

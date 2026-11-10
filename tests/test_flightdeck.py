@@ -690,6 +690,57 @@ def test_claude_asks_where_new_work_goes(deck: FlightDeck, projects):
     assert any(e["text"] == "Not added." for e in events(deck, s["id"], "proposal_done"))
 
 
+def test_work_for_a_linked_project(deck: FlightDeck, projects):
+    """A session proposes work for a linked project: it goes in that project's queue, the tasks are linked
+    both ways, and the session's task can wait on it."""
+    import asyncio
+
+    room = deck.room
+    lib, app = projects["DocsSite"], projects["ApiServer"]
+    room.add_task(lib, "Change the file format")
+    s = deck.start_task(room.current_task(lib)["id"], mode="acceptEdits", send_task=False)
+    runner = deck.runners[s["id"]]
+    out = deck._run(runner._call_tool("propose_work", {"title": "x", "details": "y", "suggest": "main",
+                                                        "project": "ApiServer"}), timeout=10)
+    assert "isn't linked" in out  # not linked yet: refused, with how to fix it
+    room.add_link(lib, app, "ApiServer reads files in DocsSite's format", ["format/**"], ["src/reader/**"])
+    prompt = ALL_CLIENTS[-1].options.system_prompt["append"]
+    assert "## Linked projects" not in prompt  # context is built at start; a new session sees it
+    s2_ctx = __import__("carrier.readyroom.context", fromlist=["build"]).build(
+        deck.store, lib, deck.store.task(s["task_id"]))
+    assert "## Linked projects" in s2_ctx and "ApiServer" in s2_ctx and "src/reader/**" in s2_ctx
+    listing = deck._run(runner._call_tool("list_tasks", {"project": "ApiServer"}), timeout=10)
+    assert "linked project ApiServer" in listing
+
+    fut = asyncio.run_coroutine_threadsafe(runner._call_tool("propose_work", {
+        "title": "Read format v2", "details": "Support the new field", "suggest": "main", "project": "ApiServer",
+        "wait": True}), deck._loop)
+    wait(deck, s["id"], "needs_you")
+    card = events(deck, s["id"], "work_proposal")[-1]
+    assert card["target"]["name"] == "ApiServer" and card["wait"] is True
+    deck.answer(s["id"], card["req_id"], "work", {"title": "Read format v2", "details": "Support the new field",
+                                                   "where": "queue", "group_id": None, "position": "end",
+                                                   "wait": True})
+    out = fut.result(timeout=10)
+    assert "Added to ApiServer" in out and "waits on it" in out
+    new = [t for t in deck.store.tasks(app) if t["title"] == "Read format v2"][0]
+    hist = room.task_history(new["id"])
+    assert hist[0]["by"] == "claude" and "Proposed by a session of DocsSite" in hist[0]["note"]
+    mine = {(l["kind"], l["direction"]) for l in deck.store.task_links(s["task_id"])}
+    assert mine == {("opened", "out"), ("waits_on", "out")}
+    theirs = room.project(app)["tasks"]
+    assert any(l["direction"] == "in" and l["project"] == "DocsSite" for t in theirs for l in t["links"])
+    ctx = __import__("carrier.readyroom.context", fromlist=["build"]).build(deck.store, app, new)
+    assert "Opened by the work on DocsSite" in ctx
+    # The waiting task: auto take-off leaves it; done over there → noted here.
+    deck.end_session(s["id"])
+    with pytest.raises(DeckError, match="waits on ApiServer"):
+        deck.start_task(s["task_id"], send_task=False, auto=True)
+    room.finish_task(new["id"], "done")
+    assert room.waiting_on(s["task_id"]) == []
+    assert room.task_history(s["task_id"])[-1]["kind"] == "unblocked"
+
+
 def test_editing_a_running_task_tells_the_session(deck: FlightDeck, projects):
     room = deck.room
     pid = projects["DocsSite"]

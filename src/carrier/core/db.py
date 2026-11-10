@@ -244,6 +244,15 @@ CREATE TABLE IF NOT EXISTS usage_entries (    -- one row per Claude reply: token
     cache_read  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS usage_by_ts ON usage_entries(ts);
+CREATE TABLE IF NOT EXISTS task_links (        -- tasks that belong together across projects
+    id          INTEGER PRIMARY KEY,
+    from_task   INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    to_task     INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL,                    -- opened (from_task's work opened to_task) | waits_on
+    created     REAL NOT NULL,
+    session_id  INTEGER,
+    UNIQUE (from_task, to_task, kind)
+);
 CREATE TABLE IF NOT EXISTS health_runs (       -- Debrief health checks: one row per agent per run
     id          INTEGER PRIMARY KEY,
     project_id  INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -832,6 +841,21 @@ class Store:
 
     def remove_link(self, lid: int) -> None:
         self._x("DELETE FROM links WHERE id=?", (lid,))
+
+    def add_task_link(self, from_task: int, to_task: int, kind: str, session_id: int | None = None) -> None:
+        self._x("INSERT OR IGNORE INTO task_links(from_task, to_task, kind, created, session_id) VALUES (?,?,?,?,?)",
+                (from_task, to_task, kind, time.time(), session_id))
+
+    def task_links(self, tid: int) -> list[dict[str, Any]]:
+        """Links from and to a task, each with the other task's title, status and project."""
+        rows = self._q(
+            "SELECT l.*, t.id AS other_id, t.title AS other_title, t.status AS other_status, "
+            "t.project_id AS other_project, p.name AS other_project_name, "
+            "CASE WHEN l.from_task=? THEN 'out' ELSE 'in' END AS direction "
+            "FROM task_links l JOIN tasks t ON t.id = CASE WHEN l.from_task=? THEN l.to_task ELSE l.from_task END "
+            "LEFT JOIN projects p ON p.id = t.project_id WHERE l.from_task=? OR l.to_task=? ORDER BY l.created",
+            (tid, tid, tid, tid))
+        return rows
 
     def links(self, project_id: int | None = None) -> list[dict[str, Any]]:
         rows = (self._q("SELECT * FROM links WHERE project_a=? OR project_b=?", (project_id, project_id))

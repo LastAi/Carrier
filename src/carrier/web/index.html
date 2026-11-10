@@ -267,7 +267,8 @@
         <label class="check small"><input type="checkbox" id="rrp-watch"> Keep sessions up to date with the reference
           folders</label>
         <span class="muted small">With each message (and after a pause), Claude is told which files changed in this
-          project's reference and workspace folders — for projects that build on another project's formats.</span>
+          project's reference and workspace folders — for projects that build on another project's formats. This is
+          the default; each folder's card can turn it on or off for that folder.</span>
       </div>
       <div class="rr-sub images-row">
         <label class="check small"><input type="checkbox" id="rrp-images"> Allow images in this project's sessions</label>
@@ -315,7 +316,8 @@
       </div>
 
       <div class="card">
-        <div class="card-head"><h3>Tasks</h3><button class="ghost small-btn draft-btn" data-draft="task" data-target="#rrp-task-details" title="Describe the work; Claude writes the task for you to edit and add">✨ Draft with Claude…</button></div>
+        <div class="card-head"><h3>Tasks</h3><button class="ghost small-btn draft-btn" data-draft="task" data-target="#rrp-task-details" title="Describe the work; Claude writes the task for you to edit and add">✨ Draft with Claude…</button>
+          <button id="rrp-tidy-btn" class="ghost small-btn" title="Talk it through with Claude: merge overlapping tasks, re-order, move between queues, split or drop tasks. Every change waits for your OK.">💬 Tidy tasks with Claude…</button></div>
         <p class="muted small">The first task is the <b>current task</b> — what Flight Deck works on next.</p>
         <ol id="rrp-tasks" class="task-list"></ol>
         <div id="rrp-groups" class="task-groups"></div>
@@ -550,6 +552,17 @@
         </div>
       </div>
     </div>
+    <div id="rr-pane-tidy" class="rr-pane hidden">
+      <div class="rr-head"><h2 id="tidy-title">Tidy tasks with Claude</h2>
+        <button id="tidy-back" class="ghost">◂ Back to the project</button></div>
+      <p class="muted">Talk it through: Claude suggests merging overlapping tasks, re-ordering, moving tasks between
+        queues, splitting big ones and dropping stale ones. Each change is a card — apply it (untick what you want to
+        keep out) or skip it. Merged and dropped tasks stay in the history.</p>
+      <div class="tidy-split">
+        <div id="tidy-queues" class="tidy-queues"></div>
+        <div id="tidy-guide" class="guide"></div>
+      </div>
+    </div>
     <div id="rr-pane-agents" class="rr-pane hidden">
       <div class="rr-head"><h2 id="rra-title">Review agents</h2>
         <button id="rra-back" class="ghost hidden">◂ Back to the project</button></div>
@@ -601,6 +614,7 @@
       <span id="hc-side-title">Health report</span>
       <span class="muted small">↑/↓ or j/k</span>
     </div>
+    <button id="hc-guide-btn" class="ghost hc-guide-btn" title="Go through the findings with Claude: it groups them, shows each one it talks about, and proposes what to do — one task for several findings, accept, dismiss. Nothing changes without your OK.">💬 Walk through with Claude</button>
     <label class="check small hc-quiet"><input type="checkbox" id="hc-show-quiet"> Show accepted, dismissed and not found again</label>
     <ol id="hc-list" role="listbox" aria-label="Health findings"></ol>
   </aside>
@@ -619,6 +633,7 @@
     <div id="hc-composer">
       <div class="decide-row">
         <button id="hc-task" class="decide fix" title="Add it to the project's task queue in the Ready Room">✎ Make a task <kbd>t</kbd></button>
+        <select id="hc-task-target" class="hidden" title="Which project's queue the task goes in: this one, or a linked project when the problem is theirs" aria-label="Make the task in"></select>
         <button id="hc-accept" class="decide approve" title="Keep it as it is: stays in the report but isn't counted, even when found again">✓ Accept <kbd>a</kbd></button>
         <button id="hc-dismiss" class="decide skip" title="Not a real problem: hidden, even when found again">✕ Dismiss <kbd>d</kbd></button>
         <button id="hc-reopen" class="decide note" title="Count it as an open finding again">↺ Reopen <kbd>o</kbd></button>
@@ -626,6 +641,7 @@
       </div>
     </div>
   </section>
+  <aside id="hc-guide" class="guide hidden" aria-label="Walk-through with Claude"></aside>
 </main>
 
 <main id="view-flightdeck" class="view hidden">
@@ -822,6 +838,7 @@
       </div>
       <div class="decide-row">
         <button data-action="approve" class="decide approve">✓ Approve <kbd>a</kbd></button>
+        <button data-action="later" class="decide approve" title="Approve it (the review can clear and routines can go on) and note something to improve later: it becomes an ordinary task, which doesn't hold routines">✓ Approve, follow up later… <kbd>l</kbd></button>
         <button data-action="fix" class="decide fix">✎ Needs fix… <kbd>f</kbd></button>
         <button data-action="revert" class="decide revert">↺ Revert… <kbd>r</kbd></button>
         <button data-action="skip" class="decide skip">· Skip <kbd>s</kbd></button>
@@ -1138,6 +1155,7 @@
   <table class="keys">
     <tr><td><kbd>↑</kbd> <kbd>↓</kbd> / <kbd>k</kbd> <kbd>j</kbd></td><td>previous / next change</td></tr>
     <tr><td><kbd>a</kbd></td><td>approve</td></tr>
+    <tr><td><kbd>l</kbd></td><td>approve, and note a follow-up for later (an ordinary task that doesn't hold routines)</td></tr>
     <tr><td><kbd>f</kbd></td><td>needs fix (describe what should change)</td></tr>
     <tr><td><kbd>r</kbd></td><td>revert</td></tr>
     <tr><td><kbd>s</kbd></td><td>skip</td></tr>

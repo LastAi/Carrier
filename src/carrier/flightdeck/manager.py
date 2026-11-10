@@ -524,6 +524,12 @@ class FlightDeck:
             routines.check_gate(self.store, task)  # e.g. "push" only once everything is reviewed
         except routines.RoutineError as exc:
             raise DeckError(str(exc)) from exc
+        waits = [l for l in self.store.task_links(task_id) if l["kind"] == "waits_on" and l["direction"] == "out"
+                 and l["other_status"] in ("planned", "active")]
+        if waits and auto:  # started on its own: leave it until what it waits on is done
+            w = waits[0]
+            raise DeckError(f"This task waits on {w['other_project_name'] or 'standalone'} #{w['other_id']} "
+                            f"“{w['other_title']}”, which isn't done yet.")
         for other in self.store.sessions(active_only=True):
             if other.get("task_id") == task_id:  # finish what's on the plate first
                 raise DeckError(f"This task already has a session ({other['status'].replace('_', ' ')}). "
@@ -585,6 +591,10 @@ class FlightDeck:
         self.emit(sid, {"type": "notice", "kind": "start",
                         "text": f"Session started in {cwd}" + (f" (own copy on branch {branch})" if branch else "")
                                 + (f" with preset “{preset['name']}”" if preset else "")})
+        for w in waits:  # started by hand: say what it waits on
+            self.emit(sid, {"type": "notice", "kind": "waiting",
+                            "text": f"This task waits on {w['other_project_name'] or 'standalone'} #{w['other_id']} "
+                                    f"“{w['other_title']}”, which isn't done yet."})
         try:
             self._run(runner.start())
         except Exception as exc:
@@ -724,13 +734,14 @@ class FlightDeck:
         if project:
             # A session in its own copy works there, not in the main folder: skip the main folder.
             roots += [r for label, r in self.store.project_roots(project) if not (row.get("worktree") and label == "")]
-            if self.room.watch_refs(project["id"]):
-                roots += self._ref_roots(project)
+            roots += self._ref_roots(project)
         return list(dict.fromkeys(roots))
 
     def _ref_roots(self, project: dict[str, Any]) -> list[str]:
+        """The reference and workspace folders this project's sessions hear about (each folder's
+        own setting, or the project's switch)."""
         work = {os.path.normcase(r) for _, r in self.store.project_roots(project)}
-        return [r for _, r in self.store.project_roots(project, include_reference=True) if os.path.normcase(r) not in work]
+        return [r for r in self.room.watched_refs(project["id"]) if os.path.normcase(r) not in work]
 
     def _snapshot_for_wake(self, sid: int, scans: dict[tuple[str, ...], bytes] | None = None) -> None:
         row = self.store.session(sid)
@@ -869,7 +880,7 @@ class FlightDeck:
         since the last message (any source) for Claude. Runs off the event loop."""
         row = self.store.session(sid)
         project = self.store.project(row["project_id"]) if row and row["project_id"] is not None else None
-        if project is None or not self.room.watch_refs(project["id"]):
+        if project is None:
             return
         roots = self._ref_roots(project)
         if not roots:
@@ -899,7 +910,7 @@ class FlightDeck:
                 continue
             row = runner.row
             project = self.store.project(row["project_id"]) if row["project_id"] is not None else None
-            if project is None or not self.room.watch_refs(project["id"]):
+            if project is None:
                 continue
             roots = self._ref_roots(project)
             if any(p == os.path.normcase(r) or p.startswith(os.path.normcase(r).rstrip(os.sep) + os.sep) for r in roots):

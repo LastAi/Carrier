@@ -85,6 +85,7 @@ class DesktopApi:
         self._hc_cancel: threading.Event | None = None  # set while a health check runs
         self._hc_lock = threading.Lock()
         self._hc_pid: int | None = None
+        self._guides: dict[tuple[str, int], Any] = {}  # guided conversations by (kind, project)
         self._backend_factory = backend_factory
         self._pick_folder = pick_folder
         self._pick_file: Callable[[str, str], str | None] | None = None
@@ -245,12 +246,18 @@ class DesktopApi:
         return True
 
     @_guard
-    def hc_act(self, pid: int, fid: int, action: str) -> dict[str, Any]:
-        """Accept, dismiss, reopen a finding, or make a task of it (added to the project's queue)."""
+    def hc_act(self, pid: int, fid: int, action: str, target: int | None = None) -> dict[str, Any]:
+        """Accept, dismiss, reopen a finding, or make a task of it — in this project's queue, or in a
+        linked project's (``target``) when the problem is theirs to fix."""
         from carrier.debrief import health
 
+        room = self._rr()
+        dest = pid if target in (None, "", pid) else room.linked_project(pid, target)["id"]
+
         def add_task(title: str, details: str) -> int:
-            p = self._rr().add_task(pid, title, details, by="health check")
+            if dest != pid:
+                details += f"\n\n(Found by a health check of {room._project_name(pid)}.)"
+            p = room.add_task(dest, title, details, by="health check")
             return max(t["id"] for t in p["tasks"] if t["title"] == title.strip())
 
         health.act(self._store(), pid, fid, action, add_task=add_task)
@@ -262,6 +269,68 @@ class DesktopApi:
         from carrier.debrief import health
 
         return health.excerpt(self._store(), pid, int(fid), int(around))
+
+    # -- guided conversations (carrier/guided.py) -------------------------------------
+
+    def _guide(self, kind: str, pid: int, create: bool = True) -> Any:
+        from carrier.guided import Guide
+
+        key = (str(kind), int(pid))
+        g = self._guides.get(key)
+        if g is None and create:
+            g = self._guides[key] = Guide(self._store(), kind, int(pid))
+        if g is None:
+            raise S.SessionError("No conversation open.")
+        return g
+
+    @_guard
+    def guide_open(self, kind: str, pid: int) -> dict[str, Any]:
+        """The conversation so far (a new one if none): a health walk-through or task tidying."""
+        return self._guide(kind, pid).view()
+
+    @_guard
+    def guide_say(self, kind: str, pid: int, text: str = "") -> dict[str, Any]:
+        """The user's message → Claude's reply with its proposals (blocks until Claude answers)."""
+        import asyncio
+
+        from carrier.core.llm import AgentSDKBackend
+
+        g = self._guide(kind, pid)
+        backend = self._backend(True)
+        if backend == "auto" or backend is None:
+            backend = AgentSDKBackend(concurrency=2)
+        out: dict[str, Any] = {}
+
+        def work() -> None:  # its own thread and event loop
+            try:
+                out["r"] = asyncio.run(g.say(backend, text))
+            except BaseException as exc:  # noqa: BLE001 - re-raised below
+                out["e"] = exc
+
+        t = threading.Thread(target=work, name="guide", daemon=True)
+        t.start()
+        t.join()
+        if "e" in out:
+            if isinstance(out["e"], ValueError):
+                raise S.SessionError(str(out["e"]))
+            raise out["e"]
+        return out["r"]
+
+    @_guard
+    def guide_apply(self, kind: str, pid: int, prop_id: int, edits: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            return self._guide(kind, pid, create=False).apply(prop_id, edits)
+        except (ValueError, RoomError) as exc:
+            raise S.SessionError(str(exc)) from None
+
+    @_guard
+    def guide_skip(self, kind: str, pid: int, prop_id: int) -> dict[str, Any]:
+        return self._guide(kind, pid, create=False).skip(prop_id)
+
+    @_guard
+    def guide_reset(self, kind: str, pid: int) -> dict[str, Any]:
+        self._guides.pop((str(kind), int(pid)), None)
+        return self._guide(kind, pid).view()
 
     # -- health checks in the Ready Room --------------------------------------------
 
@@ -711,7 +780,7 @@ class DesktopApi:
         """A work folder's sharing (own / shared + this project's part), reviews and note."""
         o = dict(options or {})
         return self._rr().set_folder_options(pid, path, share=o.get("share"), part=o.get("part"),
-                                             review=o.get("review"), note=o.get("note"))
+                                             review=o.get("review"), note=o.get("note"), watch=o.get("watch"))
 
     @_guard
     def rr_remove_folder(self, pid: int, path: str) -> dict[str, Any]:

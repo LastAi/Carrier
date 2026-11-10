@@ -38,7 +38,8 @@ from carrier.debrief.store import (
     supersede,
 )
 
-ACTION_LABEL = {"approve": "✅ Approved", "fix": "🔧 Needs fix", "revert": "↩️ Revert",
+ACTION_LABEL = {"approve": "✅ Approved", "later": "✅ Approved — follow-up later", "fix": "🔧 Needs fix",
+                "revert": "↩️ Revert",
                 "skip": "⏭ Skipped", None: "— Not reviewed"}
 
 
@@ -119,6 +120,20 @@ def render_fixes(review: Review) -> str | None:
             out.append(f"Instruction: {d.instruction}")
         out += ["", "The change as reviewed:", "```diff", review.item_diff(item), "```", ""]
     return "\n".join(out)
+
+
+def render_later(review: Review) -> str | None:
+    """A task's details for the items approved with a follow-up for later, or None."""
+    todo = [i for i in review.items if i.decision and i.decision.action == "later"]
+    if not todo:
+        return None
+    out = ["Follow-ups noted while reviewing. The changes were approved; these are improvements to make",
+           "when convenient. They don't hold routines that wait for a clear review.", ""]
+    for n, item in enumerate(todo, start=1):
+        d = item.decision
+        assert d is not None
+        out += [f"{n}. {item.title} ({', '.join(item.paths)})", f"   {d.instruction}", ""]
+    return "\n".join(out).rstrip()
 
 
 @dataclass

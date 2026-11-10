@@ -56,7 +56,7 @@ from carrier.debrief.sidebyside import item_rows
 from carrier.debrief.store import save_review
 from carrier.debrief.tui.diffview import DiffView
 
-DECISION_MARK = {"approve": "[green]✓[/]", "fix": "[yellow]✎[/]", "revert": "[red]↺[/]",
+DECISION_MARK = {"approve": "[green]✓[/]", "later": "[green]✓⁺[/]", "fix": "[yellow]✎[/]", "revert": "[red]↺[/]",
                  "skip": "[dim]·[/]", None: "[dim]○[/]"}
 
 

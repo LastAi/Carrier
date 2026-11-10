@@ -112,6 +112,10 @@ def takeoff_queue(store: Any) -> list[dict[str, Any]]:
             if not t.get("routine_id") or (r := store.routine(t["routine_id"])) is None:
                 continue
             blockers = review_blockers(store, p["id"]) if r["gate"] == "reviewed" else []
+            for l in store.task_links(t["id"]):  # waiting on another task (e.g. in a linked project)
+                if l["kind"] == "waits_on" and l["direction"] == "out" and l["other_status"] in ("planned", "active"):
+                    blockers = blockers + [f"Waits on {l['other_project_name'] or 'standalone'} #{l['other_id']} "
+                                           f"“{l['other_title']}” ({l['other_status']})."]
             group = groups.get(t.get("group_id"))
             out.append({"task_id": t["id"], "title": t["title"], "project_id": p["id"], "project": p["name"],
                         "group": group["name"] if group else "", "gate": r["gate"], "blockers": blockers,

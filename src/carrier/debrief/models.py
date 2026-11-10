@@ -50,7 +50,7 @@ SEVERITIES: tuple[str, ...] = ("high", "medium", "low")
 #   fix     – needs changes; ``Decision.instruction`` says what
 #   revert  – should be undone
 #   skip    – looked at, no opinion (not carried into the fix list)
-ACTIONS: tuple[str, ...] = ("approve", "fix", "revert", "skip")
+ACTIONS: tuple[str, ...] = ("approve", "later", "fix", "revert", "skip")
 
 
 @dataclass
@@ -84,7 +84,7 @@ class Flag:
 @dataclass
 class Decision:
     action: str  # one of ACTIONS
-    instruction: str = ""  # for "fix"/"revert": what should change, or why
+    instruction: str = ""  # for "fix"/"revert"/"later": what should change, or why
     decided_at: str = ""
 
     @classmethod

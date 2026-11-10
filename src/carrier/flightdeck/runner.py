@@ -255,15 +255,26 @@ class SessionRunner:
             "propose_skill": self._on_propose_skill,
             "show_image": self._show_image,
             "ask_user": self._ask_user_tool,
-            "list_tasks": lambda a: self._tasks_text(),
+            "list_tasks": lambda a: self._tasks_text(a.get("project")),
             "propose_work": self._propose_work,
             "propose_task_change": self._propose_task_change,
         }
 
     # -- reshaping work: Claude proposes, the user decides (the tool waits) -------------
 
-    def _queues(self) -> list[dict[str, Any]]:
-        pid = self.row["project_id"]
+    def _linked(self, which: Any) -> dict[str, Any] | None:
+        """A linked project named by Claude (None if it named none); an error if it isn't linked."""
+        if which in (None, "") or self.row["project_id"] is None:
+            return None
+        me = self.deck.store.project(self.row["project_id"]) or {}
+        if str(which).strip() in (str(me.get("id")), me.get("name", "")) or \
+                str(which).strip().lower() == me.get("name", "").lower():
+            return None  # its own project
+        q = self.deck.room.linked_project(self.row["project_id"], which)
+        return None if q["id"] == self.row["project_id"] else q
+
+    def _queues(self, pid: int | None = None) -> list[dict[str, Any]]:
+        pid = self.row["project_id"] if pid is None else pid
         room = self.deck.room
         out = [{"group_id": None, "name": "Main queue", "priority": "", "tags": [],
                 "tasks": [{"id": t["id"], "title": t["title"]} for t in room.queue(pid, None)]}]
@@ -272,13 +283,19 @@ class SessionRunner:
                         "tasks": [{"id": t["id"], "title": t["title"]} for t in room.queue(pid, g["id"])]})
         return out
 
-    def _tasks_text(self) -> str:
+    def _tasks_text(self, project: Any = None) -> str:
         pid = self.row["project_id"]
         if pid is None:
             return "This is a standalone task: it has no project queues."
         store = self.deck.store
-        lines = [f"This session's task: #{self.row.get('task_id')} {self.row['task']}"]
-        for q in self._queues():
+        other = self._linked(project)
+        if other is not None:
+            pid = other["id"]
+            lines = [f"The queues of the linked project {other['name']} (read only; propose work for it with "
+                     f"propose_work, project = “{other['name']}”):"]
+        else:
+            lines = [f"This session's task: #{self.row.get('task_id')} {self.row['task']}"]
+        for q in self._queues(pid):
             head = f"\n## {q['name']}" + (f" (priority {q['priority']})" if q["priority"] else "") + \
                 (f" tags: {', '.join(q['tags'])}" if q["tags"] else "")
             lines.append(head)
@@ -287,7 +304,7 @@ class SessionRunner:
                 lines.append(f"{i + 1}. #{t['id']} {t['title']} [{t['status']}]" + (f" — {d[0][:140]}" if d else ""))
             if not q["tasks"]:
                 lines.append("(empty)")
-        routines = store.routines(pid)
+        routines = store.routines(pid) if other is None else []
         if routines:
             lines.append("\n## Routines")
             groups = {g["id"]: g["name"] for g in store.task_groups(pid)}
@@ -320,27 +337,42 @@ class SessionRunner:
         if self.row["project_id"] is None:
             return "This is a standalone task: there are no queues. Tell the user about the extra work instead."
         task = self.deck.store.task(self.row["task_id"]) if self.row.get("task_id") else None
+        other = self._linked(args.get("project"))
         req_id, decision, choice = await self._wait_user({
+            "target": {"id": other["id"], "name": other["name"]} if other else None,
+            "wait": bool(args.get("wait")) and other is not None and task is not None,
             "type": "work_proposal", "title": str(args.get("title", "")).strip()[:200],
             "details": str(args.get("details", "")).strip()[:6000], "why": str(args.get("why", "")).strip()[:500],
             "suggest": {k: args.get(k) for k in ("suggest", "group", "new_group", "new_group_priority", "position",
                                                  "reasoning")},
             "current_task": {"id": task["id"], "title": task["title"]} if task else None,
-            "queues": self._queues()})
+            "queues": self._queues(other["id"] if other else None)})
         try:
-            return self._apply_work(req_id, decision, choice if isinstance(choice, dict) else {}, task)
+            return self._apply_work(req_id, decision, choice if isinstance(choice, dict) else {}, task, other)
         except Exception as exc:
             self.emit({"type": "proposal_done", "req_id": req_id, "text": f"Couldn't add it: {exc}"})
             raise
 
-    def _apply_work(self, req_id: str, decision: str, c: dict[str, Any], task: dict[str, Any] | None) -> str:
+    def _apply_work(self, req_id: str, decision: str, c: dict[str, Any], task: dict[str, Any] | None,
+                    other: dict[str, Any] | None = None) -> str:
         room, sid, pid = self.deck.room, self.sid, self.row["project_id"]
+        if other is not None and decision == "work":
+            # Still linked? (The user may have unlinked them while the card was open.)
+            other = self.deck.room.linked_project(self.row["project_id"], other["id"])
+        if other is not None:
+            pid = other["id"]  # work for a linked project: it goes in that project's queues
         title, details = str(c.get("title", "")).strip(), str(c.get("details", "")).strip()
         if decision != "work" or not title:
             self.emit({"type": "proposal_done", "req_id": req_id, "text": "Not added."})
             return "The user didn't add this work anywhere. Leave it out; mention it in your summary if relevant."
         note = str(c.get("note", "")).strip() or "Came up during this task"
         where = c.get("where")
+        if other is not None:
+            me = self.deck.store.project(self.row["project_id"]) or {}
+            note = (f"Proposed by a session of {me.get('name', '?')}"
+                    + (f" (task #{task['id']} “{task['title']}”)" if task else "") + f": {note}")
+            if where == "current":
+                raise ValueError("Work for another project goes in that project's queues.")
         if where == "current":
             if task is None:
                 raise ValueError("This session has no task.")
@@ -354,7 +386,16 @@ class SessionRunner:
                                 new_group=new_group, position=str(c.get("position") or "end"), by="claude",
                                 note=note, session_id=sid)
             q = room._queue_name(pid, t.get("group_id"))
-            text = f"Added as task #{t['id']} “{t['title']}” in the {q}. Don't do it in this session."
+            if other is not None:
+                if task is not None:
+                    room.link_tasks(task["id"], t["id"], "opened", session_id=sid)
+                    if c.get("wait"):
+                        room.link_tasks(task["id"], t["id"], "waits_on", session_id=sid)
+                text = (f"Added to {other['name']} as task #{t['id']} “{t['title']}” in its {q}"
+                        + ("; this task now waits on it" if c.get("wait") and task is not None else "")
+                        + ". Don't do that work here: it's that project's.")
+            else:
+                text = f"Added as task #{t['id']} “{t['title']}” in the {q}. Don't do it in this session."
         self.emit({"type": "proposal_done", "req_id": req_id, "text": text})
         return text
 

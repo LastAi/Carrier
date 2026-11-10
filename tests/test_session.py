@@ -279,10 +279,22 @@ def test_project_review_parts_context_tasks_and_fix_task(repo: Path, claude_home
     assert all(c.get("add_dirs") in (None, [str(lib)], [str(lib.resolve())]) for c in backend.calls)
     first = ov["items"][0]["id"]
     s.decide(first, "fix", "keep the old test")
+    later = [it["id"] for it in ov["items"]][1:]
+    assert later, "needs two items"
+    with pytest.raises(SessionError, match="follow up"):
+        s.decide(later[0], "later", "")
+    s.decide(later[0], "later", "rename the helper")
     res = s.finish()
     assert res["fix_task"]["title"].startswith("Fix review findings (1)")
     queue = room.project(pid)["tasks"]
     assert queue[0]["title"].startswith("Fix review findings") and "keep the old test" in queue[0]["details"]
+    # Approved with a follow-up: an ordinary task at the end of the queue, which holds no routine.
+    assert res["later_task"]["title"].startswith("Review follow-ups (1)")
+    follow = [t for t in queue if t["title"].startswith("Review follow-ups")][0]
+    assert "rename the helper" in follow["details"] and not follow.get("fix_review") and queue[-1]["id"] == follow["id"]
+    from carrier.readyroom.routines import _review_blockers
+    held = [g for g in _review_blockers(store, pid) if "fix task" in g]
+    assert held and held[0].startswith("1 fix task")  # only the fix holds routines, not the follow-ups
     # Both folders' checkpoints moved: nothing left to review.
     s.close()
     s2 = ReviewSession(repo, backend=None, project=project_spec(store, pid))

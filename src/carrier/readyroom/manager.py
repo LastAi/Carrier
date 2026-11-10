@@ -168,6 +168,8 @@ class ReadyRoom:
             raise RoomError("Pick a different task to pull in.")
         if a["project_id"] != b["project_id"]:
             raise RoomError("Tasks can only be combined within one project.")
+        if a["status"] not in OPEN or b["status"] not in OPEN:
+            raise RoomError("Only open tasks can be merged.")
         if b["status"] == "active" and self._active_sessions(task_id=b["id"]):
             raise RoomError(f"A session is working on “{b['title']}”. End it first.")
         whole = not part.strip()
@@ -178,6 +180,7 @@ class ReadyRoom:
         self._log(a, "merged_in", {"details": new_details}, by, note or f"Pulled in “{b['title']}”"
                   + ("" if whole else " (part)"), session_id)
         if whole:
+            self._unblock_waiters(b, f"was merged into “{a['title']}” (#{a['id']})")
             summary = f"Merged into task “{a['title']}” (#{a['id']})."
             self.store.update_task(b["id"], status="dropped", summary=summary, finished=time.time())
             self._log(b, "merged_away", {"status": "dropped"}, by, note or summary, session_id)
@@ -195,6 +198,8 @@ class ReadyRoom:
         t = self._task(tid)
         if t["project_id"] is None:
             raise RoomError("Standalone tasks can't be split.")
+        if not keep.strip():
+            raise RoomError("Say what stays in the task.")
         self.store.update_task(tid, details=keep.strip())
         self._log(t, "split_out", {"details": keep.strip()}, by, note or f"Split out “{title.strip()}”", session_id)
         return self.place_task(t["project_id"], title, details, group_id=group_id, new_group=new_group,
@@ -219,6 +224,16 @@ class ReadyRoom:
         """Tell this project's sessions what changed in its reference and workspace folders,
         with each message and after a pause (off by default)."""
         return bool(self.store.get_setting(f"project:{pid}:watch_refs", False)) if pid is not None else False
+
+    def watched_refs(self, pid: int | None) -> list[str]:
+        """The reference and workspace folders whose changes this project's sessions hear about:
+        each folder's own setting, or the project's switch for folders without one."""
+        p = self.store.project(pid) if pid is not None else None
+        if p is None:
+            return []
+        default = self.watch_refs(pid)
+        return [f["path"] for f in p.get("folders") or [] if folder_kind(f) in ("reference", "workspace")
+                and (f["watch"] if isinstance(f.get("watch"), bool) else default)]
 
     def set_watch_refs(self, pid: int, on: bool) -> dict[str, Any]:
         self._project(pid)
@@ -386,6 +401,79 @@ class ReadyRoom:
                                      detail="Its tasks moved to the main queue.")
         return self.project(pid)
 
+    def drop_task(self, tid: int, why: str, *, by: str = "you", note: str = "") -> dict[str, Any]:
+        """Close an open task without doing it (stale, a duplicate, no longer wanted). Kept in
+        the history with the reason, unlike deleting."""
+        t = self._task(tid)
+        if t["status"] not in OPEN:
+            raise RoomError("Only open tasks can be dropped.")
+        if self._active_sessions(task_id=tid):
+            raise RoomError(f"A session is working on “{t['title']}”. End it first.")
+        why = why.strip() or "No longer needed."
+        self.store.update_task(tid, status="dropped", summary=f"Dropped: {why}", finished=time.time())
+        self._log(t, "dropped", {"status": "dropped"}, by, note or why)
+        self._unblock_waiters(t, "was dropped")
+        return self.store.task(tid)
+
+    def _unblock_waiters(self, t: dict[str, Any], what: str) -> None:
+        """Tasks waiting on ``t`` can go ahead: note it in their history."""
+        for l in self.store.task_links(t["id"]):
+            if l["kind"] == "waits_on" and l["direction"] == "in" and l["other_status"] in OPEN:
+                self._log(self.store.task(l["other_id"]), "unblocked", {}, "carrier",
+                          f"“{t['title']}” (#{t['id']}) in {self._project_name(t['project_id'])} {what}: "
+                          "this task can go ahead.")
+
+    def reorder_queue(self, pid: int, gid: int | None, ids: list[int]) -> dict[str, Any]:
+        """Put a queue's open tasks in this order (tasks not named keep their order, after them)."""
+        tasks = self.queue(pid, gid)
+        queue = [t["id"] for t in tasks]
+        wanted = [int(i) for i in ids if int(i) in queue]
+        if len(set(wanted)) != len(wanted):
+            raise RoomError("A task is named twice.")
+        order = wanted + [i for i in queue if i not in wanted]
+        # Tasks a session is working on stay in front: re-ordering never changes a running session's task.
+        running = [t["id"] for t in tasks if self._active_sessions(task_id=t["id"])]
+        order = [i for i in order if i in running] + [i for i in order if i not in running]
+        for n, task_id in enumerate(order, start=1):
+            self.store.update_task(task_id, position=n)
+        return self.project(pid)
+
+    def _project_name(self, pid: int | None) -> str:
+        p = self.store.project(pid) if pid is not None else None
+        return p["name"] if p else "standalone work"
+
+    def _link_view(self, tid: int) -> list[dict[str, Any]]:
+        return [{"kind": l["kind"], "direction": l["direction"], "task_id": l["other_id"], "title": l["other_title"],
+                 "status": l["other_status"], "project_id": l["other_project"],
+                 "project": l["other_project_name"] or "standalone"} for l in self.store.task_links(tid)]
+
+    def linked_projects(self, pid: int) -> list[dict[str, Any]]:
+        return context.linked_projects(self.store, pid)
+
+    def linked_project(self, pid: int, which: Any) -> dict[str, Any]:
+        """A project linked to ``pid``, by id or name; a clear error otherwise."""
+        linked = self.linked_projects(pid)
+        w = str(which or "").strip()
+        for q in linked:
+            if w == str(q["id"]) or w.lower() == q["name"].lower():
+                return q
+        names = ", ".join(q["name"] for q in linked) or "none"
+        raise RoomError(f"“{w}” isn't linked to this project (linked projects: {names}). Ask the user to link "
+                        "them in the Ready Room (Linked projects) if work there is needed.")
+
+    def link_tasks(self, from_task: int, to_task: int, kind: str = "opened", session_id: int | None = None) -> None:
+        if kind not in ("opened", "waits_on"):
+            raise RoomError("Unknown link.")
+        a, b = self._task(from_task), self._task(to_task)
+        if a["id"] == b["id"]:
+            raise RoomError("A task can't link to itself.")
+        self.store.add_task_link(a["id"], b["id"], kind, session_id)
+
+    def waiting_on(self, tid: int) -> list[dict[str, Any]]:
+        """Open tasks this task waits for."""
+        return [l for l in self.store.task_links(tid)
+                if l["kind"] == "waits_on" and l["direction"] == "out" and l["other_status"] in OPEN]
+
     def set_task_group(self, tid: int, gid: int | None) -> dict[str, Any]:
         """Move a task to another queue (to the end of it)."""
         t = self._task(tid)
@@ -448,6 +536,7 @@ class ReadyRoom:
                           "mine": l["contracts_a"] if mine_a else l["contracts_b"],
                           "theirs": l["contracts_b"] if mine_a else l["contracts_a"]})
         foreign = ownership.foreign_mains(self.store, p)
+        watched = set(self.watched_refs(pid))
         return {**p, "folder_exists": Path(p["path"]).is_dir(), "main_shared_with": self.shared_with(pid, p["path"]),
                 "folders": [{**f, "kind": folder_kind(f), "exists": Path(f["path"]).is_dir(),
                              "review": "skip" if f.get("review") == "skip" else "all", "note": f.get("note", ""),
@@ -455,7 +544,9 @@ class ReadyRoom:
                              "part": f.get("part") or [],
                              "claimed": len(ownership.claimed(self.store, pid, f["path"])),
                              "shared_with": self.shared_with(pid, f["path"]),
-                             "foreign": [q["name"] for q in foreign if ownership._inside(q["path"], f["path"])]}
+                             "foreign": [q["name"] for q in foreign if ownership._inside(q["path"], f["path"])],
+                             "watch_own": f["watch"] if isinstance(f.get("watch"), bool) else None,
+                             "watched": f["path"] in watched}
                             for f in p["folders"]],
                 "rule_set_ids": self.store.project_rule_set_ids(pid),
                 "images": self.images_allowed(pid),
@@ -464,7 +555,7 @@ class ReadyRoom:
                 "allow_groups": [{"id": k, **v} for k, v in GROUPS.items()],
                 "allow_suggest": self.allow_suggestions(pid),
                 "allow_export_error": self.store.get_setting(f"project:{pid}:claude_rules_error", "") or "",
-                "tasks": self.store.tasks(pid, statuses=OPEN),
+                "tasks": [{**t, "links": self._link_view(t["id"])} for t in self.store.tasks(pid, statuses=OPEN)],
                 "groups": self.store.task_groups(pid),
                 "history": self.store.tasks(pid, statuses=("done",)),
                 "links": links,
@@ -652,14 +743,16 @@ class ReadyRoom:
 
     def set_folder_options(self, pid: int, path: str, share: str | None = None,
                            part: list[str] | str | None = None, review: str | None = None,
-                           note: str | None = None) -> dict[str, Any]:
+                           note: str | None = None, watch: bool | str | None = None) -> dict[str, Any]:
         """A work folder's ownership and review settings (readyroom/ownership.py):
 
         * ``share`` — "own" (everything in it is this project's) or "shared" (a shared space:
           the project owns its ``part`` and the files it creates there);
         * ``part`` — patterns for this project's part of a shared space (``ships/**``);
         * ``review`` — "all" (the default) or "skip" (left out of reviews and scans);
-        * ``note`` — what the folder is, for Debrief's review agents.
+        * ``note`` — what the folder is, for Debrief's review agents;
+        * ``watch`` — for reference and workspace folders: whether sessions hear about its changes
+          (True / False, or "default" to follow the project's switch).
         Sessions may be running; Flight Deck applies changes from their next action."""
         p = self._project(pid)
         f0 = next((f for f in p["folders"] if f["path"] == path), None)
@@ -679,6 +772,16 @@ class ReadyRoom:
                 raise RoomError(str(exc)) from None
         notes = []
         f = dict(f0)
+        if watch is not None:
+            if folder_kind(f) not in ("reference", "workspace"):
+                raise RoomError("Only reference and workspace folders are watched.")
+            if watch == "default":
+                if "watch" in f:
+                    f.pop("watch")
+                    notes.append("changes reported as the project's switch says")
+            elif bool(watch) != f.get("watch"):
+                f["watch"] = bool(watch)
+                notes.append("sessions " + ("hear" if watch else "don't hear") + " about its changes")
         for key, value, say in (("share", share, lambda v: "this project's" if v == "own" else "a shared space"),
                                 ("part", part, lambda v: "this project's part: " + (", ".join(v) or "(none)")),
                                 ("review", review, lambda v: "reviewed" if v == "all" else "left out of reviews"),
@@ -720,6 +823,8 @@ class ReadyRoom:
         self._project(pid)
         if self._active_sessions(pid):
             raise RoomError("End this project's sessions first.")
+        for t in self.store.tasks(pid, statuses=OPEN):
+            self._unblock_waiters(t, "went with its project, which was removed")
         self.store.remove_project(pid)
         return self.overview()
 
@@ -818,6 +923,7 @@ class ReadyRoom:
         t = self._task(tid)
         self.store.update_task(tid, status="done", summary=summary.strip(), finished=time.time())
         self._log(t, "status", {"status": "done"}, note="Finished")
+        self._unblock_waiters(t, "is done")
         if t["project_id"] is not None:
             from carrier.readyroom import routines as _r
 

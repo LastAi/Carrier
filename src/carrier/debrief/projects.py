@@ -54,6 +54,8 @@ class ProjectSpec:
     criteria: list[Criterion] | None = None
     task_lookup: Callable[[str, float | None], list[dict[str, Any]]] | None = None
     add_fix_task: Callable[..., dict[str, Any]] | None = None
+    # Adds an ordinary task (no review hold): follow-ups approved for later.
+    add_task: Callable[..., dict[str, Any]] | None = None
     # Per folder label ("" = the main folder): what the review agents are told about it
     # (shared with other projects, the user's note, which changes are reviewed).
     folder_notes: dict[str, str] = field(default_factory=dict)
@@ -355,13 +357,17 @@ def project_spec(store: Store, pid: int) -> ProjectSpec:
                 return True
         return False
 
+    def add_task(title: str, details: str) -> dict[str, Any]:
+        project = room.add_task(pid, title, details, by="review")
+        return next(t for t in reversed(project["tasks"]) if t["title"] == title)
+
     def add_fix_task(title: str, details: str, review_id: str = "") -> dict[str, Any]:
         project = room.add_task(pid, title, details, first=True, fix_review=review_id or "review")
         return next(t for t in project["tasks"] if t["title"] == title)
 
     return ProjectSpec(id=pid, name=p["name"], path=Path(p["path"]), extras=extras, context=text,
                        criteria=effective_criteria(store, pid, Path(p["path"])),
-                       task_lookup=task_lookup, add_fix_task=add_fix_task, folder_notes=folder_notes,
+                       task_lookup=task_lookup, add_fix_task=add_fix_task, add_task=add_task, folder_notes=folder_notes,
                        keep_file=keep_file)
 
 

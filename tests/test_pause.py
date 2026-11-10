@@ -9,6 +9,7 @@ import pytest
 
 from carrier.flightdeck import coordination
 from carrier.flightdeck.manager import DeckError, FlightDeck
+from carrier.readyroom.manager import RoomError
 
 from .fakeclaude import ALL_CLIENTS, FakeClaudeClient
 from .test_flightdeck import events, make_repo, wait
@@ -103,6 +104,40 @@ def test_watching_reference_folders(deck: FlightDeck, tmp_path: Path):
     deck.send(se["id"], "and again")
     wait(deck, se["id"])
     assert "anim.md" not in (ALL_CLIENTS[0].contexts[-1] if len(ALL_CLIENTS[0].contexts) > 1 else "")
+
+
+def test_watching_reference_folders_one_by_one(deck: FlightDeck, tmp_path: Path):
+    """Each reference folder can be watched or not, whatever the project's switch says."""
+    anim = project(deck, tmp_path / "Animation", {"formats/anim.md": "v1\n"})
+    project(deck, tmp_path / "Sounds", {"s.md": "v1\n"})
+    editor = project(deck, tmp_path / "ShipEditor", {"main.txt": "x\n"})
+    room = deck.room
+    room.add_folder(editor, str(tmp_path / "Animation"), kind="reference")
+    room.add_folder(editor, str(tmp_path / "Sounds"), kind="reference")
+    folders = {f["label"]: f for f in room.project(editor)["folders"]}
+    assert not any(f["watched"] for f in folders.values())  # the switch is off
+    room.set_folder_options(editor, folders["Animation"]["path"], watch=True)
+    assert room.watched_refs(editor) == [folders["Animation"]["path"]]
+    room.set_watch_refs(editor, True)  # now on for every folder without its own setting…
+    room.set_folder_options(editor, folders["Sounds"]["path"], watch=False)  # …but this one says no
+    assert room.watched_refs(editor) == [folders["Animation"]["path"]]
+    view = {f["label"]: f for f in room.project(editor)["folders"]}
+    assert view["Sounds"]["watch_own"] is False and view["Animation"]["watched"]
+    room.set_folder_options(editor, folders["Sounds"]["path"], watch="default")
+    assert len(room.watched_refs(editor)) == 2
+    with pytest.raises(RoomError):
+        room.set_folder_options(editor, str(tmp_path / "ShipEditor"), watch=True)  # not an extra folder
+    room.set_watch_refs(editor, False)
+    room.set_folder_options(editor, folders["Animation"]["path"], watch=True)
+    se = deck.start_session(editor, "editor work", send_task=False)
+    deck.send(se["id"], "hello")
+    wait(deck, se["id"])
+    sa = deck.start_session(anim, "new format", mode="acceptEdits", send_task=False)
+    deck.send(sa["id"], "write formats/anim.md v2")
+    wait(deck, sa["id"])
+    deck.send(se["id"], "carry on")
+    wait(deck, se["id"])
+    assert "anim.md (changed, by" in ALL_CLIENTS[0].contexts[-1]
 
 
 def test_end_leaves_a_note_for_the_next_session(deck: FlightDeck, tmp_path: Path):

@@ -260,6 +260,29 @@ list decides.
   **Start review history from now** (Routines card), so reviews and the review
   gate look only at new work.
 
+### Tidying tasks with Claude
+
+When the queues have grown — overlapping tasks, one task per finding, stale
+ideas — press **💬 Tidy tasks with Claude…** on the Tasks card. The
+project's queues are on the left, the conversation on the right. Claude
+looks over the queues and suggests changes one topic at a time; the tasks
+it talks about are highlighted. Each suggestion is a card:
+
+| Card | What it does |
+|---|---|
+| Merge tasks | Pulls tasks into one (the merged ones are closed as merged; their details are kept in it) |
+| Move to another queue | Moves tasks to the main queue, a group, or a new group |
+| Re-order a queue | Puts a queue's tasks in a new order |
+| Split a task | Moves part of a task out into a new one |
+| Reword a task | A clearer title or details |
+| Drop tasks | Closes tasks that aren't needed any more — they stay in the history with the reason |
+
+**Apply** a card (untick tasks you want to keep out, or edit its text) or
+**Skip** it; reply in the box to steer. Nothing changes without your OK, and
+every change is in the tasks' history as made by Claude with your approval.
+Tasks being worked on can't be merged, split or dropped. **Start over**
+forgets the conversation (not the changes).
+
 ### Task history
 
 Every change to a task is recorded: created, edited, scope added, work
@@ -322,6 +345,16 @@ Flight Deck sessions load these skills, as Claude Code does in a terminal.
   `src/api-client/**` on the client side. Flight Deck uses these links to
   keep their sessions aware of each other; a project with no links is never
   interrupted by the others.
+* **Tasks across projects.** Sessions of linked projects are told about
+  each other: the note, the shared files, and that they may **propose work
+  for the other project** (you approve it; it goes in that project's queue).
+  Such tasks are **linked**: a task shows *⇢ Opened Editor #31* or *⇠ Opened
+  from Mod #12*, and a click opens the other project at that task. A task can
+  **wait on** another one (*⏸ Waiting on Editor #31*): auto take-off leaves it
+  alone until that task is done, and its history notes when it can go ahead.
+  The task's session is told about its links. Debrief can hand work over too:
+  **Make a task … in** a linked project, in the health report and in the
+  walk-through.
 * **What Claude will be told…** shows the exact text added to Claude Code's
   instructions for the project: goal, current task, rules and recent history.
   Your `CLAUDE.md` files still load as usual.
@@ -670,7 +703,15 @@ choose or a scratch folder Carrier makes. Afterwards:
    changed in the project's reference and workspace folders since the last
    one (by another session, by you, or anything else), and the page shows a
    notice as soon as another session edits one. After a pause they're part of
-   the catch-up too.
+   the catch-up too. The project's switch is the default; each reference or
+   workspace folder's card has its own **Keep sessions up to date** to turn
+   it on or off for that folder (**Use the project's switch** goes back).
+5. **Work for a linked project.** When a session's work changes something a
+   linked project relies on (above all the shared files), or needs something
+   from it, Claude proposes a task **for that project**: the card says which
+   project, offers its queues, and can mark this session's task as **waiting**
+   for it. Nothing is added until you press **Add**. See *Tasks across
+   projects*.
 
 ---
 
@@ -773,7 +814,19 @@ files are left out.
   | Reopen | o | Counts an accepted or dismissed finding as open again |
 
   Deciding moves on to the next finding. **Show accepted, dismissed and not
-  found again** lists the quiet ones too.
+  found again** lists the quiet ones too. With linked projects, **Make a task**
+  has a choice of project: **in this project**, or in a linked one when the
+  problem is theirs to fix.
+* **💬 Walk through with Claude** (in the report) opens a conversation beside
+  it. Claude groups the open findings — same cause, same area, or small
+  things of similar priority — and goes through them group by group, most
+  serious first; each finding it mentions is a link, and the report shows the
+  one it's talking about with its code. It can read the project's files to
+  check a finding, but changes nothing. For each group it proposes a card:
+  **one task for these findings** (instead of one task each; in a linked
+  project when it's theirs), **add them to an existing task**, **accept** or
+  **dismiss** them. Untick findings to leave them out, edit the task's text,
+  then **Apply** — or **Skip** and say what you'd rather do.
 * **Failures.** If part of a check fails (a time-out, say), the findings in
   the files it couldn't read are kept as they were, the run is marked
   *incomplete*, and the check stays due. A check that fails doesn't stop the
@@ -817,14 +870,20 @@ Debrief says so rather than inventing a reason.
 * **Diff:** unified, or side by side (old on the left, new on the right).
 * **Ask the guide** what a change does, what was there before, or why it was
   made. Drag across lines in the diff to ask about exactly that code.
-* **Decide:** **Approve**, **Needs fix…** (with a note), **Revert…** or
-  **Skip**. You can also add a note to the project's notes, which future
-  reviews read.
+* **Decide:** **Approve**, **Approve, follow up later…**, **Needs fix…**
+  (with a note), **Revert…** or **Skip**. You can also add a note to the
+  project's notes, which future reviews read.
+* **Approve, follow up later** is for something small: the change is
+  approved — so the review can clear and routines waiting for a clear review
+  (a push, say) can go on — and what you write goes into one *Review
+  follow-ups* task at the end of the project's queue, an ordinary task that
+  holds nothing. **Needs fix** is for what must be fixed first: its task holds
+  those routines until it's done.
 
 | Key | Action |
 |---|---|
 | `↓`/`j`, `↑`/`k` | Next / previous change |
-| `a` `f` `r` `s` | Approve · needs fix · revert · skip |
+| `a` `l` `f` `r` `s` | Approve · approve, follow up later · needs fix · revert · skip |
 | `n` | Add a project note |
 | `v` | Unified / side by side |
 | `/` | Ask the guide |
@@ -1134,7 +1193,6 @@ should yet.
 |---|---|
 | Local network access | Use Carrier from other devices on your network. An optional build that can be left out entirely |
 | Right-click menu on macOS and Linux | Spelling suggestions and copy/paste in text boxes, as on Windows |
-| Watch reference folders one by one | Choose per reference or workspace folder whether sessions are kept up to date with its changes, instead of one switch for all of a project's reference folders |
 
 ### Known issues
 
@@ -1154,8 +1212,9 @@ same license.
 
 ### Known limitations
 
-* Reference folders block Claude's file-editing tools, but a shell command
-  could still write there.
+* Reference folders block Claude's file-editing tools, and pre-approved
+  commands that change files run without asking only inside the project's own
+  folders; a command you approve by hand can still write anywhere.
 * Flight Deck sessions run in the desktop app only, not in the terminal.
 * The right-click spelling menu is Windows only.
 * Some models may not accept every effort level; Carrier maps effort to what

@@ -104,6 +104,42 @@ def _rules_block(own: str, sets: list[dict[str, Any]]) -> str:
     return _cap("\n\n".join(parts)) if parts else ""
 
 
+def linked_projects(store: Store, pid: int) -> list[dict[str, Any]]:
+    """Projects linked to this one (Linked projects), with the note and each side's shared files."""
+    out = []
+    for l in store.links(pid):
+        mine_a = l["project_a"] == pid
+        other = l["project_b"] if mine_a else l["project_a"]
+        p = store.project(other)
+        if p is None:
+            continue
+        out.append({"id": other, "name": p["name"], "path": p["path"], "note": l["note"],
+                    "mine": l["contracts_a"] if mine_a else l["contracts_b"],
+                    "theirs": l["contracts_b"] if mine_a else l["contracts_a"]})
+    return out
+
+
+def _linked_section(store: Store, pid: int, for_review: bool) -> str:
+    """Linked projects (Ready Room → Linked projects): who depends on whom, and how to hand work over."""
+    linked = linked_projects(store, pid)
+    if not linked:
+        return ""
+    lines = []
+    for q in linked:
+        line = f"- {q['name']} (main folder {q['path']})" + (f": {q['note']}" if q["note"] else "")
+        if q["mine"] or q["theirs"]:
+            line += (f"\n  Shared files — this project's: {', '.join(q['mine']) or 'none listed'}; "
+                     f"theirs: {', '.join(q['theirs']) or 'none listed'}")
+        lines.append(line)
+    if for_review:
+        return ("## Linked projects\nOther projects that depend on this one, or it on them (their changes are not "
+                "this project's work):\n" + "\n".join(lines))
+    return ("## Linked projects\nThese projects depend on this one, or it on them. Don't edit their files. When your "
+            "work changes something they rely on (above all the shared files), or needs something from them, propose "
+            "the work for them with propose_work (project = their name); list_tasks (project = their name) shows "
+            "their queues. The user approves it first.\n" + "\n".join(lines))
+
+
 def build(store: Store, project_id: int | None, task: dict[str, Any] | None,
           preset: dict[str, Any] | None = None, for_review: bool = False) -> str:
     """The context text for a session on ``task`` in ``project_id`` (None = standalone).
@@ -150,6 +186,9 @@ def build(store: Store, project_id: int | None, task: dict[str, Any] | None,
                      "the task, but never create, edit or delete files in them (edits are blocked):\n"
                      + "\n".join(f"- {f['label']}: {f['path']}" for f in ref))
         sections.append(head)
+        linked = _linked_section(store, project["id"], for_review)
+        if linked:
+            sections.append(linked)
     else:
         sections.append("## Standalone task\nThis task is not part of a project.")
 
@@ -161,6 +200,17 @@ def build(store: Store, project_id: int | None, task: dict[str, Any] | None,
             t += ("\n\n### Where the last session on this task left off\n"
                   "(Written when that session ended. The files may have changed since; check before relying on it.)\n"
                   f"{_cap(task['handoff'], 3000)}")
+        links = store.task_links(task["id"]) if task.get("id") else []
+        if links:
+            rows = []
+            for l in links:
+                where = f"{l['other_project_name'] or 'standalone'} #{l['other_id']} “{l['other_title']}” ({l['other_status']})"
+                if l["kind"] == "waits_on":
+                    rows.append(f"- Waits on {where}" if l["direction"] == "out" else f"- {where} waits on this task")
+                else:
+                    rows.append(f"- This task's work opened {where}" if l["direction"] == "out"
+                                else f"- Opened by the work on {where}: read it (list_tasks / get_project) to know why")
+            t += "\n\n### Linked tasks\n" + "\n".join(rows)
         if task.get("group_id") and (g := store.task_group(task["group_id"])):
             t += (f"\n\n(This task is in the task group “{g['name']}”, which runs alongside the project's other "
                   "work: other sessions may be working in the same folders at the same time.)")
