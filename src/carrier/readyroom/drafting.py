@@ -18,7 +18,7 @@ from typing import Any
 from carrier.core.jsonutil import extract_json
 from carrier.core.llm import Backend, BackendError
 
-KINDS = ("project_rules", "global_rules", "rule_set", "agent", "skill", "task", "routine", "project")
+KINDS = ("project_rules", "global_rules", "rule_set", "agent", "health_agent", "skill", "task", "routine", "project")
 
 RULES_SYSTEM = """You turn a user's description into clear working rules for Claude Code, an AI coding agent.
 Write rules Claude can follow and check itself against:
@@ -45,6 +45,22 @@ Write the agent's instruction ("what to look for") from the user's description:
 
 Reply with JSON only:
 {"title": "short name, 2-5 words", "severity": "high|medium|low",
+ "prompt": "the instruction, markdown, 60-250 words"}"""
+
+HEALTH_AGENT_SYSTEM = """You write health checks for Debrief, a code-review tool. A health check looks at a whole
+software project as it stands now (not at recent changes) every few weeks, and reports problems that build up
+slowly: its findings name a file and lines, what is wrong and what to do. It does not fix anything.
+
+Write the check's instruction ("what to look for") from the user's description:
+- say precisely what counts as a problem, with one or two concrete examples;
+- say what should NOT be reported, to avoid noise;
+- address the check as "you"; do not mention output format (Debrief adds that).
+Choose how it works: "files" reads every file in turn (for problems visible in one file), "project" explores
+the project with search tools (for problems across files: structure, duplication, missing tests).
+
+Reply with JSON only:
+{"title": "short name, 2-5 words", "severity": "high|medium|low",
+ "theme": "Safety|Rules|Reliability|Design|Upkeep", "mode": "files|project",
  "prompt": "the instruction, markdown, 60-250 words"}"""
 
 AGENT_PROMPT = """## What the user wants this review agent to catch
@@ -217,6 +233,24 @@ async def draft_async(kind: str, description: str, backend: Backend, current: st
         sev = str(data.get("severity", "medium")).lower()
         return {"title": str(data.get("title", "")).strip()[:80],
                 "severity": sev if sev in ("high", "medium", "low") else "medium",
+                "prompt": str(data["prompt"]).strip()}
+    if kind == "health_agent":
+        reply = await backend.ask(system=HEALTH_AGENT_SYSTEM, model=model,
+                                  prompt=AGENT_PROMPT.replace("review agent", "health check").format(
+                                      description=description[:6000], context=_context_block(goal),
+                                      current=_current_block(current)))
+        try:
+            data = extract_json(reply)
+        except ValueError:
+            data = None
+        if not isinstance(data, dict) or not str(data.get("prompt", "")).strip():
+            return {"title": "", "severity": "medium", "theme": "Upkeep", "mode": "files", "prompt": reply.strip()}
+        sev = str(data.get("severity", "medium")).lower()
+        theme, mode = str(data.get("theme", "Upkeep")), str(data.get("mode", "files")).lower()
+        return {"title": str(data.get("title", "")).strip()[:80],
+                "severity": sev if sev in ("high", "medium", "low") else "medium",
+                "theme": theme if theme in ("Safety", "Rules", "Reliability", "Design", "Upkeep") else "Upkeep",
+                "mode": mode if mode in ("files", "project") else "files",
                 "prompt": str(data["prompt"]).strip()}
     what = {"project_rules": "rules for one project (they add to the user's global rules)",
             "global_rules": "global rules that apply to every project",

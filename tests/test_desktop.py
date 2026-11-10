@@ -308,26 +308,44 @@ def test_health_check_panel(page):
     page.click("#health-box summary")
     page.wait_for_selector("#health-due >> text=12 due")
     assert page.locator("#health-agents .hc-agent").count() == 12
-    # Only security this time: untick the rest.
     for cb in page.locator("#health-agents input[type=checkbox]").all():
         if cb.get_attribute("aria-label") != "Run Security sweep":
             cb.uncheck()
     assert "1 check(s)" in page.inner_text("#health-est")
-    # Settings: a longer interval for this project.
-    row = page.locator(".hc-agent", has_text="Security sweep")
-    row.locator("button:has-text('Settings')").click()
-    page.fill("input[aria-label='Every Security sweep']", "21")
-    page.press("input[aria-label='Every Security sweep']", "Tab")
-    page.wait_for_selector("button:has-text('Use defaults')")
     page.click("#btn-health")
-    page.wait_for_selector(".hc-finding >> text=Path from the user is opened as is")
-    assert page.evaluate("window.__pwned") is None  # model output is text, never HTML
-    assert "save.py:1" in page.inner_text(".hc-finding")
+    page.wait_for_selector("#btn-health-report >> text=Open the health report (1 open)")
     assert page.is_visible("#health-due") and "11 due" in page.inner_text("#health-due")
-    page.screenshot(path="/tmp/carrier-shots/health.png", full_page=True)
-    page.click(".hc-finding button:has-text('Make a task')")
-    page.wait_for_selector(".hc-finding >> text=task made")
-    page.click(".hc-finding button:has-text('Dismiss')")
-    page.wait_for_function("!document.querySelector('.hc-finding')")
-    page.check("text=Show accepted, dismissed and not found again")
-    page.wait_for_selector(".hc-finding.quiet >> text=dismissed")
+    # The report: laid out like a review, with the code around the problem.
+    page.click("#btn-health-report")
+    page.wait_for_selector("#view-health:not(.hidden)")
+    page.wait_for_selector("#hc-list li.hc-item.active >> text=Path from the user is opened as is")
+    page.wait_for_selector("#hc-code tr.focus")
+    assert page.locator("#hc-code tr.focus td.no").first.inner_text() == "1"
+    assert "save.py:1" in page.inner_text("#hc-where")
+    assert page.evaluate("window.__pwned") is None  # model output is text, never HTML
+    page.screenshot(path="/tmp/carrier-shots/health-report.png")
+    page.keyboard.press("t")  # make a task
+    page.wait_for_selector("#hc-state >> text=task made")
+    page.keyboard.press("d")  # dismiss: hidden from the list
+    page.wait_for_selector("#hc-list >> text=No open findings.")
+    page.check("#hc-show-quiet")
+    page.wait_for_selector("#hc-list li.hc-item.quiet")
+    page.keyboard.press("Escape")
+    page.wait_for_selector("#view-start:not(.hidden)")
+    # Settings live in the Ready Room.
+    page.click("#btn-health-settings")
+    page.wait_for_selector("#rr-pane-health:not(.hidden)")
+    page.wait_for_selector("#rrh-title >> text=Health checks — App")
+    # Every check at once: the project's model for all of them.
+    page.select_option("#rrh-group select[aria-label='Model']", "opus")
+    page.wait_for_selector("#rrh-group select.set")
+    page.screenshot(path="/tmp/carrier-shots/health-readyroom.png", full_page=True)
+    page.click("#rrh-new")
+    page.fill("#rrh-title-in", "Save compatibility")
+    page.fill("#rrh-prompt", "Report code that would stop old save files from loading.")
+    page.select_option("#rrh-due", "always")
+    page.click("#rrh-save")
+    page.wait_for_selector("#rrh-list >> text=Save compatibility")
+    page.click("#rrh-back")
+    page.wait_for_selector("#rrp-health-summary >> text=12 of 12 built-in checks on")
+    page.wait_for_selector("#rrp-health-summary >> text=1 for this project only")

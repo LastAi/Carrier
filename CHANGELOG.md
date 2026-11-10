@@ -4,6 +4,15 @@ All notable changes are listed here. Format: [Keep a Changelog](https://keepacha
 
 ## Unreleased
 
+- **Health report like a review.** Findings on the left by theme, the code
+  each one is about on the right with the lines marked (and more context on
+  request), keys to move and decide. Fixed the report's colours, which filled
+  whole findings.
+- **Health checks in the Ready Room**, like review agents: settings for every
+  project or one project, **All health checks** to set the model, effort,
+  severity and file budget of every check at once, and your own checks (with
+  ✨ Draft with Claude), for every project or one.
+
 - **Health checks in Debrief.** Twelve agents that look at the whole project
   now and then rather than at one set of changes: security, rules compliance,
   error handling, tests, cross-platform, performance, structure, duplication,

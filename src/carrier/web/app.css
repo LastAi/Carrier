@@ -612,28 +612,42 @@ button.danger { color: var(--sev-high); border-color: var(--sev-high); }
 .hc-due { display: inline-block; margin-left: 6px; padding: 0 8px; border-radius: 10px; font-size: 12px;
   background: var(--sev-medium); color: #000; font-weight: 600; }
 .hc-agents { display: flex; flex-direction: column; gap: 2px; margin: 8px 0; }
-.hc-agent { display: grid; grid-template-columns: auto minmax(180px, 1.4fr) minmax(160px, 1.6fr) 90px auto;
+.hc-agent { display: grid; grid-template-columns: auto minmax(180px, 1.4fr) minmax(160px, 1.6fr) 90px;
   gap: 8px; align-items: center; padding: 3px 4px; border-radius: 4px; }
 .hc-agent.off { opacity: .55; }
 .hc-agent .hc-title { font-weight: 600; }
-.hc-agent .hc-when.due { color: var(--sev-medium, #b58900); font-weight: 600; }
-.hc-opts { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; padding: 4px 4px 8px 28px;
-  font-size: 12px; }
-.hc-opts input[type=number] { width: 64px; }
-.hc-opts select { width: auto; min-width: 0; display: inline-block; }
-.hc-opts label { display: inline-flex; gap: 4px; align-items: center; margin: 0; }
-.hc-run { display: flex; gap: 10px; align-items: center; margin: 6px 0; }
-.hc-summary { margin: 12px 0 6px; }
-.hc-theme { margin: 14px 0 4px; font-size: 15px; }
-.hc-finding { border: 1px solid var(--border); border-left-width: 4px; border-radius: 4px; padding: 6px 10px;
-  margin: 6px 0; }
-.hc-finding.sev-high { border-left-color: var(--sev-high); }
-.hc-finding.sev-medium { border-left-color: var(--sev-medium, #b58900); }
-.hc-finding.sev-low { border-left-color: var(--sev-low, var(--border)); }
-.hc-finding.quiet { opacity: .6; }
-.hc-finding .hc-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-.hc-finding .hc-badge { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; border: 1px solid var(--border);
+.hc-agent .hc-when.due { color: var(--sev-medium); font-weight: 600; }
+.hc-run { display: flex; gap: 10px; align-items: center; margin: 6px 0; flex-wrap: wrap; }
+.hc-summary { margin: 8px 0 0; }
+button.link { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
+
+/* the health report: laid out like the review screen */
+#view-health { flex: 1; display: flex; min-height: 0; }
+#hc-sidebar { width: 360px; min-width: 260px; border-right: 1px solid var(--border); background: var(--panel);
+  display: flex; flex-direction: column; }
+#hc-sidebar .sidebar-head { align-items: center; gap: 8px; }
+.hc-quiet { margin: 6px 12px; }
+#hc-list { list-style: none; margin: 0; padding: 6px; overflow: auto; flex: 1; }
+#hc-list .hc-group { font-weight: 700; color: var(--muted); font-size: 12px; text-transform: uppercase;
+  letter-spacing: .05em; padding: 10px 10px 4px; cursor: default; }
+#hc-list li.hc-item { padding: 7px 10px; border-radius: 6px; cursor: pointer; display: grid;
+  grid-template-columns: auto 1fr; gap: 2px 8px; align-items: start; }
+#hc-list li.hc-item:hover { background: var(--panel-2); }
+#hc-list li.hc-item.active { background: var(--panel-2); box-shadow: inset 3px 0 0 var(--accent); }
+#hc-list li.hc-item.quiet .t { color: var(--muted); }
+#hc-list .t { font-weight: 500; }
+#hc-list .f { grid-column: 2; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+#hc-detail { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+#hc-detail-scroll { flex: 1; overflow: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; }
+#hc-head h2 { margin: 4px 0 2px; }
+#hc-head .badges { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.hc-badge { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; border: 1px solid var(--border);
   border-radius: 8px; padding: 0 6px; }
-.hc-finding .hc-badge.new { border-color: var(--sev-medium, #b58900); }
-.hc-finding p { margin: 4px 0; }
-.hc-finding .hc-actions { display: flex; gap: 6px; margin-top: 4px; }
+.hc-badge.new { border-color: var(--sev-medium); color: var(--sev-medium); }
+#hc-body p { margin: 6px 0; line-height: 1.5; }
+#hc-body h4 { margin: 10px 0 2px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+#hc-code tr.focus td.code, #hc-code tr.focus td.no { background: var(--removed-bg); }
+#hc-code tr.focus td.mk { background: var(--sev-high); }
+#hc-composer { border-top: 1px solid var(--border); background: var(--panel); padding: 10px 16px; }
+#hc-composer .decide-row { margin-top: 0; }

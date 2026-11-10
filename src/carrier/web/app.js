@@ -154,6 +154,7 @@ function showDebriefView(sel) {
   if (activeTool() !== "debrief") return;
   show($("#view-start"), sel === "#view-start");
   show($("#view-review"), sel === "#view-review");
+  show($("#view-health"), sel === "#view-health");
   const reviewing = sel === "#view-review";
   ["#btn-finish", "#progress-pill", "#btn-home"].forEach((s) => show($(s), reviewing));
 }
@@ -171,8 +172,7 @@ function showTool(tool) {
   if (tool === "readyroom") rrOpen();
   const inDebrief = tool === "debrief";
   if (!inDebrief) {
-    debriefView = $("#view-review").classList.contains("hidden") ? "#view-start" : "#view-review";
-    show($("#view-start"), false); show($("#view-review"), false);
+    show($("#view-start"), false); show($("#view-review"), false); show($("#view-health"), false);
   } else {
     show($(debriefView));
     // Projects may have been added or changed in the other tabs: reload the list.
@@ -209,6 +209,7 @@ async function renderReviewProjects() {
   const box = $("#db-projects");
   box.replaceChildren();
   const projects = await api("db_projects");
+  state.projects = projects;
   if (!projects.length) {
     box.appendChild(el("p", "muted", "No projects yet. Set one up in the Ready Room first."));
     const go = el("button", "ghost", "Open the Ready Room ▸");
@@ -286,13 +287,13 @@ function showProject(info) {
 
 /* ---- health checks (debrief/health.py) ---- */
 
-const hc = { pid: null, view: null, picked: null, open: new Set(), showQuiet: false };
+const hc = { pid: null, view: null, picked: null, showQuiet: false, current: null, around: 8, excerpt: null };
 const kTokens = (n) => n >= 1000 ? `~${Math.round(n / 1000)}k tokens` : `~${n} tokens`;
 
 const loadHealth = guarded(async (pid) => {
   show($("#health-box"), pid != null);
   if (pid == null) return;
-  if (hc.pid !== pid) { hc.picked = null; hc.open.clear(); }
+  if (hc.pid !== pid) { hc.picked = null; hc.current = null; }
   hc.pid = pid;
   renderHealth(await api("hc_view", pid));
 });
@@ -315,65 +316,28 @@ function renderHealth(view) {
     const name = el("span", "");
     const t = el("span", "hc-title", a.title);
     t.title = a.instructions;
-    name.append(t, el("span", "muted small", ` · ${a.theme} · ${a.mode === "files" ? "reads the files" : "explores the project"}`));
-    const when = el("span", "hc-when small" + (a.due ? " due" : ""), (a.due ? "Due: " : "") + a.why);
+    name.append(t, el("span", "muted small", ` · ${a.theme} · ${a.mode === "files" ? "reads the files" : "explores the project"}` +
+                                             (a.source && a.source !== "builtin" ? " · yours" : "")));
+    const when = el("span", "hc-when small" + (a.due && a.enabled ? " due" : ""),
+                    !a.enabled ? "off for this project" : (a.due ? "Due: " : "") + a.why);
     if (a.last && a.last.status === "failed") when.appendChild(el("span", "muted", ` (last run failed: ${a.last.error})`));
     if (a.last && a.last.status === "partial") when.appendChild(el("span", "muted", ` (last run incomplete: ${a.last.error})`));
     if (a.last && a.last.left_out) when.appendChild(el("span", "muted", ` (${a.last.left_out} file(s) over the budget)`));
-    const est = el("span", "muted small", a.enabled ? kTokens(a.estimate) : "off");
-    const gear = el("button", "ghost small-btn", hc.open.has(a.name) ? "Settings ▴" : "Settings ▾");
-    gear.setAttribute("aria-expanded", String(hc.open.has(a.name)));
-    gear.onclick = () => { hc.open.has(a.name) ? hc.open.delete(a.name) : hc.open.add(a.name); renderHealth(hc.view); };
-    row.append(cb, name, when, est, gear);
+    const est = el("span", "muted small", a.enabled ? kTokens(a.estimate) : "");
+    est.title = `Model ${a.model}${a.effort ? ", effort " + a.effort : ""}`;
+    row.append(cb, name, when, est);
     box.appendChild(row);
-    if (hc.open.has(a.name)) box.appendChild(healthOptions(a, view));
   }
   healthEstimate();
-  renderHealthReport(view);
-}
-
-function healthOptions(a, view) {
-  const wrap = el("div", "hc-opts");
-  const set = (key, value) => guarded(async () => renderHealth(await api("hc_set_option", hc.pid, a.name, key, value)))();
-  const on = Object.assign(el("input"), { type: "checkbox", checked: a.enabled });
-  on.onchange = () => set("enabled", on.checked);
-  const onl = el("label", "check"); onl.append(on, document.createTextNode(" Use for this project"));
-  const sel = (label, values, cur, key, blank) => {
-    const l = el("label", "", label + " ");
-    const s = el("select");
-    s.setAttribute("aria-label", `${label} for ${a.title}`);
-    if (blank) s.appendChild(Object.assign(el("option", "", blank), { value: "" }));
-    for (const v of values) s.appendChild(Object.assign(el("option", "", v), { value: v }));
-    s.value = cur || "";
-    s.onchange = () => set(key, s.value);
-    l.appendChild(s);
-    return l;
-  };
-  const num = (label, cur, key, min, max, after) => {
-    const l = el("label", "", label + " ");
-    const n = Object.assign(el("input"), { type: "number", min, max, value: cur });
-    n.setAttribute("aria-label", `${label} ${a.title}`);
-    n.onchange = () => set(key, n.value);
-    l.append(n, document.createTextNode(" " + after));
-    return l;
-  };
-  wrap.append(onl, sel("Model", view.models, a.model, "model"), sel("Effort", view.efforts, a.effort, "effort", "default"),
-              num("Every", a.days, "days", 1, 365, a.due_rule === "changes" ? "days, once the code changed"
-                  : a.due_rule === "rules" ? "days, or when the rules change" : "days, changes or not"));
-  if (a.mode === "files") {
-    const b = num("Read up to", a.budget_kb, "budget_kb", 20, 20000, "KB of code per run (newest first)");
-    wrap.appendChild(b);
-  }
-  if (Object.keys(a.own || {}).length) {
-    const reset = el("button", "ghost small-btn", "Use defaults");
-    reset.onclick = guarded(async () => {
-      let v = null;
-      for (const k of Object.keys(a.own)) v = await api("hc_set_option", hc.pid, a.name, k, "");
-      if (v) renderHealth(v);
-    });
-    wrap.appendChild(reset);
-  }
-  return wrap;
+  const c = view.counts || {};
+  const open = (c.open || 0) + (c.tasked || 0);
+  $("#health-summary").textContent = !view.themes.length ? "No findings yet." :
+    `${c.open} open (${c.new} new) · ${c.tasked} made into tasks · ${c.accepted} accepted · ` +
+    `${c.dismissed} dismissed · ${c.gone} not found again`;
+  const rb = $("#btn-health-report");
+  rb.textContent = `Open the health report (${open} open)`;
+  show(rb, view.themes.length > 0);
+  if (debriefView === "#view-health") renderHealthView();
 }
 
 function healthEstimate() {
@@ -410,67 +374,166 @@ async function runHealth() {
   }
 }
 
-function renderHealthReport(view) {
-  const box = $("#health-report");
-  box.replaceChildren();
-  const c = view.counts;
-  if (!view.themes.length) {
-    box.appendChild(el("p", "muted small", "No findings yet."));
-    return;
-  }
-  const head = el("div", "hc-summary");
-  head.appendChild(el("b", "", `${c.open} open`));
-  head.appendChild(el("span", "muted", ` (${c.new} new) · ${c.tasked} made into tasks · ${c.accepted} accepted · ` +
-    `${c.dismissed} dismissed · ${c.gone} not found again`));
-  const quiet = Object.assign(el("input"), { type: "checkbox", checked: hc.showQuiet });
-  quiet.onchange = () => { hc.showQuiet = quiet.checked; renderHealthReport(hc.view); };
-  const ql = el("label", "check small"); ql.append(quiet, document.createTextNode(" Show accepted, dismissed and not found again"));
-  box.append(head, ql);
-  for (const t of view.themes) {
-    const items = t.findings.filter((f) => hc.showQuiet || f.status === "open" || f.status === "tasked");
-    if (!items.length) continue;
-    box.appendChild(el("h3", "hc-theme", t.theme));
-    for (const f of items) box.appendChild(healthFinding(f));
-  }
-}
+/* The health report, laid out like a review: findings on the left, the code on the right. */
 
 const HC_STATUS = { open: "open", tasked: "task made", accepted: "accepted", dismissed: "dismissed",
                     gone: "not found again" };
+function hcVisible() {
+  const out = [];
+  for (const t of hc.view.themes) {
+    for (const f of t.findings) {
+      if (hc.showQuiet || f.status === "open" || f.status === "tasked") out.push({ ...f, theme: t.theme });
+    }
+  }
+  return out;
+}
 
-function healthFinding(f) {
-  const card = el("div", `hc-finding sev-${f.severity}` + (f.status === "open" || f.status === "tasked" ? "" : " quiet"));
-  const head = el("div", "hc-head");
-  head.append(el("span", "hc-badge", f.severity));
-  head.append(el("span", "hc-badge" + (f.new ? " new" : ""), f.new ? "new" : HC_STATUS[f.status] || f.status));
-  head.append(el("b", "", f.title));
-  card.appendChild(head);
-  const where = f.file ? f.file + (f.line ? `:${f.line}` : "") + " · " : "";
-  card.appendChild(el("div", "muted small", where + f.agent_title));
-  if (f.detail) card.appendChild(el("p", "", f.detail));
-  if (f.suggestion) card.appendChild(el("p", "muted", "Suggested: " + f.suggestion));
-  const actions = el("div", "hc-actions");
-  const act = (label, action, title) => {
-    const b = el("button", "ghost small-btn", label);
-    b.title = title;
-    b.onclick = guarded(async () => {
-      const rep = await api("hc_act", hc.pid, f.id, action);
-      hc.view = { ...hc.view, ...rep };
-      renderHealthReport(hc.view);
-      if (action === "task") banner("Added to the project's tasks.", "info");
-    });
-    actions.appendChild(b);
-  };
-  if (f.status === "open" || f.status === "gone") {
-    act("Make a task", "task", "Add it to the project's task queue in the Ready Room");
+function openHealthReport() {
+  hc.current = null;
+  showDebriefView("#view-health");
+  renderHealthView();
+}
+
+function renderHealthView() {
+  const items = hcVisible();
+  const p = (state.projects || []).find((x) => x.id === hc.pid);
+  $("#hc-side-title").textContent = "Health report" + (p ? ` — ${p.name}` : "");
+  const list = $("#hc-list");
+  list.replaceChildren();
+  let theme = null;
+  for (const f of items) {
+    if (f.theme !== theme) {
+      theme = f.theme;
+      list.appendChild(el("li", "hc-group", theme));
+    }
+    const quiet = !(f.status === "open" || f.status === "tasked");
+    const li = el("li", "hc-item" + (f.id === hc.current ? " active" : "") + (quiet ? " quiet" : ""));
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", String(f.id === hc.current));
+    li.tabIndex = -1;
+    li.dataset.id = f.id;
+    li.append(el("span", `sev sev-${f.severity}`, SEV_LETTER[f.severity] || "?"), el("span", "t", f.title));
+    const meta = (f.new ? "new · " : f.status !== "open" ? HC_STATUS[f.status] + " · " : "") +
+      (f.file ? f.file + (f.line ? `:${f.line}` : "") : "whole project");
+    li.appendChild(el("span", "f", meta));
+    li.onclick = () => openFinding(f.id);
+    list.appendChild(li);
   }
-  if (f.status === "open" || f.status === "tasked") {
-    act("Accept", "accept", "Keep it as it is: it stays in the report but isn't counted, even when found again");
-    act("Dismiss", "dismiss", "Not a real problem: hide it, even when found again");
-  } else if (f.status !== "gone") {
-    act("Reopen", "reopen", "Count it as an open finding again");
+  if (!items.length) {
+    list.appendChild(el("li", "muted small hc-group", hc.showQuiet ? "No findings." : "No open findings."));
   }
-  if (actions.childNodes.length) card.appendChild(actions);
-  return card;
+  const cur = items.find((x) => x.id === hc.current) || items[0];
+  if (cur) { openFinding(cur.id, false); return; }
+  hc.current = null;
+  for (const id of ["#hc-head", "#hc-body", "#hc-code"]) $(id).replaceChildren();
+  $("#hc-where").textContent = "";
+  $("#hc-state").textContent = "";
+  for (const id of ["#hc-more", "#hc-task", "#hc-accept", "#hc-dismiss", "#hc-reopen"]) show($(id), false);
+}
+
+const openFinding = guarded(async (id, scroll = true) => {
+  const changed = hc.current !== id;
+  hc.current = id;
+  if (changed) hc.around = 8;
+  document.querySelectorAll("#hc-list li.hc-item").forEach((li) => {
+    const on = Number(li.dataset.id) === id;
+    li.classList.toggle("active", on);
+    li.setAttribute("aria-selected", String(on));
+    if (on && scroll) li.scrollIntoView({ block: "nearest" });
+  });
+  const f = hcVisible().find((x) => x.id === id);
+  if (!f) return;
+  const head = $("#hc-head");
+  head.replaceChildren();
+  const badges = el("div", "badges");
+  badges.append(el("span", `sev sev-${f.severity}`, f.severity.toUpperCase()));
+  badges.append(el("span", "hc-badge" + (f.new ? " new" : ""), f.new ? "new" : HC_STATUS[f.status] || f.status));
+  badges.append(el("span", "muted small", `${f.theme} · ${f.agent_title}`));
+  head.append(badges, el("h2", "", f.title));
+  const body = $("#hc-body");
+  body.replaceChildren();
+  if (f.detail) { body.appendChild(el("h4", "", "What's wrong")); body.appendChild(el("p", "", f.detail)); }
+  if (f.suggestion) { body.appendChild(el("h4", "", "Suggested")); body.appendChild(el("p", "", f.suggestion)); }
+  if (f.task_id) body.appendChild(el("p", "muted small", `A task was made of it (#${f.task_id}).`));
+  const can = { task: f.status === "open" || f.status === "gone", accept: f.status === "open" || f.status === "tasked",
+                dismiss: f.status === "open" || f.status === "tasked", reopen: ["accepted", "dismissed"].includes(f.status) };
+  show($("#hc-task"), can.task); show($("#hc-accept"), can.accept);
+  show($("#hc-dismiss"), can.dismiss); show($("#hc-reopen"), can.reopen);
+  $("#hc-state").textContent = f.status === "open" ? "" : `This finding is ${HC_STATUS[f.status]}.`;
+  await renderExcerpt(f);
+});
+
+async function renderExcerpt(f) {
+  const code = $("#hc-code");
+  const where = $("#hc-where");
+  if (!f.file) {
+    where.textContent = "About the project as a whole — no single place in the code.";
+    code.replaceChildren();
+    show($("#hc-more"), false);
+    return;
+  }
+  const x = await api("hc_excerpt", hc.pid, f.id, hc.around);
+  if (hc.current !== f.id) return;  // moved on meanwhile
+  where.textContent = f.file + (f.line ? `:${f.line}` + (f.end_line && f.end_line !== f.line ? `–${f.end_line}` : "") : "");
+  code.replaceChildren();
+  if (x.missing) { code.appendChild(el("p", "muted small", x.missing)); show($("#hc-more"), false); return; }
+  const table = el("table");
+  const tbody = el("tbody");
+  x.lines.forEach((text, i) => {
+    const n = x.start + i;
+    const focus = x.focus[0] && n >= x.focus[0] && n <= x.focus[1];
+    const tr = el("tr", focus ? "focus" : "");
+    const code = el("td", "code");
+    code.appendChild(el("span", "t", text));
+    tr.append(el("td", "no", String(n)), el("td", "mk", focus ? "▸" : ""), code);
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  code.appendChild(table);
+  show($("#hc-more"), x.start > 1 || x.start + x.lines.length - 1 < x.total);
+  const first = code.querySelector("tr.focus");
+  if (first) first.scrollIntoView({ block: "center" });
+}
+
+async function hcDecide(action) {
+  if (hc.deciding) return;  // one decision at a time (a held key or a double click)
+  hc.deciding = true;
+  try { await hcDecideNow(action); } finally { hc.deciding = false; }
+}
+
+async function hcDecideNow(action) {
+  const id = hc.current;
+  const f = hcVisible().find((x) => x.id === id);
+  if (!f) return;
+  const allowed = { task: f.status === "open" || f.status === "gone", accept: f.status === "open" || f.status === "tasked",
+                    dismiss: f.status === "open" || f.status === "tasked", reopen: ["accepted", "dismissed"].includes(f.status) };
+  if (!allowed[action]) return;
+  const items = hcVisible();
+  const next = items[items.findIndex((x) => x.id === id) + 1];
+  const rep = await api("hc_act", hc.pid, id, action);
+  hc.view = { ...hc.view, ...rep };
+  if (action === "task") banner("Added to the project's tasks in the Ready Room.", "info");
+  // Like a review: deciding moves on to the next finding (unless it's still shown and was only reopened).
+  const prev = items[items.findIndex((x) => x.id === id) - 1];
+  if (action !== "reopen") hc.current = next ? next.id : prev ? prev.id : null;
+  renderHealthView();
+  renderHealth(hc.view);
+}
+
+function hcMove(d) {
+  const items = hcVisible();
+  const i = items.findIndex((x) => x.id === hc.current);
+  const n = items[Math.max(0, Math.min(items.length - 1, i + d))];
+  if (n) openFinding(n.id);
+}
+
+function hcKey(e) {
+  if (e.repeat && "tado".includes(e.key)) return;  // a held key decides once
+  if (["ArrowDown", "ArrowUp"].includes(e.key) && $("#hc-code").contains(document.activeElement)) return;  // scroll the code
+  const keys = { ArrowDown: () => hcMove(1), j: () => hcMove(1), ArrowUp: () => hcMove(-1), k: () => hcMove(-1),
+                 t: () => guarded(hcDecide)("task"), a: () => guarded(hcDecide)("accept"),
+                 d: () => guarded(hcDecide)("dismiss"), o: () => guarded(hcDecide)("reopen") };
+  if (keys[e.key]) { e.preventDefault(); keys[e.key](); }
 }
 
 const renderScanAgents = guarded(async (pid) => {
@@ -1148,6 +1211,12 @@ function onKey(e) {
   const typing = /^(TEXTAREA|INPUT|SELECT)$/.test(document.activeElement.tagName);
   if (openModalSel) {
     if (e.key === "Escape" && openModalSel !== "#modal-prompt" && openModalSel !== "#modal-confirm") closeModal();
+    return;
+  }
+  if (!$("#view-health").classList.contains("hidden")) {
+    const text = typing && document.activeElement.type !== "checkbox";
+    if (e.key === "Escape") { if (typing) document.activeElement.blur(); showDebriefView("#view-start"); loadHealth(hc.pid); }
+    else if (!text && !e.ctrlKey && !e.metaKey && !e.altKey) hcKey(e);
     return;
   }
   if (e.key === "Escape") { clearSelection(); if (typing) document.activeElement.blur(); return; }
@@ -2798,12 +2867,13 @@ const rrLoad = guarded(async () => {
 
 function rrShow(pane) {
   rr.pane = pane;
-  for (const n of ["intro", "new", "import", "project", "global", "rulesets", "skills", "presets", "templates", "agents"]) {
+  for (const n of ["intro", "new", "import", "project", "global", "rulesets", "skills", "presets", "templates", "agents",
+                   "health"]) {
     show($(`#rr-pane-${n}`), n === pane);
   }
   document.querySelectorAll(".rr-navbtn").forEach((b) => b.classList.toggle("on", b.dataset.pane === pane));
   if (pane !== "project") { rr.pid = null; rrRenderList(); }
-  if (pane === "project") rrAgentsSummary();
+  if (pane === "project") { rrAgentsSummary(); rrHealthSummary(); }
   if (pane === "global") rrRenderGlobal();
   if (pane === "rulesets") rrRenderRuleSets();
   if (pane === "presets") rrRenderPresets();
@@ -3767,10 +3837,184 @@ async function rrAgentsSummary() {
   } catch (_) { /* shown when opened */ }
 }
 
+/* ---- health checks (debrief/health.py), for every project or one project ---- */
+
+rr.healthScope = null;  // null = every project; a project id = that project's
+rr.health = null;       // rr_health() result
+rr.edit.health = null;  // selected own check's name, or "new"
+const DUE_TEXT = { changes: "days, once the code changed", always: "days, changes or not",
+                   rules: "days, or when the rules change" };
+
+async function rrOpenHealth(pid) {
+  if (pid == null && rr.pane === "project" && !(await rrLeave())) return;
+  rr.healthScope = pid;
+  rr.health = await api("rr_health", pid);
+  rr.edit.health = null;
+  const keepPid = rr.pid;
+  rrShow("health");
+  if (pid != null) rr.pid = keepPid;  // stay "inside" the project
+  rrRenderHealth();
+}
+
+/* One setting as a select (or number box): empty = inherit, shown in the first option. */
+function rrHealthSetting(label, key, values, own, inherited, onSet, fmt = (v) => v) {
+  const lab = el("label", "", label + " ");
+  let input;
+  if (values) {
+    input = el("select");
+    input.appendChild(Object.assign(el("option", "", `${rr.healthScope != null ? "Inherit" : "Default"} (${fmt(inherited)})`), { value: "" }));
+    for (const v of values) input.appendChild(Object.assign(el("option", "", fmt(v)), { value: v }));
+    if (key === "model") {
+      for (const o of input.options) {
+        const m = MODELS.models.find((x) => x.value === o.value);
+        if (m) { o.textContent = m.label; if (m.description) o.title = m.description; }
+      }
+    }
+    input.value = own ?? "";
+  } else {
+    input = Object.assign(el("input"), { type: "number", value: own ?? "", placeholder: String(inherited ?? "") });
+    input.style.width = "72px";
+  }
+  input.dataset.key = key;
+  input.classList.toggle("set", own != null && own !== "");
+  input.setAttribute("aria-label", label);
+  input.onchange = guarded(async () => onSet(key, input.value === "" ? null : input.value));
+  lab.appendChild(input);
+  return lab;
+}
+
+function rrRenderHealth() {
+  const scoped = rr.healthScope != null;
+  const v = rr.health;
+  const name = scoped && rr.proj ? rr.proj.name : "";
+  $("#rrh-title").textContent = scoped ? `Health checks — ${name}` : "Health checks";
+  show($("#rrh-back"), scoped);
+  $("#rrh-intro").textContent = scoped
+    ? "Debrief's health checks look at this project as a whole now and then. Settings here are for this project " +
+      "only; empty ones inherit the settings for every project."
+    : "Debrief's health checks look at a whole project now and then — not at one set of changes. Settings here " +
+      "apply to every project; a project can change them for itself.";
+  const set = (name) => async (key, value) => {
+    rr.health = await api("rr_health_option", name, key, value, rr.healthScope);
+    rrRenderHealth();
+  };
+  // All health checks at once.
+  const g = $("#rrh-group");
+  g.replaceChildren();
+  const gi = v.group.inherited || {}, go = v.group.own || {};
+  g.append(rrHealthSetting("Model", "model", v.models, go.model, gi.model || v.default_model, set("*")),
+           rrHealthSetting("Effort", "effort", v.efforts, go.effort, gi.effort || "default", set("*"),
+                           (x) => EFFORT_LABEL[x] || x),
+           rrHealthSetting("Flags as", "severity", ["high", "medium", "low"], go.severity, gi.severity || "each check's own", set("*")),
+           rrHealthSetting("Read up to (KB)", "budget_kb", null, go.budget_kb, gi.budget_kb || v.default_budget_kb, set("*")));
+  // Built-in checks.
+  const box = $("#rrh-builtins");
+  box.replaceChildren();
+  for (const b of v.builtins) {
+    const row = el("div", "builtin-row");
+    row.dataset.name = b.name;
+    const cb = el("input"); cb.type = "checkbox"; cb.checked = b.enabled; cb.disabled = b.off_globally;
+    cb.setAttribute("aria-label", `Use ${b.title}`);
+    cb.onchange = guarded(async () => set(b.name)("enabled", cb.checked ? null : false));
+    const t = el("div");
+    t.appendChild(el("b", "", b.title));
+    t.appendChild(el("span", "muted small", `  ${b.theme} · ${b.mode === "files" ? "reads the files" : "explores the project"}`));
+    if (b.off_globally) t.appendChild(el("span", "muted small", "  — switched off for all projects"));
+    row.append(cb, t);
+    const opts = el("div", "builtin-opts");
+    const inh = b.inherited, own = b.own || {};
+    opts.append(rrHealthSetting("Flags as", "severity", ["high", "medium", "low"], own.severity, inh.severity, set(b.name)),
+                rrHealthSetting("Model", "model", v.models, own.model, inh.model || v.default_model, set(b.name)),
+                rrHealthSetting("Effort", "effort", v.efforts, own.effort, inh.effort || "default", set(b.name),
+                                (x) => EFFORT_LABEL[x] || x));
+    const days = rrHealthSetting("Every", "days", null, own.days, inh.days, set(b.name));
+    days.appendChild(document.createTextNode(" " + DUE_TEXT[b.due_rule]));
+    opts.appendChild(days);
+    if (b.mode === "files") opts.appendChild(rrHealthSetting("Read up to (KB)", "budget_kb", null, own.budget_kb, inh.budget_kb, set(b.name)));
+    row.appendChild(opts);
+    const d = el("details");
+    d.append(el("summary", "", "What it looks for"), el("pre", "", b.prompt));
+    row.appendChild(d);
+    box.appendChild(row);
+  }
+  // Your own checks: those for every project (on/off here when scoped), then this scope's.
+  $("#rrh-own-title").textContent = scoped ? "This project's own checks" : "Your checks (for every project)";
+  const gl = $("#rrh-global-list");
+  gl.replaceChildren();
+  show(gl, scoped && v.global_custom.length > 0);
+  show($("#rrh-global-note"), scoped && v.global_custom.length > 0);
+  $("#rrh-global-note").textContent = "Your checks for every project — switch them off for this project here:";
+  for (const c of v.global_custom) {
+    const lab = el("label", "check inline");
+    const cb = Object.assign(el("input"), { type: "checkbox", checked: c.enabled_here, disabled: !c.enabled });
+    cb.onchange = guarded(async () => set(c.name)("enabled", cb.checked ? null : false));
+    lab.append(cb, document.createTextNode(" " + c.title + (c.enabled ? "" : " (off for every project)")));
+    gl.appendChild(lab);
+  }
+  rrPicker($("#rrh-list"), v.custom.map((c) => ({ ...c, id: c.name, name: c.title + (c.enabled ? "" : " (off)") })),
+           "health", rrRenderHealth);
+  const id = rr.edit.health;
+  const it = v.custom.find((x) => x.name === id);
+  show($("#rrh-editor"), id === "new" || !!it);
+  $("#rrh-title-in").value = it ? it.title : "";
+  $("#rrh-prompt").value = it ? it.prompt : "";
+  const th = $("#rrh-theme");
+  th.replaceChildren(...v.themes.map((x) => Object.assign(el("option", "", x), { value: x })));
+  th.value = it ? it.theme : "Upkeep";
+  $("#rrh-mode").value = it ? it.mode : "files";
+  $("#rrh-due").value = it ? it.due : "changes";
+  $("#rrh-days").value = it ? it.days : 30;
+  $("#rrh-severity").value = it ? it.severity : "medium";
+  fillModelSelect($("#rrh-model"), `Default (${v.default_model})`);
+  $("#rrh-model").value = (it && it.model) || "";
+  const eff = $("#rrh-effort");
+  eff.replaceChildren(Object.assign(el("option", "", "Default"), { value: "" }),
+                      ...v.efforts.map((x) => Object.assign(el("option", "", EFFORT_LABEL[x] || x), { value: x })));
+  eff.value = (it && it.effort) || "";
+  $("#rrh-budget").value = it && it.budget_kb !== v.default_budget_kb ? it.budget_kb : "";
+  show($("#rrh-budget-row"), $("#rrh-mode").value === "files");
+  $("#rrh-enabled").checked = it ? it.enabled : true;
+  show($("#rrh-delete"), !!it);
+}
+
+const rrSaveHealth = guarded(async () => {
+  const name = rr.edit.health === "new" ? null : rr.edit.health;
+  const title = $("#rrh-title-in").value.trim();
+  const r = await api("rr_health_save", {
+    title, prompt: $("#rrh-prompt").value, theme: $("#rrh-theme").value, mode: $("#rrh-mode").value,
+    due: $("#rrh-due").value, days: $("#rrh-days").value, severity: $("#rrh-severity").value,
+    model: $("#rrh-model").value || null, effort: $("#rrh-effort").value || null,
+    budget_kb: $("#rrh-budget").value || null, enabled: $("#rrh-enabled").checked,
+  }, name, rr.healthScope);
+  rr.health = r;
+  rr.edit.health = r.saved;
+  rrRenderHealth();
+  banner(`Saved “${title}”. It shows in Debrief's health check from now on.`, "info");
+});
+
+const rrDeleteHealth = guarded(async () => {
+  if (!(await confirmWord("Delete this health check? Its findings stay in the report.", "yes", "Delete"))) return;
+  rr.health = await api("rr_health_delete", rr.edit.health, rr.healthScope);
+  rr.edit.health = null;
+  rrRenderHealth();
+});
+
+async function rrHealthSummary() {
+  try {
+    const v = await api("rr_health", rr.pid);
+    const on = v.builtins.filter((b) => b.enabled).length;
+    const own = v.custom.filter((c) => c.enabled).length;
+    const glob = v.global_custom.filter((c) => c.enabled_here).length;
+    $("#rrp-health-summary").textContent = `${on} of ${v.builtins.length} built-in checks on` +
+      (glob ? ` · ${glob} of yours for every project` : "") + ` · ${own} for this project only.`;
+  } catch (_) { /* shown when opened */ }
+}
+
 /* ---- ✨ Draft with Claude ---- */
 
 const DRAFT_TITLES = { project_rules: "Draft project rules", global_rules: "Draft global rules",
-                       rule_set: "Draft a rule set", agent: "Draft a review agent", task: "Draft a task",
+                       rule_set: "Draft a rule set", agent: "Draft a review agent",
+                       health_agent: "Draft a health check", task: "Draft a task",
                        routine: "Draft a routine", project: "Draft a new project" };
 const DRAFT_HINTS = { task: "e.g. the save loader crashes on old files — make it handle them and add a test",
                       routine: "e.g. after every task, update README and the docs folder to match what changed",
@@ -3802,7 +4046,7 @@ function openDraft(kind, target) {
   show($("#draft-result"), false);
   $("#draft-text").value = "";
   $("#draft-use").disabled = true;
-  const agent = kind === "agent", named = ["agent", "task", "routine"].includes(kind);
+  const agent = kind === "agent" || kind === "health_agent", named = ["agent", "health_agent", "task", "routine"].includes(kind);
   show($("#draft-agent-title-row"), named); show($("#draft-agent-sev-row"), agent);
   show($("#draft-routine-row"), kind === "routine");
   $("#draft-name-label").textContent = kind === "task" ? "Title" : "Name";
@@ -3821,7 +4065,7 @@ const runDraft = guarded(async () => {
     const project = draftCtx.kind === "project";
     const current = $("#draft-revise").checked ? (project ? rrnFormText() : draftCtx.field.value) : "";
     const pid = ["project_rules", "task", "routine"].includes(draftCtx.kind) ? rr.pid
-              : draftCtx.kind === "agent" ? rr.agentScope : null;
+              : draftCtx.kind === "agent" ? rr.agentScope : draftCtx.kind === "health_agent" ? rr.healthScope : null;
     const r = await api("rr_draft", draftCtx.kind, desc, current, pid, project ? (rr.newFolder || "") : "");
     if (project) {
       $("#draft-p-name").value = r.name;
@@ -3842,6 +4086,11 @@ const runDraft = guarded(async () => {
       $("#draft-text").value = r.prompt;
       $("#draft-agent-title").value = r.title || $("#rra-title-in").value;
       $("#draft-agent-sev").value = r.severity || "medium";
+    } else if (draftCtx.kind === "health_agent") {
+      $("#draft-text").value = r.prompt;
+      $("#draft-agent-title").value = r.title || $("#rrh-title-in").value;
+      $("#draft-agent-sev").value = r.severity || "medium";
+      draftCtx.extra = { theme: r.theme, mode: r.mode };
     } else {
       $("#draft-text").value = r.text;
     }
@@ -3873,6 +4122,15 @@ function useDraft() {
     if ($("#draft-agent-title").value.trim()) $("#rra-title-in").value = $("#draft-agent-title").value.trim();
     $("#rra-severity").value = $("#draft-agent-sev").value;
   }
+  if (kind === "health_agent") {
+    if ($("#draft-agent-title").value.trim()) $("#rrh-title-in").value = $("#draft-agent-title").value.trim();
+    $("#rrh-severity").value = $("#draft-agent-sev").value;
+    if (draftCtx.extra) {
+      $("#rrh-theme").value = draftCtx.extra.theme;
+      $("#rrh-mode").value = draftCtx.extra.mode;
+      show($("#rrh-budget-row"), draftCtx.extra.mode === "files");
+    }
+  }
   if (kind === "task") $("#rrp-task-title").value = $("#draft-agent-title").value.trim();
   if (kind === "routine") {
     if (!ro.editing) roEdit(null);
@@ -3897,6 +4155,15 @@ function rrBindAgentsAndDrafts() {
   });
   $("#rra-back").onclick = guarded(async () => { await rrOpenProject(rr.agentScope, true); });
   $("#rra-new").onclick = () => { rr.edit.agents = "new"; rrRenderAgents(); $("#rra-title-in").focus(); };
+  $("#rrh-new").onclick = () => { rr.edit.health = "new"; rrRenderHealth(); $("#rrh-title-in").focus(); };
+  $("#rrh-save").onclick = rrSaveHealth;
+  $("#rrh-delete").onclick = rrDeleteHealth;
+  $("#rrh-mode").onchange = () => show($("#rrh-budget-row"), $("#rrh-mode").value === "files");
+  $("#rrh-back").onclick = guarded(async () => { await rrOpenProject(rr.healthScope, true); });
+  $("#rrp-health-btn").onclick = guarded(async () => {
+    if (rr.dirty && !(await rrLeave())) return;
+    await rrOpenHealth(rr.pid);
+  });
   $("#rra-save").onclick = rrSaveAgent;
   $("#rra-severity").addEventListener("change", (e) => sevClass(e.target, e.target.value));
   $("#rra-delete").onclick = rrDeleteAgent;
@@ -4526,6 +4793,7 @@ function rrBind() {
   document.querySelectorAll(".rr-navbtn").forEach((b) => (b.onclick = guarded(async () => {
     if (rr.pane === "project" && !(await rrLeave())) return;
     if (b.dataset.pane === "agents") { await rrOpenAgents(null); return; }
+    if (b.dataset.pane === "health") { await rrOpenHealth(null); return; }
     rrShow(b.dataset.pane);
   })));
   // new project
@@ -4617,6 +4885,28 @@ async function init() {
   $("#btn-start").onclick = () => startReview(state.freshStart);
   $("#btn-scan").onclick = startScan;
   $("#btn-health").onclick = runHealth;
+  $("#btn-health-report").onclick = openHealthReport;
+  $("#btn-health-settings").onclick = guarded(async () => {
+    const pid = hc.pid;
+    // Unsaved changes to another project in the Ready Room: ask first, and stay here if kept.
+    if (rr.dirty && rr.pid !== pid && !(await rrLeave())) return;
+    rr.pane = "intro";  // so the Ready Room's own refresh doesn't reopen another pane over this one
+    showTool("readyroom");
+    await rrOpen();
+    await rrOpenProject(pid, true);
+    if (rr.pid === pid) await rrOpenHealth(pid);
+  });
+  $("#hc-back").onclick = () => { showDebriefView("#view-start"); loadHealth(hc.pid); };
+  $("#hc-show-quiet").onchange = (e) => { hc.showQuiet = e.target.checked; renderHealthView(); };
+  $("#hc-more").onclick = guarded(async () => {
+    hc.around = Math.min(192, hc.around * 3);
+    const f = hcVisible().find((x) => x.id === hc.current);
+    if (f) await renderExcerpt(f);
+  });
+  for (const [id, action] of [["#hc-task", "task"], ["#hc-accept", "accept"], ["#hc-dismiss", "dismiss"],
+                              ["#hc-reopen", "reopen"]]) {
+    $(id).onclick = guarded(() => hcDecide(action));
+  }
   $("#btn-health-cancel").onclick = guarded(async () => { await api("hc_cancel"); });
   $("#btn-cancel").onclick = cancelStart;
   $("#btn-resume").onclick = () => startReview(false);

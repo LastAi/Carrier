@@ -55,6 +55,7 @@
       <button class="rr-navbtn" data-pane="presets">Session presets</button>
       <button class="rr-navbtn" data-pane="templates">Project templates</button>
       <button class="rr-navbtn" data-pane="agents">Review agents</button>
+      <button class="rr-navbtn" data-pane="health">Health checks</button>
     </nav>
   </aside>
 
@@ -413,6 +414,9 @@
         <h3>Review agents <span class="muted small">(Debrief)</span></h3>
         <p id="rrp-agents-summary" class="muted small"></p>
         <button id="rrp-agents-btn" class="ghost">Review agents for this project…</button>
+        <h3>Health checks <span class="muted small">(Debrief)</span></h3>
+        <p id="rrp-health-summary" class="muted small"></p>
+        <button id="rrp-health-btn" class="ghost">Health checks for this project…</button>
       </div>
 
       <div class="rr-foot">
@@ -494,6 +498,58 @@
       </div>
     </div>
 
+    <div id="rr-pane-health" class="rr-pane hidden">
+      <div class="rr-head"><h2 id="rrh-title">Health checks</h2>
+        <button id="rrh-back" class="ghost hidden">◂ Back to the project</button></div>
+      <p id="rrh-intro" class="muted"></p>
+      <div class="card">
+        <h3>All health checks</h3>
+        <p class="muted small">Defaults for every built-in check below; a check's own setting wins. Your own checks keep
+          their settings.</p>
+        <div id="rrh-group" class="builtin-opts"></div>
+      </div>
+      <div class="card">
+        <h3>Built-in checks</h3>
+        <p class="muted small"><b>Flags as</b> is how serious its findings are by default. <b>Model</b> and <b>effort</b>
+          set how thorough it is. <b>Every</b> is how many days until it's due again. Checks that read the files have a
+          <b>budget</b>: over it, the most recently changed files go first.</p>
+        <div id="rrh-builtins" class="builtin-list"></div>
+      </div>
+      <div class="card">
+        <h3 id="rrh-own-title">Your checks</h3>
+        <p id="rrh-global-note" class="muted small hidden"></p>
+        <div id="rrh-global-list" class="hidden"></div>
+        <div class="split-pane">
+          <div><div id="rrh-list" class="item-picker"></div><button id="rrh-new" class="ghost">＋ New health check</button></div>
+          <div id="rrh-editor" class="hidden">
+            <label class="field">Name <input id="rrh-title-in" type="text" placeholder="e.g. Save format compatibility"></label>
+            <div class="field"><span class="card-head">What to look for <button class="ghost small-btn draft-btn" data-draft="health_agent" data-target="#rrh-prompt" title="Describe what you want; Claude writes it up for you to edit and save">✨ Draft with Claude…</button></span>
+              <textarea id="rrh-prompt" rows="9" placeholder="Describe what this check should report, and what it should leave alone."></textarea></div>
+            <div class="agent-opts">
+              <label class="field">Theme <select id="rrh-theme"></select></label>
+              <label class="field" title="Reads the files: for problems visible in one file. Explores the project: searches across files (structure, duplication, missing tests).">How
+                <select id="rrh-mode"><option value="files">Reads the files</option><option value="project">Explores the project</option></select></label>
+              <label class="field">Due again
+                <select id="rrh-due"><option value="changes">After the days, once the code changed</option>
+                  <option value="always">After the days, changes or not</option>
+                  <option value="rules">After the days, or when the rules change</option></select></label>
+              <label class="field">Every <input id="rrh-days" type="number" min="1" max="365" value="30"> days</label>
+            </div>
+            <div class="agent-opts">
+              <label class="field">Flags as
+                <select id="rrh-severity"><option value="high">High</option><option value="medium" selected>Medium</option>
+                  <option value="low">Low</option></select></label>
+              <label class="field">Model <select id="rrh-model"></select></label>
+              <label class="field">Effort <select id="rrh-effort"></select></label>
+              <label class="field" id="rrh-budget-row">Read up to <input id="rrh-budget" type="number" min="20" max="20000" placeholder="400"> KB</label>
+            </div>
+            <div class="checks-row"><label class="check inline"><input type="checkbox" id="rrh-enabled" checked> On</label></div>
+            <div class="modal-actions left"><button id="rrh-save" class="primary">Save</button>
+              <button id="rrh-delete" class="ghost danger">Delete</button></div>
+          </div>
+        </div>
+      </div>
+    </div>
     <div id="rr-pane-agents" class="rr-pane hidden">
       <div class="rr-head"><h2 id="rra-title">Review agents</h2>
         <button id="rra-back" class="ghost hidden">◂ Back to the project</button></div>
@@ -537,6 +593,41 @@
     </div>
   </section>
 </main>
+<!-- ======================= DEBRIEF: HEALTH REPORT ======================= -->
+<main id="view-health" class="view hidden">
+  <aside id="hc-sidebar">
+    <div class="sidebar-head">
+      <button id="hc-back" class="ghost small-btn" title="Back to the project (Esc)">◂ Back</button>
+      <span id="hc-side-title">Health report</span>
+      <span class="muted small">↑/↓ or j/k</span>
+    </div>
+    <label class="check small hc-quiet"><input type="checkbox" id="hc-show-quiet"> Show accepted, dismissed and not found again</label>
+    <ol id="hc-list" role="listbox" aria-label="Health findings"></ol>
+  </aside>
+  <section id="hc-detail">
+    <div id="hc-detail-scroll">
+      <div id="hc-head"></div>
+      <div class="diff-card card">
+        <div class="diff-toolbar">
+          <span id="hc-where" class="muted small"></span>
+          <button id="hc-more" class="ghost small-btn" title="Show more of the file around the problem">More context</button>
+        </div>
+        <div id="hc-code" class="diff" tabindex="0" aria-label="The code the finding is about"></div>
+      </div>
+      <div id="hc-body" class="card"></div>
+    </div>
+    <div id="hc-composer">
+      <div class="decide-row">
+        <button id="hc-task" class="decide fix" title="Add it to the project's task queue in the Ready Room">✎ Make a task <kbd>t</kbd></button>
+        <button id="hc-accept" class="decide approve" title="Keep it as it is: stays in the report but isn't counted, even when found again">✓ Accept <kbd>a</kbd></button>
+        <button id="hc-dismiss" class="decide skip" title="Not a real problem: hidden, even when found again">✕ Dismiss <kbd>d</kbd></button>
+        <button id="hc-reopen" class="decide note" title="Count it as an open finding again">↺ Reopen <kbd>o</kbd></button>
+        <span id="hc-state" class="muted"></span>
+      </div>
+    </div>
+  </section>
+</main>
+
 <main id="view-flightdeck" class="view hidden">
   <aside id="fd-sidebar">
     <div class="sidebar-head">
@@ -673,13 +764,16 @@
         compliance after a set time even with no changes (rules compliance also when the rules change), the
         others after a set time once the code has changed. Due checks are ticked; token counts are rough.</p>
       <div id="health-agents" class="hc-agents"></div>
+      <p class="muted small">Model, effort, how often and which checks are on: <button id="btn-health-settings"
+        class="link">health checks in the Ready Room ▸</button></p>
       <div class="hc-run">
+        <button id="btn-health-report" class="primary hidden">Open the health report</button>
         <button id="btn-health" class="ghost">Run selected checks</button>
         <span id="health-est" class="muted small"></span>
         <button id="btn-health-cancel" class="ghost hidden">Cancel</button>
       </div>
       <pre id="health-log" class="log hidden"></pre>
-      <div id="health-report"></div>
+      <p id="health-summary" class="hc-summary"></p>
     </details>
   </section>
 </main>

@@ -257,14 +257,48 @@ class DesktopApi:
         return health.report(self._store(), pid)
 
     @_guard
-    def hc_set_option(self, pid: int | None, name: str, key: str, value: Any) -> dict[str, Any] | None:
-        """One setting of a health check, for a project (or globally with pid None)."""
+    def hc_excerpt(self, pid: int, fid: int, around: int = 8) -> dict[str, Any]:
+        """The code a finding is about (only the project's own files are read)."""
+        from carrier.debrief import health
+
+        return health.excerpt(self._store(), pid, int(fid), int(around))
+
+    # -- health checks in the Ready Room --------------------------------------------
+
+    @_guard
+    def rr_health(self, pid: int | None = None) -> dict[str, Any]:
+        """The health-check editor: for every project (None) or one project."""
         from carrier.debrief import health
 
         if pid is not None and self._store().project(pid) is None:
-            raise S.SessionError("Unknown project.")
+            raise RoomError("Unknown project.")
+        return health.ready_room_view(self._store(), pid)
+
+    @_guard
+    def rr_health_option(self, name: str, key: str, value: Any, pid: int | None = None) -> dict[str, Any]:
+        """One setting of a built-in check, or of all checks (name "*"), for every project or one."""
+        from carrier.debrief import health
+
+        if pid is not None and self._store().project(pid) is None:
+            raise RoomError("Unknown project.")
         health.set_option(self._store(), pid, name, key, value)
-        return {**health.view(self._store(), pid), **self._hc_running(pid)} if pid is not None else None
+        return health.ready_room_view(self._store(), pid)
+
+    @_guard
+    def rr_health_save(self, fields: dict[str, Any], name: str | None = None, pid: int | None = None) -> dict[str, Any]:
+        from carrier.debrief import health
+
+        if pid is not None and self._store().project(pid) is None:
+            raise RoomError("Unknown project.")
+        saved = health.save_custom(self._store(), dict(fields or {}), name, pid)
+        return {**health.ready_room_view(self._store(), pid), "saved": saved}
+
+    @_guard
+    def rr_health_delete(self, name: str, pid: int | None = None) -> dict[str, Any]:
+        from carrier.debrief import health
+
+        health.delete_custom(self._store(), name, pid)
+        return health.ready_room_view(self._store(), pid)
 
     @_guard
     def db_project(self, pid: int) -> dict[str, Any]:

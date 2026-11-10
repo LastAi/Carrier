@@ -739,25 +739,41 @@ files are left out.
   and read-only tools (Read, Grep, Glob) to search and read what matters —
   for questions about the whole, such as duplication or untested code.
 * **Cost.** Each check shows a rough token count before you run it, and the
-  total for the ticked ones. **Settings ▾** on a check sets, for this project:
-  on or off, the model (Sonnet by default), the effort, how many days until it's
-  due again, and for checks that read the files a budget — **Read up to …
-  KB of code per run**; over it, the most recently changed files go first and
-  the rest wait for the next run. **Use defaults** clears the project's
-  settings.
-* **The report** groups findings by theme, most serious first. Each says
-  where (file and line), what's wrong, and what to do. A run is compared with
-  the last one: a finding is **new**, still **open**, or **not found again**
-  (likely fixed). For each finding:
+  total for the ticked ones.
+* **Settings** are in the Ready Room, like review agents: **Health checks**
+  in the Ready Room's menu for every project, or **Health checks for this
+  project…** on a project's page (also linked from Debrief).
+  * **All health checks** sets the model, effort, how serious findings are
+    (*Flags as*) and the file budget for every built-in check at once — for
+    example Opus for all of them. A check's own setting wins over it, and a
+    project's settings win over those for every project.
+  * Each built-in check can be switched off and given its own *Flags as*,
+    model, effort, **Every … days** (how long until it's due again) and, for
+    checks that read the files, a budget — **Read up to … KB**; over it, the
+    most recently changed files go first and the rest wait for the next run.
+  * **Your own checks:** **＋ New health check** (or **✨ Draft with Claude**)
+    with a name, what to look for, its theme, whether it reads the files or
+    explores the project, when it's due again, and its model and effort.
+    Made in the Ready Room's menu, a check is for every project (a project can
+    switch it off); made on a project's page, it's for that project only.
+    Deleting one keeps its findings in the report, under *a deleted check*.
+* **The health report** (**Open the health report**) works like a review:
+  findings on the left, grouped by theme, most serious first; on the right
+  the finding with **the code it's about** — the lines in question marked,
+  with **More context** for more of the file — then what's wrong and what to
+  do. **↑/↓** or **j/k** move between findings; **Esc** goes back. Each run is
+  compared with the last: a finding is **new**, still **open**, or **not found
+  again** (likely fixed).
 
-  | Button | What it does |
-  |---|---|
-  | Make a task | Adds it to the project's task queue in the Ready Room, with the details |
-  | Accept | Keeps it as it is: it stays in the report but isn't counted, even when found again |
-  | Dismiss | Not a real problem: hidden, even when found again |
-  | Reopen | Counts an accepted or dismissed finding as open again |
+  | Button | Key | What it does |
+  |---|---|---|
+  | Make a task | t | Adds it to the project's task queue in the Ready Room, with the details |
+  | Accept | a | Keeps it as it is: it stays in the report but isn't counted, even when found again |
+  | Dismiss | d | Not a real problem: hidden, even when found again |
+  | Reopen | o | Counts an accepted or dismissed finding as open again |
 
-  **Show accepted, dismissed and not found again** shows the quiet ones.
+  Deciding moves on to the next finding. **Show accepted, dismissed and not
+  found again** lists the quiet ones too.
 * **Failures.** If part of a check fails (a time-out, say), the findings in
   the files it couldn't read are kept as they were, the run is marked
   *incomplete*, and the check stays due. A check that fails doesn't stop the

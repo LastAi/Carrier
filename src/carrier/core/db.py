@@ -303,6 +303,7 @@ _MIGRATIONS: dict[str, dict[str, str]] = {
     "routines": {"group_id": "INTEGER", "mode": "TEXT NOT NULL DEFAULT ''"},
     "templates": {"extras": "TEXT NOT NULL DEFAULT '{}'"},
     "presets": {"effort": "TEXT"},
+    "health_findings": {"end_line": "INTEGER NOT NULL DEFAULT 0"},
 }
 
 

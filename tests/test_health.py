@@ -239,3 +239,83 @@ def test_code_state_follows_content(proj):
     assert changed != before
     f.write_text("TIMEOUT = 30\n")  # back as it was
     assert health.code_state(health.project_scope(store, pid, text_only=False)) == before
+
+
+def test_group_defaults_and_own_checks(proj):
+    store, _room, pid, main = proj
+    health.set_option(store, None, "*", "model", "haiku")
+    health.set_option(store, None, "security", "model", "opus")
+    health.set_option(store, pid, "*", "effort", "high")
+    by = {a.name: a for a in health.agents(store, pid)}
+    assert by["tests"].model == "haiku" and by["security"].model == "opus"  # its own setting wins
+    assert by["tests"].effort == "high" and by["security"].effort == "high"
+    health.set_option(store, pid, "*", "model", "sonnet")  # the project's group setting beats the global one
+    assert {a.name: a for a in health.agents(store, pid)}["tests"].model == "sonnet"
+    assert {a.name: a for a in health.agents(store, pid)}["security"].model == "sonnet"
+    with pytest.raises(ValueError):
+        health.set_option(store, None, "*", "days", 3)  # each check keeps its own schedule
+    # Own checks: for every project, and for one project.
+    g = health.save_custom(store, {"title": "Save compatibility", "prompt": "Old saves must load.",
+                                   "theme": "Reliability", "mode": "files", "due": "always", "days": 7})
+    p = health.save_custom(store, {"title": "Shader budget", "prompt": "Too many passes.", "mode": "project"}, pid=pid)
+    by = {a.name: a for a in health.agents(store, pid)}
+    assert by[g].source == "global" and by[g].due == "always" and by[p].source == "project"
+    assert by[g].model is None  # group settings don't change your own checks
+    health.set_option(store, pid, g, "enabled", False)  # off for this project only
+    assert not {a.name: a for a in health.agents(store, pid)}[g].enabled
+    assert {a.name: a for a in health.agents(store, None)}[g].enabled
+    v = health.ready_room_view(store, pid)
+    assert [c["name"] for c in v["custom"]] == [p] and v["global_custom"][0]["enabled_here"] is False
+    assert v["group"]["inherited"]["model"] == "haiku" and v["group"]["own"]["model"] == "sonnet"
+    # It runs like a built-in.
+    found = [{"file": "src/save.py", "line": 3, "end_line": 4, "title": "Old saves fail", "severity": "high"}]
+    asyncio.run(health.run(store, pid, FakeBackend(handler_for({"Save compatibility": found})), [g]))
+    f = [f for t in health.report(store, pid)["themes"] for f in t["findings"]][0]
+    assert f["agent_title"] == "Save compatibility" and f["end_line"] == 4
+    x = health.excerpt(store, pid, f["id"], around=1)
+    assert x["start"] == 2 and x["focus"] == [3, 4] and x["lines"][1].strip() == "return open(p).read()"
+    with pytest.raises(ValueError):
+        health.save_custom(store, {"title": "x", "prompt": "y", "mode": "nope"})
+    health.delete_custom(store, p, pid)
+    assert p not in {a.name for a in health.agents(store, pid)}
+
+
+def test_ready_room_shows_what_each_check_inherits(proj):
+    store, _room, pid, _main = proj
+    health.set_option(store, None, "*", "model", "haiku")
+    assert {b["name"]: b for b in health.ready_room_view(store, None)["builtins"]}["tests"]["inherited"]["model"] == "haiku"
+    health.set_option(store, pid, "*", "model", "opus")
+    assert {b["name"]: b for b in health.ready_room_view(store, pid)["builtins"]}["tests"]["inherited"]["model"] == "opus"
+
+
+def test_review_fixes(proj, tmp_path):
+    store, room, pid, main = proj
+    # Names are never shared or reused, so findings and settings stay with their check.
+    a = health.save_custom(store, {"title": "Foo", "prompt": "x"}, pid=pid)
+    b = health.save_custom(store, {"title": "Foo", "prompt": "x"})
+    assert a != b
+    health.set_option(store, pid, b, "enabled", False)
+    found = [{"file": "src/save.py", "line": 2, "title": "Foo problem", "severity": "low"}]
+    asyncio.run(health.run(store, pid, FakeBackend(handler_for({"Foo": found})), [a]))
+    health.delete_custom(store, a, pid)
+    titles = [f["agent_title"] for t in health.report(store, pid)["themes"] for f in t["findings"]]
+    assert titles == ["(a deleted check)"]  # findings stay, under a deleted check
+    health.delete_custom(store, b)
+    assert b not in health.options(store, pid)  # its settings went with it
+    # A decision can't be made twice (a held key, a double click).
+    fid = [f for t in health.report(store, pid)["themes"] for f in t["findings"]][0]["id"]
+    health.act(store, pid, fid, "task", add_task=lambda t, d: 1)
+    with pytest.raises(ValueError):
+        health.act(store, pid, fid, "task", add_task=lambda t, d: 2)
+    # Lines far down a file stay in view however much context is asked for.
+    (main / "long.py").write_text("".join(f"x{i} = {i}\n" for i in range(1, 2001)))
+    long = [{"file": "long.py", "line": 1000, "end_line": 1002, "title": "Deep", "severity": "low"}]
+    asyncio.run(health.run(store, pid, FakeBackend(handler_for({"Performance hotspots": long})), ["performance"]))
+    deep = [f for t in health.report(store, pid)["themes"] for f in t["findings"] if f["title"] == "Deep"][0]
+    x = health.excerpt(store, pid, deep["id"], around=400)
+    assert x["start"] <= 1000 and x["start"] + len(x["lines"]) - 1 >= 1002
+    # A link out of the project is never read.
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOKEN=abc\n")
+    (main / "notes.txt").symlink_to(secret)
+    assert "notes.txt" not in {f.path for f in health.project_scope(store, pid).files}
