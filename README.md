@@ -1,15 +1,15 @@
 # Carrier
 
+**Brief. Launch. Debrief.**
+
+A mothership for Claude Code: launch AI agents in parallel, keep them aware
+of each other, and review every change they bring home.
+
 > [!WARNING]
 > **Pre-release alpha.** Carrier is early software under active development. Features change
 > between versions, and it has had little testing beyond its author's own use. **Do not rely on it
 > in a production setting or with work you can't afford to lose.** Keep your projects in git, review
 > what agents change before you keep it, and back up anything important. Bug reports are very welcome.
-
-**Brief. Launch. Debrief.**
-
-A mothership for Claude Code: launch AI agents in parallel, keep them aware
-of each other, and review every change they bring home.
 
 ![Debrief in the Carrier desktop app](docs/screenshot-desktop.png)
 
@@ -95,9 +95,26 @@ The first start sets everything up (about a minute). Then:
 - [Contributing](CONTRIBUTING.md) — setting up a development copy
 - [Changelog](CHANGELOG.md)
 
+## A note from the author
+
+Carrier started with one need: I wanted to go over what Claude Code had done to my
+projects the way I'd go through a code review with another person — change by
+change, asking "why is this here?", and sending back what needed fixing. That
+became Debrief.
+
+Then came keeping track of it all. With several projects and a growing pile of
+tasks, I needed somewhere to organize them, and the Ready Room grew out of that.
+By that point Carrier already knew my projects, their rules and their tasks, so
+it seemed I might as well finish the job and wrap the way agents get launched,
+too. That's the Flight Deck.
+
+And at the end of the day, I really wanted spellcheck.
+
+— LastAi
+
 ## Status
 
-Pre-release alpha — not for production use (see the warning at the top).
+Pre-release alpha — not for production use (see the warning above).
 Bug reports and ideas are welcome in Issues.
 
 **Tested on Windows 11**, which is where Carrier is used day to day. It is
