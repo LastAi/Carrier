@@ -692,3 +692,14 @@ button.link { background: none; border: none; padding: 0; color: var(--accent); 
 .task-link { margin-top: 2px; }
 .task-link.waiting { color: var(--sev-medium); }
 li.task-row.flash { box-shadow: inset 3px 0 0 var(--accent); background: var(--panel-2); }
+
+.folder-chip .fc-head { display: flex; align-items: center; gap: 6px; }
+.folder-chip .fc-head .fc-name { flex: 1; }
+.folder-chip .fc-toggle { font-size: 13px; padding: 0 6px; line-height: 1.6; background: transparent;
+  border-color: transparent; color: var(--muted); }
+.folder-chip .fc-toggle:hover, .folder-chip .fc-toggle.open { color: var(--fg); border-color: var(--border); }
+.folder-chip .fc-drawer { display: flex; flex-direction: column; gap: 4px; padding-top: 6px; margin-top: 2px;
+  border-top: 1px solid var(--border); }
+.folder-chip .fc-drawer.hidden { display: none; }
+.folder-chip .fc-foot { justify-content: space-between; }
+.folder-chip .fc-foot .muted { overflow-wrap: anywhere; }

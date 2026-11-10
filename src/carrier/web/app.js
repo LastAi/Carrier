@@ -3098,6 +3098,8 @@ function rrRenderProject() {
   rrRenderRoutines();
 }
 
+rr.folderOpen = rr.folderOpen || new Set();  // folders whose settings drawer is open
+
 function rrRenderFolders() {
   const box = $("#rrp-folders");
   box.replaceChildren();
@@ -3200,11 +3202,26 @@ function rrRenderFolders() {
     const rm = el("button", "fc-remove", "Remove");
     rm.title = `Remove ${f.label} from this project (the folder is not touched)`;
     rm.onclick = guarded(async () => { rr.proj = await api("rr_remove_folder", rr.pid, f.path); rrRenderFolders(); });
+    // The card shows the name and type; the rest is in a drawer the toggle opens (kept open across changes).
     row.insertBefore(kind, row.firstChild);
-    row.appendChild(rm);
-    chip.append(name, row);
-    if (row2.childNodes.length) chip.appendChild(row2);
-    chip.append(row3, ...notes);
+    const open = rr.folderOpen.has(f.path);
+    const tog = el("button", "fc-toggle" + (open ? " open" : ""), open ? "▴" : "⚙");
+    tog.title = open ? "Hide this folder's settings" : "Show this folder's settings";
+    tog.setAttribute("aria-label", `Settings of ${f.label}`);
+    tog.setAttribute("aria-expanded", String(open));
+    tog.onclick = () => { open ? rr.folderOpen.delete(f.path) : rr.folderOpen.add(f.path); rrRenderFolders(); };
+    const head = el("span", "fc-head");
+    head.append(name, tog);
+    chip.append(head, row);
+    const drawer = el("div", "fc-drawer");
+    if (row2.childNodes.length) drawer.appendChild(row2);
+    if (row3.childNodes.length) drawer.appendChild(row3);
+    drawer.append(...notes);
+    const foot = el("span", "fc-row fc-foot");
+    foot.append(el("span", "muted small", f.path), rm);
+    drawer.appendChild(foot);
+    show(drawer, open);
+    chip.appendChild(drawer);
     box.appendChild(chip);
   }
 }

@@ -376,6 +376,9 @@ extra folders of two kinds.
 
 * Add extra folders with **＋ work folder**, **＋ reference folder** or
   **＋ workspace folder**, and switch a folder's type later from its card.
+  A card shows the folder's name and type; **⚙** opens its settings —
+  sharing, part, reviews, note, watching, its full path and **Remove** —
+  and **▴** closes them again.
 * **Workspace folders** suit a shared parent such as a modding workspace that
   holds several projects. The project can read everything there but change
   nothing that exists; when its work needs a new folder outside the main

@@ -4,6 +4,7 @@ All notable changes are listed here. Format: [Keep a Changelog](https://keepacha
 
 ## Unreleased
 
+- **Tidier folder cards**: each extra folder shows just its name and type; ⚙ opens its settings.
 - **Approve, follow up later** (`l`) in reviews: approves a change — the
   review can clear and routines waiting for it can go on — and collects what
   you write into one ordinary *Review follow-ups* task that holds nothing.

@@ -248,6 +248,9 @@ def test_shared_folder_review_settings(rrpage, tmp_path):
     pg.click(".tool[data-tool=readyroom]")
     pg.click("#rr-list .rr-item:has-text('Game')")
     chip = "#rrp-folders .folder-chip"
+    # The card shows the name and type; its settings are in a drawer.
+    assert not pg.is_visible(f"{chip} select[aria-label='Sharing of Shared']")
+    pg.click(f"{chip} button[aria-label='Settings of Shared']")
     pg.wait_for_selector(f"{chip} >> text=shared with Anim")
     assert pg.input_value(f"{chip} select[aria-label='Sharing of Shared']") == "shared"
     pg.click(f"{chip} >> text=Part…")
@@ -270,6 +273,7 @@ def test_shared_folder_review_settings(rrpage, tmp_path):
     # Adding Game's main folder (what the picker returns) to Anim as a work folder offers a reference folder.
     pg.click("#rr-list .rr-item:has-text('Anim')")
     pg.wait_for_selector(f"{chip} >> text=Shared")
+    pg.screenshot(path="/tmp/carrier-shots/folder-drawer.png")
     pg.click("#rrp-addfolder-btn")
     pg.wait_for_selector("#confirm-text >> text=Game's main folder")
     pg.click("#confirm-ok")
