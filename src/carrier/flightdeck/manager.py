@@ -293,6 +293,22 @@ class FlightDeck:
                 return ws, current
         return ws, None
 
+    # Files in a workspace folder a session may change (after asking) though the rest is read only:
+    # Claude Code's instruction files, which apply to every project in the workspace.
+    WORKSPACE_EDITABLE = ("CLAUDE.md", "CLAUDE.local.md")
+
+    def workspace_instructions(self, session: dict[str, Any], file_path: str) -> dict[str, Any] | None:
+        """The workspace folder, when ``file_path`` is one of its instruction files (``WORKSPACE_EDITABLE``)
+        in an existing folder of it — and not in another project's main folder."""
+        if os.path.basename(file_path) not in self.WORKSPACE_EDITABLE:
+            return None
+        claim = self.workspace_target(session, file_path)
+        if claim is None or claim[1] is not None:
+            return None
+        if self.file_owner(session, file_path)["kind"] == "foreign":
+            return None
+        return claim[0]
+
     def claim_folder(self, session: dict[str, Any], folder: Path) -> dict[str, Any]:
         """Create ``folder`` (new, inside a workspace folder) and add it to the session's project as a work folder."""
         project = self.store.project(session["project_id"]) if session["project_id"] is not None else None
@@ -704,8 +720,17 @@ class FlightDeck:
         s = self.store.session(sid)
         if s is None:
             raise DeckError("Unknown session.")
-        if sid in self.runners:
-            return self._session_summary(s)
+        old = self.runners.get(sid)
+        if old is not None:
+            dead = old._reader is None or old._reader.done() or s["status"] == "error"
+            if not dead:
+                return self._session_summary(s)
+            # Its connection to Claude Code is gone (a message too big to read, a crash): reconnect.
+            self.runners.pop(sid, None)
+            try:
+                self._run(old.stop(), timeout=15)
+            except Exception:
+                pass
         if not Path(s["cwd"]).is_dir():
             raise DeckError("This session's folder no longer exists.")
         runner = SessionRunner(self, sid, self.client_factory)
@@ -1407,6 +1432,8 @@ class FlightDeck:
         return {**self._session_summary(s), "project": project, "task_row": task, "seq": seq,
                 "images": self.room.images_allowed(s["project_id"]),
                 "transcript": self.store.messages(sid), "pending": pending, "busy": bool(runner and runner.busy),
+                "last_activity": runner.last_activity if runner else None,
+                "background": bool(runner and runner._bg_active),
                 "files": self.store.session_files(sid), "awareness": self.awareness(sid)}
 
     def awareness(self, sid: int) -> dict[str, Any]:

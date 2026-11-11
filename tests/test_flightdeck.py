@@ -576,6 +576,18 @@ def test_workspace_folders_claim_new_folders(deck: FlightDeck, projects, tmp_pat
     assert "publish" in {f["label"] for f in room.project(pid)["folders"]}
     err = deck._run(runner._call_tool("create_work_folder", {"path": str(ws / "mods" / "Other")}), timeout=10)
     assert err.startswith("Error")
+    # CLAUDE.md in the workspace guides every project there: editable, but it always asks.
+    (ws / "CLAUDE.md").write_text("old\n")
+
+    async def hook(path):
+        return await runner._before_edit({"tool_name": "Edit", "tool_input": {"file_path": str(path)}}, "t1", None)
+
+    asked = deck._run(hook(ws / "CLAUDE.md"), timeout=10)
+    assert asked["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert "every project" in asked["hookSpecificOutput"]["permissionDecisionReason"]
+    assert deck._run(hook(ws / "mods" / "CLAUDE.md"), timeout=10)["hookSpecificOutput"]["permissionDecision"] == "ask"
+    other_doc = deck._run(hook(ws / "mods" / "Other" / "notes.md"), timeout=10)
+    assert other_doc["hookSpecificOutput"]["permissionDecision"] == "deny"  # anything else stays read only
     # A workspace folder can't become a plain work folder while it holds the project's folders.
     from carrier.readyroom.manager import RoomError
     deck.end_session(s["id"])
@@ -688,6 +700,64 @@ def test_claude_asks_where_new_work_goes(deck: FlightDeck, projects):
     out = ask("propose_work", {"title": "Rewrite all", "details": "x", "suggest": "main"}, "decline", "")
     assert "didn't add" in out and "Rewrite all" not in [t["title"] for t in deck.store.tasks(pid)]
     assert any(e["text"] == "Not added." for e in events(deck, s["id"], "proposal_done"))
+
+
+def test_claude_speaking_between_turns_is_shown(deck: FlightDeck, projects):
+    """A background agent reporting back after the turn: Carrier keeps reading, shows it, and the
+    status says working until Claude's follow-up turn is done."""
+    room = deck.room
+    room.add_task(projects["ApiServer"], "long job")
+    s = deck.start_task(room.current_task(projects["ApiServer"])["id"], send_task=False)
+    deck.send(s["id"], "background The background agent finished: 12 tests pass.")
+    end = time.time() + 5
+    while time.time() < end and not any("12 tests pass" in (e.get("text") or "") for e in events(deck, s["id"], "text")):
+        time.sleep(0.02)
+    assert any("12 tests pass" in (e.get("text") or "") for e in events(deck, s["id"], "text"))
+    assert any(e.get("kind") == "background" for e in events(deck, s["id"], "notice"))
+    wait(deck, s["id"])
+    assert deck.store.session(s["id"])["status"] == "idle"
+    assert not deck.runners[s["id"]].busy
+
+
+def test_background_agent_progress_doesnt_block_the_user(deck: FlightDeck, projects):
+    """A sub-agent's own progress between turns is shown but doesn't hold the session: the user's
+    next message is answered normally."""
+    from claude_agent_sdk import AssistantMessage, ToolUseBlock
+
+    room = deck.room
+    room.add_task(projects["ApiServer"], "bg")
+    s = deck.start_task(room.current_task(projects["ApiServer"])["id"], send_task=False)
+    deck.send(s["id"], "hello")
+    wait(deck, s["id"])
+    client = ALL_CLIENTS[-1]
+    client.later.append(AssistantMessage(content=[ToolUseBlock(id="sub1", name="Bash", input={"command": "ls"})],
+                                         model="fake-model", parent_tool_use_id="agent1"))
+    deck.send(s["id"], "next please")
+    wait(deck, s["id"])
+    assert deck.store.session(s["id"])["status"] == "idle" and not deck.runners[s["id"]].busy
+    deck.send(s["id"], "and again")
+    wait(deck, s["id"])
+    assert sum(1 for p in client.prompts if p == "and again") == 1
+
+
+def test_a_message_too_big_to_read_is_reported(deck: FlightDeck, projects):
+    room = deck.room
+    room.add_task(projects["ApiServer"], "big read")
+    s = deck.start_task(room.current_task(projects["ApiServer"])["id"], send_task=False)
+    deck.send(s["id"], "huge")
+    end = time.time() + 5
+    while time.time() < end and deck.store.session(s["id"])["status"] != "error":
+        time.sleep(0.02)
+    assert deck.store.session(s["id"])["status"] == "error"
+    assert any("too big" in (e.get("text") or "") for e in events(deck, s["id"], "error"))
+    assert sdk.MAX_MESSAGE_BYTES > 1024 * 1024 and ALL_CLIENTS[-1].options.max_buffer_size == sdk.MAX_MESSAGE_BYTES
+    # Resume reconnects (a new connection), and the session works again.
+    n = len(ALL_CLIENTS)
+    deck.resume_session(s["id"])
+    assert len(ALL_CLIENTS) == n + 1 and deck.store.session(s["id"])["status"] == "idle"
+    deck.send(s["id"], "hello again")
+    wait(deck, s["id"])
+    assert deck.store.session(s["id"])["status"] == "idle"
 
 
 def test_work_for_a_linked_project(deck: FlightDeck, projects):

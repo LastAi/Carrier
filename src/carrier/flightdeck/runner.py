@@ -43,6 +43,17 @@ ClientFactory = Callable[[Any], Any]
 _req_ids = itertools.count(1)
 
 
+def _explain(exc: Exception) -> str:
+    """A Claude Code failure in words the session page can show."""
+    text = str(exc)
+    if isinstance(exc, ConnectionError):
+        return text
+    if "JSON" in type(exc).__name__ or "Failed to decode JSON" in text:
+        return ("Claude Code sent a message too big or garbled to read, so this session stopped listening to it "
+                f"({text[:160]}). Press Resume to reconnect; Claude picks up where it was.")
+    return f"Claude Code error: {text} — press Resume to reconnect."
+
+
 class SessionRunner:
     def __init__(self, deck: "FlightDeck", session_id: int, client_factory: ClientFactory) -> None:
         self.deck = deck
@@ -50,6 +61,13 @@ class SessionRunner:
         self.client_factory = client_factory
         self.client: Any = None
         self.busy = False
+        self._turn: dict[str, Any] | None = None   # the user's turn being answered (see _read_loop)
+        self._bg_active = False                    # Claude is in a turn it started itself
+        self._reader: asyncio.Future | None = None
+        self._reader_error: Exception | None = None
+        self._stopping = False
+        self._bg_limit: list[str] = []
+        self.last_activity = time.time()  # when Claude Code last sent anything (shown while it works)
         self.interrupted = False  # set by interrupt() for the turn in progress
         self.pending: dict[str, dict[str, Any]] = {}  # req_id -> {future, tool, summary}
         self._routed_asks = 0  # AskUserQuestion calls that reached Carrier, not yet matched to a result
@@ -104,6 +122,13 @@ class SessionRunner:
         self.cost_base = float(row["cost_usd"] or 0.0)
         self.client = self.client_factory(options)
         await self.client.connect()
+        # One reader for the whole connection: Claude Code also speaks between turns (a background
+        # agent finishing, its follow-up turn), and anything not read would pile up unseen.
+        self._turn = None
+        self._bg_active = False
+        self._reader_error = None
+        self._stopping = False
+        self._reader = asyncio.ensure_future(self._read_loop(self.client))
         # Reconnecting (new model or effort) while waiting out a usage limit keeps the wait.
         self.set_status("limited" if self.row["status"] == "limited" else "idle")
 
@@ -134,36 +159,32 @@ class SessionRunner:
         self._routed_asks = 0  # a new turn: unmatched counts from the last one don't carry over
         self._ask_uses.clear()
         self.emit({"type": "user", "text": text, **({"images": images} if images else {})})
-        reply: list[str] = []
-        ok = False
-        limit_signs: list[str] = []  # why this turn looks stopped by a usage limit
+        # This turn's reply, filled in by the reader (_read_loop) until Claude Code's result.
+        turn: dict[str, Any] = {"reply": [], "ok": False, "limit": [], "done": asyncio.Event(), "error": None}
         try:
+            reader = self._reader
+            if reader is None or reader.done():
+                raise ConnectionError("This session's connection to Claude Code is closed. Press Resume to reconnect.")
+            self._turn = turn
+            self.last_activity = time.time()
             await self.client.query(sdk.user_message(text, images) if images else text)
-            async for msg in self.client.receive_response():
-                for ev in sdk.normalize(msg, self.cwd):
-                    if ev["type"] == "text":
-                        reply.append(ev["text"])
-                    if ev["type"] == "result":
-                        ok = not ev.get("is_error")
-                        if ev.get("api_status") == 429:
-                            limit_signs.append(ev.get("text") or "429")
-                    if ev["type"] == "error" and ev.get("code") == "rate_limit":
-                        limit_signs.append(ev.get("text") or "rate_limit")
-                    if ev["type"] == "rate_limit" and ev.get("status") == "rejected" \
-                            and ev.get("overage_status") not in ("allowed", "allowed_warning"):
-                        limit_signs.append("rejected")
-                    self._handle(ev)
+            await turn["done"].wait()
+            if turn["error"] is not None:
+                raise turn["error"]
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # keep the deck alive; show the problem in the session
             traceback.print_exc()
-            self.emit({"type": "error", "text": f"Claude Code error: {exc}"})
+            self.emit({"type": "error", "text": _explain(exc)})
             self.set_status("error")
             if on_fail is not None:
                 on_fail()
             return
         finally:
             self.busy = False
+            if self._turn is turn:
+                self._turn = None
+        reply, ok, limit_signs = turn["reply"], turn["ok"], turn["limit"]
         limited = bool(limit_signs) and not ok and not self.interrupted
         if limited and self.row["status"] not in ("ended", "error"):
             self.deck.limit_hit(self.sid, "\n".join(limit_signs + reply))
@@ -176,6 +197,97 @@ class SessionRunner:
                 on_done("\n\n".join(reply).strip())
         elif on_fail is not None:
             on_fail()
+
+    async def _read_loop(self, client: Any) -> None:
+        """Read everything Claude Code sends for this connection, in and between turns."""
+        try:
+            async for msg in client.receive_messages():
+                for ev in sdk.normalize(msg, self.cwd):
+                    self._route(ev)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # e.g. a message too big to read: say so instead of going quiet
+            if self._stopping or self.client is not client:
+                return  # we closed it ourselves (pause, reconnect, end)
+            traceback.print_exc()
+            self._reader_error = exc
+            turn = self._turn
+            if turn is not None and not turn["done"].is_set():
+                turn["error"] = exc
+                turn["done"].set()
+            elif self.row["status"] != "ended":
+                self._end_background()
+                self.emit({"type": "error", "text": _explain(exc)})
+                self.set_status("error")
+            return
+        finally:
+            # However the reading ended, a turn waiting for its answer must not wait forever.
+            turn = self._turn
+            if turn is not None and not turn["done"].is_set():
+                turn["error"] = turn["error"] or RuntimeError("Claude Code closed the connection.")
+                turn["done"].set()
+            self._end_background()
+        if not self._stopping and self.client is client and self.row["status"] not in ("ended", "error"):
+            self._reader_error = RuntimeError("Claude Code closed the connection")
+            self.emit({"type": "error", "text": "Claude Code closed the connection. Press Resume to reconnect."})
+            self.set_status("error")
+
+    def _end_background(self) -> None:
+        if self._bg_active:
+            self._bg_active = False
+            with self._claim_lock:
+                self.busy = False
+
+    def _route(self, ev: dict[str, Any]) -> None:
+        """One event from Claude Code: part of the user's turn, or of a turn Claude started itself
+        (after a background agent reported back)."""
+        if ev["type"] not in ("rate_limit",):
+            self.last_activity = time.time()
+        turn = self._turn
+        if turn is None:
+            # Between the user's turns. A background agent's own progress (sub) is shown but doesn't
+            # start anything; Claude speaking on the main thread is a turn of its own.
+            main = ev["type"] in ("text", "tool_use", "thinking", "tool_result") and not ev.get("sub")
+            if main and not self._bg_active:
+                with self._claim_lock:
+                    if self._turn is None and not self.busy:
+                        self.busy = True  # the user's messages wait until it's done (Stop interrupts it)
+                        self._bg_active = True
+                        self._bg_limit = []
+                if self._bg_active and self.row["status"] in ("idle", "waiting"):
+                    self.emit({"type": "notice", "kind": "background",
+                               "text": "Claude is carrying on by itself (a background agent reported back)."})
+                    self.set_status("working")
+            if self._bg_active:
+                self._collect_limit(ev, self._bg_limit)
+            self._handle(ev)
+            if ev["type"] == "result" and self._bg_active:
+                signs = self._bg_limit
+                self._end_background()
+                if signs and ev.get("is_error") and self.row["status"] not in ("ended", "error"):
+                    self.deck.limit_hit(self.sid, "\n".join(signs))
+                elif self.row["status"] == "working":
+                    self.set_status("idle")
+            return
+        if ev["type"] == "text":
+            turn["reply"].append(ev["text"])
+        if ev["type"] == "result":
+            turn["ok"] = not ev.get("is_error")
+        self._collect_limit(ev, turn["limit"])
+        self._handle(ev)
+        if ev["type"] == "result":
+            turn["done"].set()
+
+    @staticmethod
+    def _collect_limit(ev: dict[str, Any], signs: list[str]) -> None:
+        """Why a turn looks stopped by a usage limit."""
+        if ev["type"] == "result" and ev.get("api_status") == 429:
+            signs.append(ev.get("text") or "429")
+        if ev["type"] == "error" and ev.get("code") == "rate_limit":
+            signs.append(ev.get("text") or "rate_limit")
+        if ev["type"] == "rate_limit" and ev.get("status") == "rejected" \
+                and ev.get("overage_status") not in ("allowed", "allowed_warning"):
+            signs.append("rejected")
 
     def _handle(self, ev: dict[str, Any]) -> None:
         # Fallback: Claude Code asked a question without routing it to Carrier (e.g. a
@@ -225,6 +337,10 @@ class SessionRunner:
         for req in list(self.pending.values()):
             if not req["future"].done():
                 req["future"].set_result(("deny", "Session ended."))
+        self._stopping = True
+        reader = self._reader
+        if reader is not None and not reader.done():
+            reader.cancel()
         if self.client is not None:
             try:
                 await self.client.disconnect()
@@ -556,7 +672,8 @@ class SessionRunner:
         not_ours = False
         if tool in sdk.EDIT_TOOLS:
             path = self._file_path({"tool_input": tool_input})
-            not_ours = bool(path) and self.deck.file_owner(self.row, path)["kind"] in ("foreign", "other")
+            not_ours = bool(path) and (self.deck.file_owner(self.row, path)["kind"] in ("foreign", "other")
+                                       or self.deck.workspace_instructions(self.row, path) is not None)
         if not_ours:
             # Another project's file (or outside this project's part of a shared space): ask every
             # time — no "for this session" approval and no pre-approval covers it.
@@ -664,6 +781,25 @@ class SessionRunner:
         if not path:
             return {}
         claim = self.deck.workspace_target(self.row, path)
+        ws_doc = self.deck.workspace_instructions(self.row, path) if claim is not None else None
+        if ws_doc is not None:
+            # CLAUDE.md in a workspace: allowed, but it guides every project there, so it always asks.
+            rel = os.path.relpath(os.path.realpath(path), os.path.realpath(ws_doc["path"])).replace("\\", "/")
+            if (self.deck.store.session(self.sid) or self.row).get("mode") == "bypassPermissions":
+                self.emit({"type": "notice", "kind": "reference",
+                           "text": f"Blocked an edit of {ws_doc['label']}/{rel}: it guides every project in the "
+                                   "workspace, and this session never asks."})
+                return sdk.pre_tool_output(
+                    decision="deny",
+                    reason=f"[Carrier Flight Deck] {ws_doc['label']}/{rel} is Claude Code's instructions for every "
+                           "project in this workspace; editing it needs the user's OK, and this session is in "
+                           "never-ask mode. Tell the user what you'd change.")
+            self.emit({"type": "notice", "kind": "reference",
+                       "text": f"{ws_doc['label']}/{rel} guides every project in the workspace: asking you first."})
+            return sdk.pre_tool_output(
+                decision="ask",
+                reason=f"{ws_doc['label']}/{rel} is Claude Code's instructions for every project in the workspace "
+                       f"{ws_doc['label']}, not only this one.")
         if claim is not None:
             ws, new_folder = claim
             if new_folder is None:

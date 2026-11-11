@@ -239,6 +239,9 @@ def safe_git_env(base: dict[str, str] | None = None) -> dict[str, str]:
             f"GIT_CONFIG_VALUE_{n}": "explicit"}
 
 
+MAX_MESSAGE_BYTES = 64 * 1024 * 1024
+
+
 def build_options(*, cwd: Path, model: str | None, mode: str, resume: str | None,
                   hooks: dict[str, list[Any]], can_use_tool: Callable[..., Any], context: str = "",
                   add_dirs: list[str] | None = None, effort: str | None = None,
@@ -253,6 +256,9 @@ def build_options(*, cwd: Path, model: str | None, mode: str, resume: str | None
         extra = {"mcp_servers": {"carrier": carrier_server}, "allowed_tools": list(ALLOWED)}
     return ClaudeAgentOptions(
         **extra,
+        # A single message from Claude Code can be large (a big file read, a long tool result, an image):
+        # the default 1 MB limit stops the connection dead.
+        max_buffer_size=MAX_MESSAGE_BYTES,
         cwd=str(cwd),
         add_dirs=list(add_dirs or []),
         model=model or None,
@@ -593,7 +599,8 @@ def normalize(msg: Any, cwd: Path | None = None) -> list[dict[str, Any]]:
         for b in content:
             if isinstance(b, ToolResultBlock):
                 events.append({"type": "tool_result", "id": b.tool_use_id,
-                               "text": _result_text(b.content), "is_error": bool(b.is_error)})
+                               "text": _result_text(b.content), "is_error": bool(b.is_error),
+                               **({"sub": True} if getattr(msg, "parent_tool_use_id", None) else {})})
                 # Images Claude looked at (e.g. it read a screenshot) are shown too.
                 for c in b.content if isinstance(b.content, list) else []:
                     if not isinstance(c, dict):

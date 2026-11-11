@@ -703,3 +703,6 @@ li.task-row.flash { box-shadow: inset 3px 0 0 var(--accent); background: var(--p
 .folder-chip .fc-drawer.hidden { display: none; }
 .folder-chip .fc-foot { justify-content: space-between; }
 .folder-chip .fc-foot .muted { overflow-wrap: anywhere; }
+
+#fd-activity { margin-left: 8px; }
+#fd-activity.stale { color: var(--sev-medium); }

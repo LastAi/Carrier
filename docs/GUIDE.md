@@ -372,7 +372,7 @@ extra folders of two kinds.
 | Work folder (this project's) | Read and edit | Yes | No |
 | Work folder (shared space) | Read; edit its part and new files freely, anything else only after asking you | Its part, files it created there, files its sessions changed | Yes, as a work folder of each |
 | Reference folder | Read only; edits are blocked | No | Yes |
-| Workspace folder | Read only, except new folders it creates there — those join the project as work folders | Only the new folders, as work folders | Yes |
+| Workspace folder | Read only, except new folders it creates there — those join the project as work folders — and its `CLAUDE.md` files (after asking) | Only the new folders, as work folders | Yes |
 
 * Add extra folders with **＋ work folder**, **＋ reference folder** or
   **＋ workspace folder**, and switch a folder's type later from its card.
@@ -385,6 +385,13 @@ extra folders of two kinds.
   folder — a release tool, a publish folder — Claude creates it there and
   Carrier adds it to the project as a work folder (a notice says so). A
   workspace folder may contain the project's main folder.
+* **`CLAUDE.md` in a workspace** (and `CLAUDE.local.md`) can be edited
+  although the rest is read only: Claude Code reads it for every project
+  inside the workspace, so keeping it up to date is part of the work. Because
+  it guides those other projects too, each edit **asks you first** — even with
+  editing pre-approved, and with no "for this session" button; in "never ask"
+  mode it's blocked. One inside another project's main folder stays that
+  project's.
 
 ### Who owns what
 
@@ -531,6 +538,17 @@ task.
 
 * **Chat:** Claude's replies, its thinking and each tool it uses appear as
   they happen. Type to guide it at any point.
+* **Is it still working?** While Claude works, the header says when it last
+  sent anything (*last activity 2 min ago*). After ten minutes of silence it
+  turns amber: a long command or a background agent may still be running —
+  **Stop** interrupts, **Pause** or **End** are there if it's stuck.
+* **Background agents:** when Claude hands work to a background agent and
+  ends its turn, Carrier keeps listening. When the agent reports back and
+  Claude carries on by itself, a notice says so, the session shows
+  *working*, and your next message waits until it's done (or **Stop** it).
+* **If the connection breaks** (for example Claude Code sends something too
+  big or garbled to read), the session says so and shows *error*: **Resume**
+  reconnects, and Claude picks up the same conversation.
 * **Permissions:** prompts appear as buttons — **Allow**, **Allow for this
   session**, **Always allow … in this project** (adds it to the project's
   [pre-approved actions](#pre-approved-actions)),

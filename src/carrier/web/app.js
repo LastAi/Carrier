@@ -1282,7 +1282,29 @@ const fd = {
   toolCards: new Map(),// tool_use id -> card element
   refreshTimer: null,
   polling: false,
+  activity: {},        // session id -> when Claude Code last sent anything (ms)
 };
+
+/* While Claude works, say when it last showed signs of life — a long silence is then visible. */
+function fdActivityTick() {
+  const box = $("#fd-activity");
+  if (!box) return;
+  const d = fd.detail;
+  const working = d && ["working", "needs_you"].includes(d.status);
+  box.classList.remove("stale");
+  if (!working) { box.textContent = ""; return; }
+  const secs = Math.max(0, Math.round((Date.now() - (fd.activity[d.id] || Date.now())) / 1000));
+  const ago = secs < 60 ? `${secs}s ago` : `${Math.floor(secs / 60)} min ago`;
+  if (d.status === "needs_you") { box.textContent = "waiting for your answer below"; return; }
+  let text = `last activity ${ago}`;
+  if (secs >= 600) {
+    text += " — nothing from Claude for a while. A long command or a background agent may still be running; " +
+            "Stop interrupts it, and Pause or End are there if it's stuck.";
+  }
+  box.textContent = text;
+  box.classList.toggle("stale", secs >= 600);
+}
+setInterval(fdActivityTick, 5000);
 
 const FD_STATUS = { starting: "starting", working: "working", needs_you: "needs you", idle: "waiting for you",
                     paused: "paused", error: "error", ended: "ended", limited: "waiting for the usage limit" };
@@ -1734,6 +1756,7 @@ function fdRenderEmpty() {
 const fdSelect = guarded(async (sid) => {
   fd.current = sid;
   fd.detail = await api("fd_session", sid);
+  fd.activity[sid] = fd.detail.last_activity ? fd.detail.last_activity * 1000 : Date.now();
   fd.ruleSets = await api("rule_sets").catch(() => []);
   show($("#fd-image-btn"), fd.detail.images !== false);
   if (fd.attach.length) { fd.attach = []; fdRenderAttach(); }
@@ -1773,6 +1796,7 @@ function fdSetStatus(status) {
   const pill = $("#fd-status");
   pill.textContent = FD_STATUS[status] || status;
   pill.className = "pill " + status;
+  fdActivityTick();
   const live = fd.detail.running || ["working", "needs_you", "idle", "starting"].includes(status);
   const busy = status === "working" || status === "needs_you";
   show($("#fd-stop"), busy);
@@ -2047,6 +2071,10 @@ async function fdPollLoop() {
       let refresh = false;
       for (const { seq, session, event } of res.events) {
         fd.seq = Math.max(fd.seq, seq);
+        // Signs of life from Claude itself (not Carrier's own notices).
+        if (!["status", "notice", "permission_done", "question_done", "proposal_done"].includes(event.type)) {
+          fd.activity[session] = Date.now();
+        }
         const asks = ["permission", "question", "work_proposal", "change_proposal"].includes(event.type);
         if (asks) fd.pending.add(event.req_id);
         if (session === fd.current && seq > fd.skipUntil) {

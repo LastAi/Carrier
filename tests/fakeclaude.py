@@ -46,13 +46,30 @@ class FakeClaudeClient:
         self.images: list[list[dict[str, Any]]] = []  # image blocks per message that had any
         self.connected = False
         self._interrupted = asyncio.Event()
+        self._queries: asyncio.Queue | None = None
+        self.later: list[Any] = []  # messages Claude Code sends after a turn (a background agent's follow-up)
         ALL_CLIENTS.append(self)
 
     async def connect(self, prompt: Any = None) -> None:
         self.connected = True
+        self._queries = asyncio.Queue()
 
     async def disconnect(self) -> None:
         self.connected = False
+        if self._queries is not None:
+            self._queries.put_nowait(None)
+
+    async def receive_messages(self):
+        """Like the real client: every message of the connection, turn after turn."""
+        while self.connected:
+            item = await self._queries.get()
+            if item is None:
+                return
+            async for m in self.receive_response():
+                yield m
+            while self.later:  # what came "by itself" after the turn
+                await asyncio.sleep(0.05)
+                yield self.later.pop(0)
 
     async def interrupt(self) -> None:
         self._interrupted.set()
@@ -70,6 +87,8 @@ class FakeClaudeClient:
             prompt = "\n".join(b["text"] for b in blocks if b["type"] == "text")
         self.prompts.append(prompt)
         self._interrupted.clear()
+        if self._queries is not None:
+            self._queries.put_nowait(prompt)
 
     async def _hooks(self, event: str, tool: str | None, data: dict[str, Any]) -> list[dict[str, Any]]:
         outs = []
@@ -104,6 +123,14 @@ class FakeClaudeClient:
                 yield ResultMessage(subtype="error_during_execution", duration_ms=1, duration_api_ms=1,
                                     is_error=False, num_turns=1, session_id=self.session_id, total_cost_usd=0.01)
                 return
+            if parts[0] == "background":  # a background agent reports back after this turn
+                self.later += [AssistantMessage(content=[TextBlock(text=line.split(" ", 1)[1])], model="fake-model"),
+                               ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+                                             num_turns=1, session_id=self.session_id, total_cost_usd=0.0)]
+                continue
+            if parts[0] == "huge":  # a message too big for the reader
+                from claude_agent_sdk._errors import CLIJSONDecodeError
+                raise CLIJSONDecodeError("x" * 20, ValueError("JSON message exceeded maximum buffer size"))
             if parts[0] == "limit-warn":
                 yield RateLimitEvent(rate_limit_info=RateLimitInfo(
                     status="allowed_warning", resets_at=int(time.time()) + 7200, rate_limit_type="five_hour",

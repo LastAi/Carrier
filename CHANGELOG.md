@@ -4,6 +4,12 @@ All notable changes are listed here. Format: [Keep a Changelog](https://keepacha
 
 ## Unreleased
 
+- **Sessions no longer go quiet.** Carrier now keeps listening to Claude Code between turns, so when a
+  background agent reports back and Claude carries on by itself, you see it as it happens (before, it
+  piled up unseen until your next message). Messages up to 64 MB are read (the 1 MB limit could stop a
+  session dead); a broken connection is reported, and Resume reconnects. The header shows when Claude
+  last sent anything, and warns after ten minutes of silence.
+- **`CLAUDE.md` in workspace folders** can be edited (always after asking), though the rest of a workspace stays read only.
 - **Tidier folder cards**: each extra folder shows just its name and type; ⚙ opens its settings.
 - **Approve, follow up later** (`l`) in reviews: approves a change — the
   review can clear and routines waiting for it can go on — and collects what
