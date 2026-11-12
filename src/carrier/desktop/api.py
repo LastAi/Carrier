@@ -647,8 +647,8 @@ class DesktopApi:
         return True
 
     @_guard
-    def fd_set_mode(self, sid: int, mode: str) -> dict[str, Any]:
-        return self._fd().set_mode(sid, mode)
+    def fd_set_mode(self, sid: int, mode: str, confirm: str | None = None) -> dict[str, Any]:
+        return self._fd().set_mode(sid, mode, confirm)
 
     @_guard
     def fd_set_model(self, sid: int, model: str | None) -> dict[str, Any]:

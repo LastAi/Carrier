@@ -4,6 +4,7 @@
 fake Claude Code client. Skipped if Playwright's Chromium isn't installed."""
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -572,3 +573,42 @@ def test_pause_resume_and_end_with_a_note(fdpage):
     page.wait_for_selector(".task-row .handoff >> text=Note for the next session")
     page.click(".task-row .handoff summary")
     page.wait_for_selector(".task-row .handoff >> text=auth left")
+
+
+def test_live_dangerously_needs_the_phrase(fdpage):
+    page, srv = fdpage
+    page.click(".tool[data-tool='readyroom']")
+    page.wait_for_selector("#rr-pane-intro:not(.hidden)")
+    rr_new_project(page, "ApiServer", "A small API server.", "hello")
+    page.click(".tool[data-tool='flightdeck']")
+    page.click(".fd-project:has(.name:text-is('ApiServer')) >> text=▶ Start")
+    page.click("#fdn-start")
+    page.wait_for_selector("#fd-status:text('waiting for you')")
+    before = page.input_value("#fd-mode")
+    # Not accepted: back to what it was.
+    page.select_option("#fd-mode", "liveDangerously")
+    page.wait_for_selector("#prompt-line")
+    page.click("#prompt-cancel")
+    page.wait_for_function(f"document.querySelector('#fd-mode').value === '{before}'")
+    # The wrong words don't unlock it.
+    page.select_option("#fd-mode", "liveDangerously")
+    page.fill("#prompt-line", "I accept the blast")
+    assert page.is_disabled("#prompt-ok")
+    page.fill("#prompt-line", "I accept the blast radius")
+    page.click("#prompt-ok")
+    page.wait_for_selector("#fd-mode.danger-mode")
+    deck = page.carrier_api._fd()
+    assert deck.store.sessions()[0]["mode"] == "liveDangerously"
+    # Set the World on Fire: its own warning and phrase; cancelling goes back to Danger Zone.
+    page.select_option("#fd-mode", "bypassPermissions")
+    page.wait_for_selector("#prompt-title:has-text('fully unrestricted')")
+    page.click("#prompt-cancel")
+    page.wait_for_function("document.querySelector('#fd-mode').value === 'liveDangerously'")
+    page.select_option("#fd-mode", "bypassPermissions")
+    page.fill("#prompt-line", "Let it all burn")
+    page.click("#prompt-ok")
+    page.wait_for_function("document.querySelector('#fd-mode').value === 'bypassPermissions'")
+    end = time.time() + 5
+    while time.time() < end and deck.store.sessions()[0]["mode"] != "bypassPermissions":
+        time.sleep(0.05)
+    assert deck.store.sessions()[0]["mode"] == "bypassPermissions"

@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -241,6 +242,85 @@ def safe_git_env(base: dict[str, str] | None = None) -> dict[str, str]:
 
 MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 
+# Carrier's own permission mode: nothing asks, except what the folder rules say must (Claude Code
+# itself runs in "default" so that every tool call still comes to Carrier to be checked).
+LIVE = "liveDangerously"
+LIVE_PHRASE = "I accept the blast radius"
+# "Set the World on Fire" is Claude Code's bypassPermissions mode: nothing asks, nothing is checked.
+FIRE = "bypassPermissions"
+FIRE_PHRASE = "Let it all burn"
+
+
+def claude_mode(mode: str) -> str:
+    """The permission mode Claude Code is given for a Carrier mode."""
+    return "default" if mode == LIVE else mode
+
+
+# Tools that "Danger Zone" runs without asking, besides the file tools and Bash checked
+# below. Other tools (another MCP server's, PowerShell …) still ask: their paths, if any,
+# can't be checked.
+LIVE_TOOLS = {"TodoWrite", "Task", "Agent", "BashOutput", "KillShell", "KillBash", "ExitPlanMode",
+              "WebFetch", "WebSearch", "Skill", "SlashCommand", "ListMcpResourcesTool", "ReadMcpResourceTool"}
+
+
+def live_check(name: str, inp: dict[str, Any], cwd: Path, readable: list[str], editable: list[str],
+               no_write: Callable[[str], bool] | None = None, blocked: str | None = None) -> str:
+    """In "Danger Zone" mode: "" if the tool call may run without asking, else why it asks.
+
+    Only the folder rules hold: reading in the project's folders, editing in its own folders
+    (not .git, .claude and the like, not other projects' files), shell commands whose files and
+    folders are those — any program, but programs that run other commands still ask."""
+    from carrier.flightdeck import shellcheck
+
+    def where(p: str | None) -> str:
+        target = Path(os.path.expanduser(p)) if p else cwd
+        return os.path.realpath(target if target.is_absolute() else cwd / target)
+
+    def fixed(pattern: str) -> str:
+        """The part of a file pattern before its first wildcard (the folder it searches)."""
+        head = re.split(r"[*?\[{]", pattern, maxsplit=1)[0]
+        return head if head.endswith(("/", "\\")) or not head else os.path.dirname(head) or "."
+
+    def inside(path: str, roots: list[str]) -> bool:
+        t = os.path.normcase(path)
+        return any(t == os.path.normcase(os.path.realpath(r)) or
+                   t.startswith(os.path.normcase(os.path.realpath(r)).rstrip(os.sep) + os.sep) for r in roots)
+
+    if blocked and not inside(where(blocked), readable + editable):
+        return f"Claude Code flagged {blocked}, outside the project's folders"
+    if name in READ_TOOLS:
+        base = where(_tool_path(name, inp))
+        if not inside(base, readable + editable):
+            return "it reads outside the project's folders"
+        for key in ("pattern", "glob") if name in ("Glob", "Grep") else ():
+            pat = str(inp.get(key) or "")
+            if name == "Grep" and key == "pattern":
+                continue  # Grep's pattern is what it searches for, not a file
+            if pat and (".." in pat.replace("\\", "/").split("/") or re.search(r"\{[^}]*([/\\~:]|\.\.)", pat)
+                        or not inside(
+                    os.path.realpath(os.path.join(base, os.path.expanduser(fixed(pat)))), readable + editable)):
+                return "it searches outside the project's folders"
+        return ""
+    if name in EDIT_TOOLS:
+        target = where(_tool_path(name, inp))
+        if not inside(target, editable):
+            return "it changes a file outside the project's own folders"
+        if shellcheck.protected(target, editable):
+            return "it changes a file Claude Code or git runs things from"
+        if no_write and no_write(target):
+            return "it changes another project's file"
+        return ""
+    if name == "Bash":
+        v = shellcheck.check(str(inp.get("command", "")), [], cwd, readable + editable, editable, can_edit=True,
+                             can_read=True, no_write=no_write, any_program=True)
+        if v.ok:
+            return ""
+        whys = [p["why"] for p in v.programs if not p["listed"] and p.get("why")] + ([v.reason] if v.reason else [])
+        return "; ".join(dict.fromkeys(w for w in whys if w)) or "it can't be checked against the folder rules"
+    if name in LIVE_TOOLS or name.startswith("mcp__carrier__"):
+        return ""  # no files of their own (web tools reach the internet, which the warning says)
+    return "Carrier can't check which files this tool uses"
+
 
 def build_options(*, cwd: Path, model: str | None, mode: str, resume: str | None,
                   hooks: dict[str, list[Any]], can_use_tool: Callable[..., Any], context: str = "",
@@ -265,7 +345,7 @@ def build_options(*, cwd: Path, model: str | None, mode: str, resume: str | None
         # The user's preferred effort, mapped to the nearest level this model
         # supports (none if it has no effort setting) — see core.models.
         effort=effective_effort(model or None, effort),
-        permission_mode=mode,  # "default" | "acceptEdits" | "plan" | "bypassPermissions"
+        permission_mode=claude_mode(mode),  # "default" | "acceptEdits" | "plan" | "bypassPermissions"
         resume=resume,
         # Behave like normal Claude Code: its system prompt, plus a short note.
         system_prompt={"type": "preset", "preset": "claude_code",
@@ -273,7 +353,8 @@ def build_options(*, cwd: Path, model: str | None, mode: str, resume: str | None
         # Load the user's settings and CLAUDE.md files, as the CLI would.
         setting_sources=["user", "project", "local"],
         include_partial_messages=True,  # streaming preview in the UI
-        env=safe_git_env(),
+        # Each Bash command starts in the session's folder, so a "cd" can't carry over unchecked.
+        env={**safe_git_env(), "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR": "1"},
         hooks=hooks,
         can_use_tool=can_use_tool,
     )

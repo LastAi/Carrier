@@ -733,7 +733,13 @@ def test_background_agent_progress_doesnt_block_the_user(deck: FlightDeck, proje
     client.later.append(AssistantMessage(content=[ToolUseBlock(id="sub1", name="Bash", input={"command": "ls"})],
                                          model="fake-model", parent_tool_use_id="agent1"))
     deck.send(s["id"], "next please")
-    wait(deck, s["id"])
+    end = time.time() + 5
+    while time.time() < end and not deck.session(s["id"])["agents_working"]:
+        time.sleep(0.02)
+    view = deck.session(s["id"])
+    assert view["agents_working"] and view["status"] == "idle"  # shown as "background agent working"
+    polled = [e["event"] for e in deck.poll(0)["events"] if e["session"] == s["id"]]
+    assert any(ev["type"] == "agents" and ev["working"] for ev in polled)  # the page hears it at once
     assert deck.store.session(s["id"])["status"] == "idle" and not deck.runners[s["id"]].busy
     deck.send(s["id"], "and again")
     wait(deck, s["id"])
@@ -912,3 +918,71 @@ def test_bring_back_refuses_unsafe_merges(deck: FlightDeck, projects):
     branch = deck.store.session(s["id"])["branch"]
     assert "Copy and branch" in deck.bring_back(s["id"], "discard")["text"]
     assert subprocess.run(["git", "rev-parse", "--verify", "-q", branch], cwd=main, capture_output=True).returncode != 0
+
+
+def test_live_dangerously(deck: FlightDeck, projects, tmp_path: Path):
+    """Only the phrase turns it on; then tools inside the session's folders
+    go ahead without asking, and the folder rules still ask."""
+    room = deck.room
+    api_id, web_id = projects["ApiServer"], projects["WebClient"]
+    room.add_task(api_id, "a quick fix")
+    s = deck.start_task(room.current_task(api_id)["id"], send_task=False)
+    wait(deck, s["id"])
+    client = ALL_CLIENTS[-1]
+    for wrong in (None, "", "I accept"):
+        with pytest.raises(DeckError, match="Danger"):
+            deck.set_mode(s["id"], sdk.LIVE, confirm=wrong)
+    assert deck.store.session(s["id"])["mode"] == "default"
+    deck.set_mode(s["id"], sdk.LIVE, confirm="  i ACCEPT the   blast radius ")
+    assert deck.store.session(s["id"])["mode"] == sdk.LIVE
+    assert client.options.permission_mode == "default"  # Claude Code itself still sends every tool to Carrier
+
+    runner = deck.runners[s["id"]]
+    cwd = Path(runner.cwd)
+    other = Path(deck.store.project(web_id)["path"])
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+
+    def ask(tool: str, inp: dict, ctx=None) -> str:
+        """"allow" if it went ahead on its own, else "asked" (and we deny)."""
+        seen = len(events(deck, s["id"], "permission"))
+        fut = asyncio.run_coroutine_threadsafe(runner._can_use_tool(tool, inp, ctx), deck._loop)
+        end = time.time() + 5
+        while time.time() < end and not fut.done():
+            cards = events(deck, s["id"], "permission")[seen:]
+            if cards:
+                deck.answer(s["id"], cards[-1]["req_id"], "deny")
+                fut.result(5)
+                return "asked"
+            time.sleep(0.05)
+        res = fut.result(5)
+        return "allow" if res.behavior == "allow" else "asked"
+
+    assert ask("Write", {"file_path": str(cwd / "new.py")}) == "allow"
+    assert ask("Bash", {"command": "python tools/gen.py && make test"}) == "allow"
+    assert ask("WebFetch", {"url": "https://example.com"}) == "allow"
+    assert ask("Write", {"file_path": str(outside / "x.py")}) == "asked"
+    assert ask("Write", {"file_path": str(other / "x.py")}) == "asked"
+    assert ask("Write", {"file_path": str(cwd / ".git" / "config")}) == "asked"
+    assert ask("Bash", {"command": f"rm -rf {outside}"}) == "asked"
+    assert ask("Bash", {"command": "sudo make install"}) == "asked"
+    card = events(deck, s["id"], "permission")[-1]
+    assert "Danger Zone" in card.get("reason", "")
+    # A hook that asked (another session is changing the file) still asks.
+    from types import SimpleNamespace
+    assert ask("Write", {"file_path": str(cwd / "busy.py")},
+               SimpleNamespace(decision_reason="Another session is changing busy.py", blocked_path=None)) == "asked"
+    deck.set_mode(s["id"], "default")
+    assert ask("Write", {"file_path": str(cwd / "other.py")}) == "asked"
+    # Set the World on Fire needs its own phrase.
+    with pytest.raises(DeckError, match="Let it all burn"):
+        deck.set_mode(s["id"], sdk.FIRE, confirm=sdk.LIVE_PHRASE)
+    deck.set_mode(s["id"], sdk.FIRE, confirm="let it ALL burn")
+    assert client.options.permission_mode == "bypassPermissions"
+    deck.set_mode(s["id"], "default")
+    deck.end_session(s["id"])
+    for auto in (True, False):  # nor is it ever started in it: only the phrase turns it on
+        room.add_task(api_id, f"another {auto}")
+        s2 = deck.start_task(room.current_task(api_id)["id"], mode=sdk.LIVE, auto=auto, send_task=False)
+        assert deck.store.session(s2["id"])["mode"] == "default"
+        deck.end_session(s2["id"])

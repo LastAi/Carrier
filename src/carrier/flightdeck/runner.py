@@ -67,6 +67,7 @@ class SessionRunner:
         self._reader_error: Exception | None = None
         self._stopping = False
         self._bg_limit: list[str] = []
+        self.agents_since: float | None = None  # a background agent has been working since (no turn of Claude's)
         self.last_activity = time.time()  # when Claude Code last sent anything (shown while it works)
         self.interrupted = False  # set by interrupt() for the turn in progress
         self.pending: dict[str, dict[str, Any]] = {}  # req_id -> {future, tool, summary}
@@ -244,6 +245,14 @@ class SessionRunner:
         if ev["type"] not in ("rate_limit",):
             self.last_activity = time.time()
         turn = self._turn
+        if ev.get("sub") and turn is None and not self._bg_active and self.agents_since is None:
+            # Claude's turn is over but a background agent it started is still at work: say so.
+            self.agents_since = time.time()
+            self.emit({"type": "agents", "working": True}, persist=False)
+        elif ev["type"] == "result" and self.agents_since is not None and (turn is not None or self._bg_active):
+            # Claude has taken it up again (it reported back, or the user wrote): it's Claude's turn now.
+            self.agents_since = None
+            self.emit({"type": "agents", "working": False}, persist=False)
         if turn is None:
             # Between the user's turns. A background agent's own progress (sub) is shown but doesn't
             # start anything; Claude speaking on the main thread is a turn of its own.
@@ -355,7 +364,7 @@ class SessionRunner:
 
     async def set_mode(self, mode: str) -> None:
         if self.client is not None:
-            await self.client.set_permission_mode(mode)
+            await self.client.set_permission_mode(sdk.claude_mode(mode))
         self.deck.store.update_session(self.sid, mode=mode)
 
     # -- permissions -----------------------------------------------------------
@@ -674,6 +683,13 @@ class SessionRunner:
             path = self._file_path({"tool_input": tool_input})
             not_ours = bool(path) and (self.deck.file_owner(self.row, path)["kind"] in ("foreign", "other")
                                        or self.deck.workspace_instructions(self.row, path) is not None)
+        live_why = ""
+        if not not_ours and (self.deck.store.session(self.sid) or self.row).get("mode") == sdk.LIVE:
+            # A hook that asked (a file another session is changing …) still asks.
+            live_why = getattr(context, "decision_reason", None) or self.deck.live_check(
+                self.row, tool, tool_input, blocked=getattr(context, "blocked_path", None))
+            if not live_why:
+                return sdk.allow(tool_input)  # Danger Zone: only the folder rules ask
         if not_ours:
             # Another project's file (or outside this project's part of a shared space): ask every
             # time — no "for this session" approval and no pre-approval covers it.
@@ -702,7 +718,8 @@ class SessionRunner:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[tuple[str, str]] = loop.create_future()
         summary = sdk.summarize_tool(tool, tool_input, self.cwd)
-        reason = getattr(context, "decision_reason", None) or ""
+        reason = getattr(context, "decision_reason", None) or \
+            (f"Asking even in the Danger Zone: {live_why}." if live_why else "")
         self.pending[req_id] = {"future": future, "tool": tool, "summary": summary, "reason": reason}
         self.emit({"type": "permission", "req_id": req_id, "tool": tool, "summary": summary,
                    "reason": reason, "input": sdk._trim_input(tool_input), "allow_label": allow_label,
@@ -772,6 +789,8 @@ class SessionRunner:
     def _file_path(self, data: dict[str, Any]) -> str | None:
         inp = data.get("tool_input") or {}
         path = inp.get("file_path") or inp.get("notebook_path")
+        if path:
+            path = os.path.expanduser(str(path))
         if path and not os.path.isabs(str(path)):  # Claude Code resolves it in the session's folder
             path = os.path.join(str(self.cwd), str(path))
         return path
@@ -833,7 +852,7 @@ class SessionRunner:
         if owner["kind"] == "other":
             f = owner["folder"]
             if (self.deck.store.session(self.sid) or self.row).get("mode") == "bypassPermissions":
-                # "Never ask" mode may not stop to ask: block it rather than let it through.
+                # "Set the World on Fire" may not stop to ask: block it rather than let it through.
                 self.emit({"type": "notice", "kind": "shared",
                            "text": f"Blocked an edit of {f['label']}/{owner['rel']}: it's outside this project's "
                                    f"part of the shared space {f['label']}, and this session never asks."})

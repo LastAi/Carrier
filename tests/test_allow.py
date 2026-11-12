@@ -297,3 +297,63 @@ def test_claude_is_told_what_runs_without_asking(deck: FlightDeck, tmp_path: Pat
     wait(deck, s["id"])
     told = ALL_CLIENTS[-1].contexts[-1]
     assert "changed what runs without asking" in told and "sed" in told
+
+
+def test_live_dangerously_keeps_the_folder_rules(tmp_path):
+    """In "Danger Zone" only the folder rules ask."""
+    from carrier.flightdeck import sdk
+
+    proj, ref, out = tmp_path / "proj", tmp_path / "ref", tmp_path / "elsewhere"
+    for d in (proj, ref, out, proj / ".git"):
+        d.mkdir(parents=True)
+
+    def chk(name, inp):
+        return sdk.live_check(name, inp, proj, [str(ref)], [str(proj)], no_write=lambda p: p.endswith("theirs.txt"))
+
+    assert chk("Write", {"file_path": str(proj / "a.py")}) == ""
+    assert chk("Edit", {"file_path": "src/b.py"}) == ""  # relative to the session's folder
+    assert "outside" in chk("Write", {"file_path": str(out / "a.py")})
+    assert "outside" in chk("Write", {"file_path": str(ref / "a.py")})  # a reference folder is read only
+    assert chk("Write", {"file_path": str(proj / ".git" / "config")})  # .git asks
+    assert "another project" in chk("Write", {"file_path": str(proj / "theirs.txt")})
+    assert chk("Read", {"file_path": str(ref / "x.md")}) == ""
+    assert "outside" in chk("Read", {"file_path": str(out / "x.md")})
+    assert chk("WebFetch", {"url": "https://example.com"}) == ""
+    assert chk("Write", {"file_path": "~/.bashrc"})
+    assert chk("Read", {"file_path": "~/.ssh/id_rsa"})
+    assert chk("Glob", {"pattern": "/etc/**"}) and chk("Glob", {"pattern": "../../**/*"})
+    assert chk("Grep", {"pattern": "x", "glob": "/etc/*"})
+    assert chk("Glob", {"pattern": "{/etc,src}/*"}) and chk("Grep", {"pattern": "x", "glob": "{/etc,src}/*"})
+    assert chk("Glob", {"pattern": "src/{a,b}/*.py"}) == ""
+    assert chk("Glob", {"pattern": "src/**/*.py"}) == "" and chk("Grep", {"pattern": "/api/", "glob": "*.py"}) == ""
+    assert chk("Glob", {"pattern": "*.md", "path": str(ref)}) == ""
+    assert chk("mcp__files__write", {"path": "/etc/x"}) and chk("PowerShell", {"command": "rm x"})
+    assert chk("mcp__carrier__propose_rule", {}) == "" and chk("TodoWrite", {}) == ""
+    assert chk("Read", {"file_path": str(proj / "a")}) == "" and \
+        sdk.live_check("Read", {"file_path": str(proj / "a")}, proj, [], [str(proj)], blocked=str(out))
+    for ok in ("python tools/gen.py", "npm run build", "make -j4", "cargo test 2>&1 | tail -5", "bash build.sh",
+               "echo hi > notes.txt", "rm old.txt", "git status", "python -m pytest -q tests", "node scripts/x.js",
+               "awk '{print $1}' a.txt", "git commit -m 'fix the /api route'", "git push origin main",
+               "tar -xf a.tar -C build", "pushd src && ls && popd", "python -Werror::DeprecationWarning x.py",
+               "python3.12 -m pytest", "npm install", "npm run build", "go build ./...", "cargo build"):
+        assert chk("Bash", {"command": ok}) == "", ok
+    for ask in (f"echo x > {out}/f.txt", f"rm -rf {out}", "rm theirs.txt", f"cp a.txt {ref}/a.txt", "bash -c 'rm -rf /'",
+                "sudo make install", "echo x > .git/hooks/pre-commit", "eval $CMD",
+                # Inline code, other machines, editors and containers.
+                "python3 -c 'import os'", "node -e 'x'", "python -c'x'", "deno eval 'x'", "npx some-pkg",
+                "awk 'BEGIN{system(\"rm -rf /\")}' a.txt", "awk '{print > \"/tmp/x\"}' a.txt",
+                "curl -o notes.txt https://example.com", "vim -c '!rm -rf /' a.txt", "sqlite3 db '.shell rm x'",
+                "docker run -v /:/h img", "git push http://example.com/x main", "git push git@example.com:x main",
+                # Files and folders outside the project's own folders, in options too.
+                "tar -xf a.tar -C /", f"unzip a.zip -d {out}", f"make -C {out}", f"git clone x {out}/y",
+                "cp /etc/hosts ./x", "base64 /etc/hosts", "find / -name id_rsa", f"cat {ref}/x.md",
+                f"pushd {ref} && rm x.md", "popd && rm a.txt", "touch ~/.bashrc", "cat ../../x",
+                "python ../elsewhere/x.py", "rm .git/index",
+                # Versioned names, bundled options, standard input, programs that run a command.
+                "python3.12 -c 'x'", "python -Ic 'x'", "echo 'import os' | python3", "python3 - <<< 'x'",
+                "echo x | node", "at now <<< 'rm -rf ~'", "crontab mycron", "hyperfine 'rm -rf x'",
+                "tmux new -d 'rm x'", "wmic process call create 'cmd /c del x'",
+                "pip install pkg", "python3 -m pip install pkg", "npm install -g pkg", "npm exec pkg",
+                "pnpm dlx pkg", "uvx pkg", "cargo install pkg", "go install example.com/x@latest",
+                "tar -xC/etc -f a.tar", "tar -xvzC/etc -f a.tar", "dd if=/etc/hosts of=./x", "gcc @/etc/hosts"):
+        assert chk("Bash", {"command": ask}), ask

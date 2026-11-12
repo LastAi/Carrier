@@ -40,8 +40,35 @@ WRAPPERS = {"bash", "sh", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "cmd", "p
             "parallel", "script", "setsid", "chroot", "busybox", "unbuffer", "strace", "ltrace", "flock",
             "taskset", "unshare", "nsenter", "ssh", "open", "xdg-open", "osascript", "expect", "perl",
             "ruby", "php", "lua", "tclsh", "wish", "alias", "unalias", "set", "shopt", "trap", "read",
-            "mapfile", "readarray", "declare", "typeset", "local", "let", "enable", "hash", "fc", "history"}
+            "mapfile", "readarray", "declare", "typeset", "local", "let", "enable", "hash", "fc", "history",
+            "at", "batch", "crontab", "hyperfine", "tmux", "screen", "systemd-run", "pkexec", "runuser",
+            "fakeroot", "xterm", "gnome-terminal", "konsole", "wt", "conhost", "wmic", "schtasks", "sc",
+            "forfiles", "psexec", "sg", "newgrp", "firejail", "bwrap", "proot", "dbus-launch", "chronic"}
 SHELLS = {"bash", "sh", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "cmd", "powershell", "pwsh"}
+# "Danger Zone" runs any program, except these: they run code given on the command line,
+# open an editor or a database shell, reach other machines, or run containers — what they
+# touch can't be checked from the command.
+LIVE_ASK = {"curl", "wget", "scp", "sftp", "ftp", "rsync", "nc", "ncat", "netcat", "telnet", "socat",
+            "vim", "vi", "nvim", "view", "emacs", "nano", "pico", "ed", "ex", "micro", "joe",
+            "sqlite3", "mysql", "psql", "mongosh", "redis-cli", "docker", "podman", "kubectl", "nerdctl",
+            "npx", "pnpx", "bunx", "dlx", "mshta", "wscript", "cscript", "rundll32", "regsvr32", "reg",
+            "jshell", "gdb", "lldb",
+            # Installers: they fetch code and write outside the project.
+            "pip", "pip3", "uv", "uvx", "pipx", "conda", "mamba", "gem", "brew", "apt", "apt-get", "dnf",
+            "yum", "pacman", "zypper", "apk", "choco", "winget", "scoop", "snap", "flatpak"}
+# Package managers' subcommands that fetch and run code or install outside the project.
+LIVE_ASK_SUB = {"npm": {"exec", "x", "dlx", "-g", "--global", "link", "publish"},
+                "pnpm": {"exec", "dlx", "-g", "--global", "link", "publish"},
+                "yarn": {"dlx", "exec", "global", "link", "publish"}, "bun": {"x", "-g", "--global", "link"},
+                "cargo": {"install", "publish"}, "go": {"install"}, "dotnet": {"tool"}}
+# Interpreters run in "Danger Zone" only with a script (or Python's -m), not with code
+# given inline or on standard input. Letters in a short option bundle that take inline code.
+_INTERPRETER = re.compile(r"^(python[\d.]*w?|py|pypy[\d.]*|node(js)?|bun|deno|rscript|julia|groovy)$")
+_INLINE_SHORT = {"python": "c", "py": "c", "pypy": "c", "node": "ep", "bun": "ep", "deno": "", "rscript": "e",
+                 "julia": "eE", "groovy": "e"}
+_INLINE_LONG = {"--eval", "--print", "--command"}
+_AWK = {"awk", "gawk", "mawk", "nawk", "busybox-awk"}
+_AWK_RISKY = re.compile(r"\bsystem\s*\(|getline|\||print[f]?\b[^;}]*>")
 # Shell syntax that can't be checked here: always ask.
 KEYWORDS = {"if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac",
             "function", "select", "{", "}", "(", ")", "[[", "]]", "!", "coproc"}
@@ -489,7 +516,8 @@ class Verdict:
 
 
 def check(command: str, entries: list[str], cwd: Path, readable: list[str], editable: list[str],
-          can_edit: bool = False, can_read: bool = False, no_write: Any = None) -> Verdict:
+          can_edit: bool = False, can_read: bool = False, no_write: Any = None,
+          any_program: bool = False) -> Verdict:
     """Is ``command`` covered by the pre-approved ``entries``? Every program in it must be.
     ``no_write(path)``: files inside ``editable`` that still mustn't be written without asking
     (another project's files in a shared space)."""
@@ -506,6 +534,7 @@ def check(command: str, entries: list[str], cwd: Path, readable: list[str], edit
     v = Verdict(True)
     reasons: list[str] = []
     here = cwd
+    stack: list[Path] = []  # pushd's folders, for popd
     for part in parts:
         for name, _value, _unres in part.assigns:
             if _RISKY_ENV.match(name):
@@ -547,7 +576,16 @@ def check(command: str, entries: list[str], cwd: Path, readable: list[str], edit
             reasons.append("an unquoted variable it can't see could become several arguments")
         if (low in RISKY_ARGS or low in SCOPED_READERS) and any(w.unresolved for w in part.words[1:]):
             reasons.append(f"{name} gets an argument from a variable it can't see")
-        if low == "cd" and not is_path(prog):
+        if low == "popd" and not is_path(prog):
+            if stack and len(argv) == 1:
+                here = stack.pop()
+            else:
+                reasons.append("it changes back to a folder that can't be checked")
+                here = Path("/nonexistent-carrier-cd")
+            continue
+        if low in ("cd", "pushd") and not is_path(prog):
+            if low == "pushd":
+                stack.append(here)
             target = part.words[1] if len(part.words) > 1 else None
             if target is None or target.unresolved or target.glob or target.text in ("-", "") \
                     or not _inside(_resolve(target.text, here), readable):
@@ -561,6 +599,18 @@ def check(command: str, entries: list[str], cwd: Path, readable: list[str], edit
                 reasons.append("printf -v sets a variable")
             continue
         entry = _match(argv, parsed, cwd, here, readable + editable)
+        if entry is None and any_program:
+            # "Danger Zone": any program runs, but the folder checks below still apply. Programs
+            # that run other commands (sudo, env, xargs, a shell given a command) still ask, as what
+            # they'll touch can't be checked — except a shell running a script in the project's folders.
+            live = _live_problem(low, part.words[1:], here, readable, editable, no_write)
+            if live:
+                reasons.append(f"{name} {live}")
+            elif low not in WRAPPERS:
+                entry = argv[:1]
+            elif low in SHELLS and len(argv) > 1 and is_script_arg(argv[1]) \
+                    and _inside(_resolve(argv[1], here), editable):
+                entry = argv[:2]
         info: dict[str, Any] = {"name": name, "listed": entry is not None, "entry": None, "why": ""}
         if entry is None:
             full = _resolve(prog, here) if is_path(prog) else ""
@@ -724,6 +774,100 @@ def _match(argv: list[str], parsed: list[list[str]], cwd: Path, here: Path, proj
             continue  # "bash build.sh" means the project's build.sh, not one somewhere else
         return words
     return None
+
+
+def _live_problem(low: str, words: list[Word], here: Path, readable: list[str], editable: list[str],
+                  no_write: Any) -> str:
+    """Why a program that isn't pre-approved still asks in "Danger Zone" ("" = it may run).
+
+    Any program runs as long as every argument that could be a file or folder is in the
+    project's own folders (a program's reading and writing can't be told apart, so the
+    read-only folders don't count) and isn't one Claude Code or git runs things from."""
+    args = [w.text for w in words]
+    if low in LIVE_ASK:
+        return "can reach other machines, run containers or open its own shell"
+    m = _INTERPRETER.match(low)
+    if m:
+        kind = re.sub(r"[\d.]*w?$", "", low).replace("nodejs", "node")
+        letters = _INLINE_SHORT.get(kind, "ce")
+        script = False
+        for a in args:
+            if a == "--":
+                continue
+            if a.startswith("--"):
+                if a.split("=", 1)[0] in _INLINE_LONG:
+                    return "runs code given on the command line"
+                continue
+            if a.startswith("-") and len(a) > 1:
+                found = ""
+                for c in a[1:].split("=", 1)[0]:
+                    if kind == "python" and c in "WX":
+                        break  # the rest is that option's value (-Werror)
+                    if c in letters or (kind == "python" and c == "m"):
+                        found = c
+                        break
+                if found == "m":
+                    rest = a[a.index("m", 1) + 1:]
+                    module = rest or next((x for x in args[args.index(a) + 1:]), "")
+                    if module.split(".")[0] in ("pip", "ensurepip", "pipx", "uv", "http"):
+                        return "installs or serves outside the project"
+                    script = True  # python -m module
+                    break
+                if found:
+                    return "runs code given on the command line"
+                continue
+            if a == "-" or (kind == "deno" and a in ("eval", "repl")):
+                return "runs code given on the command line"
+            script = True
+            break
+        if not script:
+            return "runs code given on standard input"
+    sub = LIVE_ASK_SUB.get(low)
+    if sub and any(a in sub for a in args):
+        return "fetches and runs code or installs outside the project"
+    if low in ("go",) and len(args) > 1 and args[0] == "run" and any("@" in a for a in args[1:]):
+        return "fetches and runs code"
+    if low in _AWK and any(_AWK_RISKY.search(a) for a in args if not a.startswith("-")):
+        return "runs commands or writes files from its script"
+    if low == "git" and any("://" in a or re.match(r"^[\w.-]+@[\w.-]+:", a) for a in args):
+        return "talks to a repository given by address"
+    for w in words:
+        a = w.text
+        if w.unresolved or w.glob:
+            if a.startswith(("/", "~", "..")) or re.match(r"^[a-zA-Z]:[\\/]", a) or w.unresolved:
+                return f"gets {a or 'an argument'} it can't check"
+            continue
+        values = [a]
+        if a.startswith("-") and len(a) > 1:
+            values = [a.split("=", 1)[1]] if "=" in a else ([a[2:]] if not a.startswith("--") else [])
+            if not a.startswith("--"):  # a bundle like -xC/etc: the path can start anywhere in it
+                hit = re.search(r"[/\\~]|\.\.|[a-zA-Z]:[/\\]", a[1:])
+                if hit:
+                    values.append(a[1 + hit.start():])
+        elif "=" in a:  # if=/etc/x
+            values.append(a.split("=", 1)[1])
+        values += [v[1:] for v in list(values) if v.startswith("@")]  # @response-file
+        for value in values:
+            why = _live_path(value, here, editable, no_write)
+            if why:
+                return why
+    return ""
+
+
+def _live_path(value: str, here: Path, editable: list[str], no_write: Any) -> str:
+    if not value or "://" in value:
+        return ""  # an address, not a file
+    for part in (value.split(":") if os.name != "nt" and ":" in value and value.startswith("/") else [value]):
+        if not part:
+            continue
+        path = _resolve(part, here)
+        if not _inside(path, editable):
+            if is_path(part) or part.startswith("~") or os.path.isabs(part) or os.path.lexists(path):
+                return f"uses {part}, outside the project's own folders"
+            continue
+        if protected(path, editable) or (no_write and no_write(path)):
+            return f"uses {part}, which only asks"
+    return ""
 
 
 def _pattern_option(prog: str, a: str) -> bool:

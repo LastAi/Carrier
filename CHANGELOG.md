@@ -4,6 +4,12 @@ All notable changes are listed here. Format: [Keep a Changelog](https://keepacha
 
 ## Unreleased
 
+- **Permission settings in order of risk**, safest first, with names and tooltips that say how much a
+  mistake could damage: *Plan only — changes nothing* … *Set the World on Fire — no checks at all* (formerly *Never ask*, now
+  turned on by typing *Let it all burn*).
+- **Danger Zone** permission mode in the Flight Deck: type *I accept the blast radius* and
+  the session stops asking for tools, while the folder rules still apply.
+- **"Background agent working"** instead of "waiting for you" while an agent Claude started is still at work.
 - **Sessions no longer go quiet.** Carrier now keeps listening to Claude Code between turns, so when a
   background agent reports back and Claude carries on by itself, you see it as it happens (before, it
   piled up unseen until your next message). Messages up to 64 MB are read (the 1 MB limit could stop a

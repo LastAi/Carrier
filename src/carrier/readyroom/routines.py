@@ -54,7 +54,7 @@ def save(room: Any, pid: int, name: str, instructions: str, trigger: str = "manu
     if group_id is not None and ((g := room.store.task_group(group_id)) is None or g["project_id"] != pid):
         raise RoutineError("Unknown task group.")
     if mode not in MODES:
-        raise RoutineError("A routine can ask before acting, auto-accept edits or only plan — not “Never ask”.")
+        raise RoutineError("A routine can ask before acting, auto-accept edits or only plan — not “Set the World on Fire”.")
     if trigger == "group_done" and group_id is None:
         raise RoutineError("Pick the task group whose finish starts this routine.")
     room.store.save_routine(pid, rid, name=name.strip(), instructions=instructions.strip(), trigger=trigger,

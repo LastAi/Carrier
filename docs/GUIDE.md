@@ -309,7 +309,7 @@ whether it needs a clear review.
 A routine can be tied to a **task group**: it then goes into that group's
 queue, and "after each task" reacts only to that group's tasks. Each routine
 has its own **permission mode** — ask before acting, auto-accept edits, or
-plan only — and routines never run with "Never ask", whatever the project's
+plan only — and routines never run with "Danger Zone" or "Set the World on Fire", whatever the project's
 default preset is.
 
 **Ready for take-off** (in Flight Deck's sidebar) lists every queued routine,
@@ -389,8 +389,8 @@ extra folders of two kinds.
   although the rest is read only: Claude Code reads it for every project
   inside the workspace, so keeping it up to date is part of the work. Because
   it guides those other projects too, each edit **asks you first** — even with
-  editing pre-approved, and with no "for this session" button; in "never ask"
-  mode it's blocked. One inside another project's main folder stays that
+  editing pre-approved, and with no "for this session" button; in "Set the World on
+  Fire" mode it's blocked. One inside another project's main folder stays that
   project's.
 
 ### Who owns what
@@ -418,7 +418,7 @@ extra folders of two kinds.
   **Editing outside its part always asks you**, even when editing is
   pre-approved for the project and even in Claude Code's "accept edits" mode:
   the permission card says the file is outside this project's part, and has
-  no "for this session" button — each such edit asks. In "never ask" mode
+  no "for this session" button — each such edit asks. In "Set the World on Fire" mode
   these edits are blocked instead, and Claude tells you what it needed.
   Shell commands that change files there (`cp`, `mv`, `rm`, `tee`, `touch`,
   `git checkout`, a `>` redirect …) ask too. Claude is told which part is
@@ -543,7 +543,10 @@ task.
   turns amber: a long command or a background agent may still be running —
   **Stop** interrupts, **Pause** or **End** are there if it's stuck.
 * **Background agents:** when Claude hands work to a background agent and
-  ends its turn, Carrier keeps listening. When the agent reports back and
+  ends its turn, the status reads **background agent working** (*agent
+  working* in the list) while the agent's steps appear in the chat, indented.
+  Nothing is waiting for your OK — you can still write to Claude. Carrier
+  keeps listening. When the agent reports back and
   Claude carries on by itself, a notice says so, the session shows
   *working*, and your next message waits until it's done (or **Stop** it).
 * **If the connection breaks** (for example Claude Code sends something too
@@ -552,9 +555,38 @@ task.
 * **Permissions:** prompts appear as buttons — **Allow**, **Allow for this
   session**, **Always allow … in this project** (adds it to the project's
   [pre-approved actions](#pre-approved-actions)),
-  or **Deny** with a reason. The header's **Permissions** setting
-  can also be *Ask before acting*, *Auto-accept edits*, *Plan only (no
-  changes)*, or *Never ask* (which needs confirming).
+  or **Deny** with a reason. The header's **Permissions** setting is
+  listed from safest to riskiest — how much harm a mistake or an unclear
+  instruction could do before you see it:
+  1. *Plan only — changes nothing*: Claude reads and plans.
+  2. *Ask before acting*: every edit and command that isn't pre-approved asks.
+  3. *Auto-accept edits*: edits in the project go ahead; commands still ask.
+  4. **Danger Zone — asks only outside the project** (below).
+  5. *Set the World on Fire — no checks at all*: possible damage is fully
+     unrestricted. Nothing asks and commands aren't checked, so a mistake can
+     reach anything your account can, the operating system included. Turning
+     it on needs you to type *Let it all burn*. Carrier still blocks edits to reference folders, other projects'
+     files and workspace `CLAUDE.md` files, since it can't stop to ask.
+
+  Danger Zone needs you to type *I accept the blast radius* (cancel
+  and the setting goes back to what it was). Any damage *should* stay in the
+  project's own folders — the localized blast. Then nothing asks — edits,
+  commands, any program, web tools — as long as it stays inside the
+  folders the session may use: the folder rules still ask for files outside
+  them, in reference folders, in another project's files, in `.git`, and for
+  workspace `CLAUDE.md` files. Commands still ask when they name a file or
+  folder outside the project's own folders (reference folders included: read
+  those with Claude's file tools), run other commands (`sudo`, `bash -c`,
+  `xargs`, `tmux` …), run code typed into the command or piped in
+  (`python -c`, `echo … | node`), install packages (`pip`, `npm -g`,
+  `cargo install`), or reach other machines (`curl`, `git push` to an
+  address, containers). A plain `git push` to a remote the repository already
+  has goes ahead.
+  Tools Carrier can't check — other MCP servers' tools, PowerShell — still
+  ask; web tools don't. Carrier only sees the paths written in a command, so a
+  script or build you run can still write anywhere. It's per session: it's
+  turned on only in a running session, never by presets, routines or
+  automatic take-off.
 * **Questions:** when Claude needs you to choose, its questions appear as a
   card of options (one or several per question, with a recommended one
   first). Click your answers — or type your own — and **Send answers**, or

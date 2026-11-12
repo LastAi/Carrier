@@ -373,10 +373,11 @@
               <option value="after_task">After each task is finished</option>
               <option value="group_done">When its task group is finished</option></select></label>
             <label class="field">Task group <select id="rro-group"></select></label>
-            <label class="field" title="Routines can start on their own, so they never use “Never ask”.">Permissions
+            <label class="field" title="Routines can start on their own, so they never use “Danger Zone” or “Set the World on Fire”.">Permissions
               <select id="rro-mode"><option value="">The project's default</option>
-                <option value="default">Ask before acting</option><option value="acceptEdits">Auto-accept edits</option>
-                <option value="plan">Plan only (no changes)</option></select></label>
+                <option value="plan" title="Safest: Claude reads and plans, and changes nothing.">Plan only — changes nothing</option>
+                <option value="default" title="Claude asks before every edit and command that isn't pre-approved.">Ask before acting</option>
+                <option value="acceptEdits" title="File edits in the project go ahead without asking; commands still ask. A bad edit can be undone with git.">Auto-accept edits</option></select></label>
             <label class="field">Review gate <select id="rro-gate">
               <option value="none">None — can start any time</option>
               <option value="reviewed">Only when the review is clear</option></select></label>
@@ -467,8 +468,10 @@
           <label class="field" title="How hard the model thinks. Higher is more thorough, slower and costs more.">Effort
             <select id="rrps-effort"><option value="">Model default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option></select></label>
           <label class="field">Permissions
-            <select id="rrps-mode"><option value="default">Ask before acting</option>
-              <option value="acceptEdits">Auto-accept edits</option><option value="plan">Plan only (no changes)</option></select></label>
+            <select id="rrps-mode" title="From safest to riskiest">
+              <option value="plan" title="Safest: Claude reads and plans, and changes nothing.">Plan only — changes nothing</option>
+              <option value="default" title="Claude asks before every edit and command that isn't pre-approved.">Ask before acting</option>
+              <option value="acceptEdits" title="File edits in the project go ahead without asking; commands still ask. A bad edit can be undone with git.">Auto-accept edits</option></select></label>
           <label class="field">When sessions overlap
             <select id="rrps-policy"><option value="">Use the Flight Deck setting</option>
               <option value="warn">Warn Claude</option><option value="ask">Ask me first</option>
@@ -699,11 +702,12 @@
           <select id="fd-effort"><option value="">Default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option></select>
         </label>
         <label class="small">Permissions
-          <select id="fd-mode" title="How Claude Code asks before acting">
-            <option value="default">Ask before acting</option>
-            <option value="acceptEdits">Auto-accept edits</option>
-            <option value="plan">Plan only (no changes)</option>
-            <option value="bypassPermissions">Never ask (careful)</option>
+          <select id="fd-mode" title="From safest to riskiest: how much Claude may do without asking you">
+            <option value="plan" title="Safest: Claude reads and plans, and changes nothing.">Plan only — changes nothing</option>
+            <option value="default" title="Claude asks before every edit and command that isn't pre-approved.">Ask before acting</option>
+            <option value="acceptEdits" title="File edits in the project go ahead without asking; commands still ask. A bad edit can be undone with git.">Auto-accept edits</option>
+            <option value="liveDangerously" title="Nothing inside the project's folders asks: any edit, any command or program. Damage should stay in the project's own folders (anything outside them still asks), though a program Claude runs can reach anywhere.">Danger Zone — asks only outside the project</option>
+            <option value="bypassPermissions" title="Riskiest: nothing asks and commands aren't checked. Possible damage is fully unrestricted: a mistake can delete or change anything your account can reach, the operating system included.">Set the World on Fire — no checks at all</option>
           </select>
         </label>
         <button id="fd-resume" class="primary hidden">Resume</button>

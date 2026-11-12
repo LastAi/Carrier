@@ -1290,13 +1290,16 @@ function fdActivityTick() {
   const box = $("#fd-activity");
   if (!box) return;
   const d = fd.detail;
-  const working = d && ["working", "needs_you"].includes(d.status);
+  const working = d && (["working", "needs_you"].includes(d.status) || (d.status === "idle" && d.agents_working));
   box.classList.remove("stale");
   if (!working) { box.textContent = ""; return; }
   const secs = Math.max(0, Math.round((Date.now() - (fd.activity[d.id] || Date.now())) / 1000));
   const ago = secs < 60 ? `${secs}s ago` : `${Math.floor(secs / 60)} min ago`;
   if (d.status === "needs_you") { box.textContent = "waiting for your answer below"; return; }
   let text = `last activity ${ago}`;
+  if (d.status === "idle" && d.agents_working) {
+    text = `nothing to answer — Claude will carry on when the agent reports back; you can still write · ${text}`;
+  }
   if (secs >= 600) {
     text += " — nothing from Claude for a while. A long command or a background agent may still be running; " +
             "Stop interrupts it, and Pause or End are there if it's stuck.";
@@ -1306,6 +1309,7 @@ function fdActivityTick() {
 }
 setInterval(fdActivityTick, 5000);
 
+const fdStatusText = (s) => (s.status === "idle" && s.agents_working ? "agent working" : FD_STATUS[s.status] || s.status);
 const FD_STATUS = { starting: "starting", working: "working", needs_you: "needs you", idle: "waiting for you",
                     paused: "paused", error: "error", ended: "ended", limited: "waiting for the usage limit" };
 
@@ -1593,7 +1597,7 @@ function fdSessionRow(s) {
   row.tabIndex = 0;
   row.append(el("span", "dot " + s.status), el("span", "task", s.task),
              el("span", "st", (s.status === "limited" ? (s.limit_until ? "usage limit — until " + fmtClock(s.limit_until)
-               : "limit reset — continue?") : FD_STATUS[s.status] || s.status) + (s.alerts ? ` · ${s.alerts}⚑` : "")));
+               : "limit reset — continue?") : fdStatusText(s)) + (s.alerts ? ` · ${s.alerts}⚑` : "")));
   row.title = (s.worktree ? `Own copy on ${s.branch}\n` : "") + s.cwd;
   row.onclick = () => fdSelect(s.id);
   row.onkeydown = (e) => { if (e.key === "Enter") fdSelect(s.id); };
@@ -1744,7 +1748,7 @@ function fdRenderEmpty() {
   feed.appendChild(el("h3", "", "Sessions"));
   for (const [label, s] of active) {
     const d = el("div", "turn");
-    d.append(el("div", "q", `${label} · ${s.task}`), el("div", "muted small", FD_STATUS[s.status] || s.status));
+    d.append(el("div", "q", `${label} · ${s.task}`), el("div", "muted small", fdStatusText(s)));
     d.style.cursor = "pointer";
     d.onclick = () => fdSelect(s.id);
     feed.appendChild(d);
@@ -1785,6 +1789,7 @@ function fdRenderHead() {
     (s.cost ? ` · $${s.cost.toFixed(4)}` : "") + (s.model ? ` · ${s.model}` : "");
   fdSetStatus(s.status);
   $("#fd-mode").value = s.mode;
+  $("#fd-mode").classList.toggle("danger-mode", ["liveDangerously", "bypassPermissions"].includes(s.mode));
   $("#fd-model").value = s.model || "";
   $("#fd-effort").value = s.effort || "";
   syncEffort($("#fd-effort"), s.model || "");
@@ -1794,8 +1799,11 @@ function fdSetStatus(status) {
   if (!fd.detail) return;
   fd.detail.status = status;
   const pill = $("#fd-status");
-  pill.textContent = FD_STATUS[status] || status;
-  pill.className = "pill " + status;
+  const agents = status === "idle" && fd.detail.agents_working;
+  pill.textContent = agents ? "background agent working" : FD_STATUS[status] || status;
+  pill.className = "pill " + (agents ? "working" : status);
+  pill.title = agents ? "Claude's own turn is over, and an agent it started is still working. Nothing is waiting " +
+    "for your OK: when the agent reports back, Claude carries on by itself." : "";
   fdActivityTick();
   const live = fd.detail.running || ["working", "needs_you", "idle", "starting"].includes(status);
   const busy = status === "working" || status === "needs_you";
@@ -2080,6 +2088,10 @@ async function fdPollLoop() {
         if (session === fd.current && seq > fd.skipUntil) {
           fdRenderEvent(asks ? { ...event, live: true } : event);
           if (event.type === "notice" || event.type === "result") fdRefreshAwareSoon();
+        }
+        if (event.type === "agents") {
+          if (session === fd.current && fd.detail) { fd.detail.agents_working = event.working; fdSetStatus(fd.detail.status); }
+          refresh = true;  // the work list shows it too
         }
         if (["status", "notice", "result", "permission", "permission_done", "question", "question_done",
              "work_proposal", "change_proposal", "proposal_done"].includes(event.type)) refresh = true;
@@ -2724,11 +2736,42 @@ function fdBind() {
   });
   $("#fd-stop").onclick = guarded(async () => { await api("fd_interrupt", fd.current); });
   $("#fd-mode").onchange = guarded(async (e) => {
-    if (e.target.value === "bypassPermissions" &&
-        !(await confirmWord("“Never ask” lets Claude run commands and edit files without asking.", "yes", "Allow"))) {
-      e.target.value = fd.detail.mode; return;
+    const before = fd.detail.mode, sid = fd.current;
+    const DANGER = {
+      liveDangerously: {
+        phrase: "I accept the blast radius", label: "Enter the Danger Zone",
+        text: "Danger Zone: Claude uses every tool without asking you — any program, any edit. Any damage " +
+          "should be restricted to this project's own folders: Carrier still asks before anything outside " +
+          "them, other projects' files, .git or .claude, and before commands that run other commands, run code " +
+          "typed into the command, install packages or reach other machines. It's only \u201cshould\u201d: a " +
+          "program Claude runs (a build, a script) can reach anywhere, and web tools can send what Claude has " +
+          "read to any site.",
+      },
+      bypassPermissions: {
+        phrase: "Let it all burn", label: "Set the world on fire",
+        text: "Set the World on Fire: possible damage is fully unrestricted. Nothing asks and Carrier checks " +
+          "no commands, so a mistake or an unclear instruction can delete or change anything your account can " +
+          "reach — other projects, your home folder, even the operating system. For hands-off work that stays " +
+          "in the project, use Danger Zone instead.",
+      },
+    };
+    let confirm = null;
+    const danger = DANGER[e.target.value];
+    if (danger) {
+      confirm = await textDialog(`${danger.text} Type \u201c${danger.phrase}\u201d to allow it.`,
+        { line: true, word: danger.phrase.toLowerCase(), label: danger.label, placeholder: danger.phrase });
+      if (confirm === null) {  // not accepted: back to what it was
+        if (fd.current === sid) e.target.value = before;
+        return;
+      }
     }
-    fd.detail = { ...fd.detail, ...(await api("fd_set_mode", fd.current, e.target.value)) };
+    if (fd.current !== sid) return;  // another session was opened meanwhile: change nothing
+    try { fd.detail = { ...fd.detail, ...(await api("fd_set_mode", sid, e.target.value, confirm)) }; }
+    catch (err) { e.target.value = before; throw err; }
+    finally {
+      e.target.classList.toggle("danger-mode", ["liveDangerously", "bypassPermissions"].includes(e.target.value));
+      fdSetStatus(fd.detail.status);
+    }
   });
   const switcher = (sel, method, key) => guarded(async () => {
     const before = fd.detail[key] || "";

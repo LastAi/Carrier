@@ -47,7 +47,7 @@ from carrier.core.llm import EFFORTS
 from carrier.flightdeck.runner import ClientFactory, SessionRunner, default_client_factory
 
 POLICIES = ("warn", "ask", "block", "inform")
-MODES = ("default", "acceptEdits", "plan", "bypassPermissions")
+MODES = ("default", "acceptEdits", "plan", "bypassPermissions", sdk.LIVE)
 MAX_EVENTS = 5000
 
 
@@ -234,6 +234,7 @@ class FlightDeck:
         project = self.store.project(session["project_id"]) if session["project_id"] is not None else None
         if project is None:
             return {"kind": "own", "folder": None, "rel": "", "owner": ""}
+        path = os.path.expanduser(path)
         if not os.path.isabs(path):  # relative to the session's folder, as Claude Code reads it
             path = os.path.join(session["cwd"], path)
         return ownership.classify(self.store, project, path)
@@ -241,6 +242,14 @@ class FlightDeck:
     def _no_write(self, session: dict[str, Any]) -> Any:
         """For shell commands: writing here would change another project's (or the shared space's) files."""
         return lambda p: self.file_owner(session, p)["kind"] in ("foreign", "other")
+
+    def live_check(self, session: dict[str, Any], tool: str, tool_input: dict[str, Any],
+                   blocked: str | None = None) -> str:
+        """"Danger Zone": "" if the call may run without asking, else why the folder rules ask."""
+        scope = self._allow_scope(session)
+        readable, editable = ([session["cwd"]], [session["cwd"]]) if scope is None else (scope[1], scope[2])
+        return sdk.live_check(tool, tool_input, Path(session["cwd"]), readable, editable,
+                              no_write=self._no_write(session) if scope is not None else None, blocked=blocked)
 
     def preapproved(self, session: dict[str, Any], tool: str, tool_input: dict[str, Any]) -> str:
         """Which of the session's project pre-approvals covers this tool call ("" = ask)."""
@@ -434,6 +443,7 @@ class FlightDeck:
             "worktree": bool(s["worktree"]), "branch": s["branch"], "cwd": s["cwd"], "mode": s["mode"],
             "model": s["model"], "effort": s.get("effort"), "cost": round(s["cost_usd"] or 0, 4), "started": s["started"],
             "last_activity": s["last_activity"], "running": s["id"] in self.runners,
+            "agents_working": bool((r := self.runners.get(s["id"])) and r.agents_since is not None),
             "task_id": s.get("task_id"), "policy": s.get("policy"),
             "limit_until": s.get("limit_until"),
             "alerts": len(self.store.pending_events(s["id"])),
@@ -570,8 +580,10 @@ class FlightDeck:
             raise DeckError(f"Unknown effort: {effort}")
         routine = self.store.routine(task["routine_id"]) if task.get("routine_id") else None
         mode = mode or (routine or {}).get("mode") or (preset["mode"] if preset else "default")
-        if (auto or routine) and mode == "bypassPermissions":
+        if (auto or routine) and mode in ("bypassPermissions", sdk.LIVE):
             mode = "default"  # a routine (and anything started on its own) never skips asking
+        if mode == sdk.LIVE:  # only ever turned on with the phrase, in a running session
+            mode = "default"
         if mode not in MODES:
             raise DeckError(f"Unknown permission mode: {mode}")
         cwd = Path(project["path"] if project else task["cwd"])
@@ -984,9 +996,14 @@ class FlightDeck:
             raise DeckError("That request is no longer waiting for an answer.")
         return True
 
-    def set_mode(self, sid: int, mode: str) -> dict[str, Any]:
+    def set_mode(self, sid: int, mode: str, confirm: str | None = None) -> dict[str, Any]:
         if mode not in MODES:
             raise DeckError(f"Unknown permission mode: {mode}")
+        typed = " ".join((confirm or "").split()).lower()
+        if mode == sdk.LIVE and typed != sdk.LIVE_PHRASE.lower():
+            raise DeckError(f"To enter the Danger Zone, type “{sdk.LIVE_PHRASE}”.")
+        if mode == sdk.FIRE and typed != sdk.FIRE_PHRASE.lower():
+            raise DeckError(f"To set the world on fire, type “{sdk.FIRE_PHRASE}”.")
         if sid in self.runners:
             self._run(self.runners[sid].set_mode(mode), timeout=30)
         else:
@@ -1434,6 +1451,7 @@ class FlightDeck:
                 "transcript": self.store.messages(sid), "pending": pending, "busy": bool(runner and runner.busy),
                 "last_activity": runner.last_activity if runner else None,
                 "background": bool(runner and runner._bg_active),
+                "agents_working": bool(runner and runner.agents_since is not None),
                 "files": self.store.session_files(sid), "awareness": self.awareness(sid)}
 
     def awareness(self, sid: int) -> dict[str, Any]:

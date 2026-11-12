@@ -706,3 +706,5 @@ li.task-row.flash { box-shadow: inset 3px 0 0 var(--accent); background: var(--p
 
 #fd-activity { margin-left: 8px; }
 #fd-activity.stale { color: var(--sev-medium); }
+
+#fd-mode.danger-mode { border-color: var(--sev-high); color: var(--sev-high); }
