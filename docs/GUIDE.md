@@ -178,8 +178,12 @@ be sure. It follows variables set in the same command, knows that
 `javap.exe` in an install folder (`Program Files`, `/usr`, the PATH …) is
 `javap`, and lets `2>&1` and `> /dev/null` through. Writing output to a
 file counts as an edit (allowed in the work folders if editing is
-pre-approved). It still asks for: `$( )` and backticks, here-documents,
-loops, `if` and `{ }`; a program from a variable it can't see, or an
+pre-approved). A `for` loop over fixed words (`for f in alpha beta; do …;
+done`) is checked once for each word, and the commands inside `$( )` are
+checked like the rest — what they print is treated as unknown, so it's fine
+for `echo` but asks when given to another program. It still asks for:
+backticks, `$(( ))`, here-documents, other loops (`while`, `for f in *.txt`,
+`for f in $(ls)`), `if` and `{ }`; a program from a variable it can't see, or an
 unquoted variable the shell would split; settings that change how programs
 behave (`PATH=`, `JAVA_HOME=`, `GIT_…`, `LD_PRELOAD`, `VAR=x program` …);
 `cd` out of the project's folders; and a program file somewhere unusual
@@ -207,7 +211,7 @@ usually the point, but it's worth knowing.
 
 **Claude is told the list.** Each session's instructions include a short
 *Permissions in this project* section, generated from these settings: what
-runs without asking, what still asks (`$( )`, loops, `PATH=` …), and to work
+runs without asking, what still asks (backticks, `while` loops, `PATH=` …), and to work
 accordingly — use the Read, Grep, Glob and Edit tools for files, keep shell
 commands to one job with literal paths (a tool's full path rather than
 looking it up with `$( )`), and only ask for more when the task needs it or
@@ -575,8 +579,8 @@ task.
   folders the session may use: the folder rules still ask for files outside
   them, in reference folders, in another project's files, in `.git`, and for
   workspace `CLAUDE.md` files. Commands still ask when they name a file or
-  folder outside the project's own folders (reference folders included: read
-  those with Claude's file tools), run other commands (`sudo`, `bash -c`,
+  folder outside the project's own folders (programs that only read, such as
+  `grep`, `cat` or `ls`, may use reference folders too), run other commands (`sudo`, `bash -c`,
   `xargs`, `tmux` …), run code typed into the command or piped in
   (`python -c`, `echo … | node`), install packages (`pip`, `npm -g`,
   `cargo install`), or reach other machines (`curl`, `git push` to an

@@ -316,7 +316,8 @@ def live_check(name: str, inp: dict[str, Any], cwd: Path, readable: list[str], e
         if v.ok:
             return ""
         whys = [p["why"] for p in v.programs if not p["listed"] and p.get("why")] + ([v.reason] if v.reason else [])
-        return "; ".join(dict.fromkeys(w for w in whys if w)) or "it can't be checked against the folder rules"
+        parts = [p for w in whys if w for p in w.split("; ")]
+        return "; ".join(dict.fromkeys(parts)) or "it can't be checked against the folder rules"
     if name in LIVE_TOOLS or name.startswith("mcp__carrier__"):
         return ""  # no files of their own (web tools reach the internet, which the warning says)
     return "Carrier can't check which files this tool uses"

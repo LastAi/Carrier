@@ -4,6 +4,8 @@ All notable changes are listed here. Format: [Keep a Changelog](https://keepacha
 
 ## Unreleased
 
+- **Shell commands with `for` loops and `$( )`** no longer ask just for using them: a loop over fixed
+  words is checked once per word, and the commands inside `$( )` are checked like the rest.
 - **Permission settings in order of risk**, safest first, with names and tooltips that say how much a
   mistake could damage: *Plan only — changes nothing* … *Set the World on Fire — no checks at all* (formerly *Never ask*, now
   turned on by typing *Let it all burn*).

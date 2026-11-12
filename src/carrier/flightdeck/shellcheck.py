@@ -68,12 +68,15 @@ _INLINE_SHORT = {"python": "c", "py": "c", "pypy": "c", "node": "ep", "bun": "ep
                  "julia": "eE", "groovy": "e"}
 _INLINE_LONG = {"--eval", "--print", "--command"}
 _AWK = {"awk", "gawk", "mawk", "nawk", "busybox-awk"}
-_AWK_RISKY = re.compile(r"\bsystem\s*\(|getline|\||print[f]?\b[^;}]*>")
+_AWK_RISKY = re.compile(r"\bsystem\s*\(|getline|\||print[f]?\b[^;}]*>|\bARGV\b|\bARGC\b|\bENVIRON\b|PROCINFO")
 # Shell syntax that can't be checked here: always ask.
 KEYWORDS = {"if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac",
-            "function", "select", "{", "}", "(", ")", "[[", "]]", "!", "coproc"}
+            "function", "select", "{", "}", "(", ")", "[[", "]]", "!", "coproc", "break", "continue",
+            "return"}
 # Harmless shell built-ins that need no listing (``cd`` is checked on its own).
 BUILTINS = {"true", "false", ":", "test", "[", "pwd", "echo", "printf"}
+# A loop is checked once for each of its values: at most this many commands in all.
+MAX_UNROLLED = 500
 
 # Environment settings that change what programs run or load: an assignment to one asks.
 _RISKY_ENV = re.compile(
@@ -95,7 +98,9 @@ RISKY_ARGS = {
     "find": {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"},
     "rg": {"--pre", "--pre-glob"},
     "grep": {"--pre"},
-    "sort": {"-o", "--output", "--compress-program", "-T", "--temporary-directory"},
+    "sort": {"-o", "--output", "--compress-program", "-T", "--temporary-directory", "--files0-from"},
+    "wc": {"--files0-from"},
+    "du": {"--files0-from"},
     "tree": {"-o", "-R"},
     "tar": {"--to-command", "--use-compress-program", "-I", "--checkpoint-action", "--info-script", "-F",
             "--new-volume-script"},
@@ -161,6 +166,90 @@ _REDIR = re.compile(r"(&?)(>>|>&|<&|<<<|<<|<>|>\||>|<)")
 _ENDS_WORD = set(" \t\n;|&<>()")
 
 
+def _skip_quoted(command: str, i: int) -> int:
+    """At a quote or backslash at ``command[i]``: the index after what it quotes."""
+    c = command[i]
+    if c == "\\":
+        return i + 2
+    if c == "'":
+        end = command.find("'", i + 1)
+        if end < 0:
+            raise Unreadable("an unfinished quote")
+        return end + 1
+    j = i + 1  # "…"
+    while j < len(command) and command[j] != '"':
+        if command[j] == "\\":
+            j += 2
+            continue
+        if command[j] == "$" and command[j + 1:j + 2] == "(":
+            j = _close_paren(command, j + 1) + 1
+            continue
+        j += 1
+    if j >= len(command):
+        raise Unreadable("an unfinished quote")
+    return j + 1
+
+
+def _close_paren(command: str, i: int) -> int:
+    """The index of the ``)`` that closes the ``(`` at ``command[i]``."""
+    depth, j = 0, i
+    while j < len(command):
+        c = command[j]
+        if c in "\\'\"":
+            j = _skip_quoted(command, j)
+            continue
+        if c == "`":
+            raise Unreadable("command substitution with backticks")
+        if c == "#" and command[j - 1] in " \t\n;&|(":
+            raise Unreadable("a comment inside $( )")
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    raise Unreadable("an unfinished $( )")
+
+
+def _keyword_at(command: str, j: int, word: str) -> bool:
+    """Is ``word`` at ``command[j]`` a whole word starting a command?"""
+    if not command.startswith(word, j):
+        return False
+    after = command[j + len(word):j + len(word) + 1]
+    if after and after not in " \t\n;&|":
+        return False
+    k = j - 1
+    while k >= 0 and command[k] in " \t":
+        k -= 1
+    return k < 0 or command[k] in ";\n&|"
+
+
+def _loop_end(command: str, i: int) -> int:
+    """From the start of a loop body: the index of the ``done`` that ends it."""
+    depth, j = 1, i
+    while j < len(command):
+        c = command[j]
+        if c in "\\'\"":
+            j = _skip_quoted(command, j)
+            continue
+        if c == "$" and command[j + 1:j + 2] == "(":
+            j = _close_paren(command, j + 1) + 1
+            continue
+        if c == "#" and (j == 0 or command[j - 1] in " \t\n;"):
+            end = command.find("\n", j)
+            j = len(command) if end < 0 else end
+            continue
+        if _keyword_at(command, j, "do"):
+            depth += 1
+        elif _keyword_at(command, j, "done"):
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    raise Unreadable("a loop without done")
+
+
 def split(command: str, env: dict[str, str] | None = None) -> list[Simple]:
     """Split a command into simple commands, expanding variables it sets itself.
 
@@ -191,6 +280,12 @@ def split(command: str, env: dict[str, str] | None = None) -> list[Simple]:
         elif not cur.words and _is_assign(w.text):
             name, _, value = w.text.partition("=")
             cur.assigns.append((name, value, w.unresolved))
+            if w.unresolved:  # bash sets them one by one: X=a Y=$X gives Y=a
+                env.pop(name, None)
+                unknown.add(name)
+            else:
+                env[name] = value
+                unknown.discard(name)
         elif not cur.words and not cur.assigns and w.text == "export" and not cur.exported:
             cur.exported = True
         else:
@@ -238,7 +333,21 @@ def split(command: str, env: dict[str, str] | None = None) -> list[Simple]:
             return j + 1
         c = command[j + 1]
         if c == "(":
-            raise Unreadable("command substitution $( )")
+            # $( … ): its commands are checked like the rest (they run first, in the same folder);
+            # what it prints is unknown, like a variable that isn't set in the command.
+            if command[j + 2:j + 3] == "(":
+                raise Unreadable("arithmetic $(( ))")
+            end = _close_paren(command, j + 1)
+            inner = split(command[j + 2:end], {k: v for k, v in env.items() if k not in unknown})
+            for part in inner:
+                if part.words and program_name(part.words[0].text).lower() in ("cd", "pushd", "popd"):
+                    raise Unreadable("a folder change inside $( )")
+                if not part.words and part.assigns:
+                    raise Unreadable("a variable set inside $( )")
+            out.extend(inner)
+            unresolved = True
+            splits = splits or not quoted
+            return end + 1
         if c in "'\"" and not quoted:
             raise Unreadable(f"${c}…{c} quoting")
         if c == "{":
@@ -259,8 +368,72 @@ def split(command: str, env: dict[str, str] | None = None) -> list[Simple]:
         word.append("$")
         return j + 1
 
+    def _unroll(j: int) -> int:
+        """``for NAME in WORDS; do BODY; done`` at command[j]: the body once for each word."""
+        m = re.compile(r"for[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]+in([ \t]|(?=;))").match(command, j)
+        if not m:
+            raise Unreadable("shell syntax (for)")
+        name, k = m.group(1), m.end()
+        if _RISKY_ENV.match(name):
+            raise Unreadable(f"a loop that sets {name}")
+        start = k
+        while k < n and command[k] not in ";\n":  # the word list ends at ; or a new line
+            if command[k] in "\\'\"":
+                k = _skip_quoted(command, k)
+                continue
+            if command[k] in "|&<>()`#":
+                raise Unreadable("shell syntax (for)")
+            k += 1
+        header = split("true " + command[start:k], {x: v for x, v in env.items() if x not in unknown})
+        if len(header) != 1 or header[0].redirects or header[0].assigns or \
+                any(w.unresolved or w.glob for w in header[0].words):
+            raise Unreadable("a loop over values that can't be known before it runs")
+        values = [w.text for w in header[0].words[1:]]
+        k += 1
+        while k < n and command[k] in " \t\n":
+            k += 1
+        if not _keyword_at(command, k, "do"):
+            raise Unreadable("shell syntax (for)")
+        body_start = k + 2
+        end = _loop_end(command, body_start)
+        body = command[body_start:end]
+        unrolled: list[Simple] = []
+        # A variable the body sets carries into the next pass: unknown in every pass.
+        probe = split(body, {x: val for x, val in env.items() if x not in unknown} | {name: values[0] if values else ""})
+        assigned = {x for part in probe for x, _v, _u in part.assigns if not part.words}
+        if name in assigned:
+            raise Unreadable(f"a loop that changes {name}")
+        for v in values:
+            local = {x: val for x, val in env.items() if x not in unknown and x not in assigned}
+            local[name] = v
+            unrolled.extend(split(body, local))
+            if len(unrolled) > MAX_UNROLLED:
+                raise Unreadable("a loop too long to check")
+        # The loop's variable counts as set by it (for an outer loop's checks), with no program.
+        unrolled.append(Simple(assigns=[(name, values[-1] if values else "", False)]))
+        out.extend(unrolled)
+        # After the loop: its variable holds the last value; anything set inside can't be known.
+        if values:
+            env[name] = values[-1]
+            unknown.discard(name)
+        for part in unrolled[:-1]:
+            if not part.words:
+                for x, _v, _u in part.assigns:
+                    env.pop(x, None)
+                    unknown.add(x)
+        k = end + 4
+        while k < n and command[k] in " \t":
+            k += 1
+        if k < n and command[k] not in ";\n&|":
+            raise Unreadable("a redirect or argument after a loop")
+        return k
+
     while i < n:
         c = command[i]
+        if c == "f" and not in_word and not (cur.words or cur.assigns or cur.redirects or cur.exported) \
+                and pending_redir is None and re.match(r"for[ \t]", command[i:i + 4]):
+            i = _unroll(i)
+            continue
         if c == "\\":
             if i + 1 < n and command[i + 1] == "\n":
                 i += 2
@@ -525,6 +698,8 @@ def check(command: str, entries: list[str], cwd: Path, readable: list[str], edit
         parts = split(command)
     except Unreadable as exc:
         return Verdict(False, f"it uses {exc}, which can't be checked before it runs")
+    except RecursionError:
+        return Verdict(False, "it's nested too deeply to check before it runs")
     parsed = []
     for e in entries:
         try:
@@ -535,6 +710,7 @@ def check(command: str, entries: list[str], cwd: Path, readable: list[str], edit
     reasons: list[str] = []
     here = cwd
     stack: list[Path] = []  # pushd's folders, for popd
+    others_ran = False  # a folder change after other commands might not happen (a && cd x; …)
     for part in parts:
         for name, _value, _unres in part.assigns:
             if _RISKY_ENV.match(name):
@@ -572,13 +748,14 @@ def check(command: str, entries: list[str], cwd: Path, readable: list[str], edit
         prog = argv[0]
         name = program_name(prog)
         low = name.lower()
-        if any(w.splits for w in part.words):
+        if any(w.splits for w in part.words) and not (low in BUILTINS and not is_path(prog)):
             reasons.append("an unquoted variable it can't see could become several arguments")
         if (low in RISKY_ARGS or low in SCOPED_READERS) and any(w.unresolved for w in part.words[1:]):
             reasons.append(f"{name} gets an argument from a variable it can't see")
         if low == "popd" and not is_path(prog):
             if stack and len(argv) == 1:
-                here = stack.pop()
+                back = stack.pop()
+                here = Path("/nonexistent-carrier-cd") if others_ran else back  # it may not happen
             else:
                 reasons.append("it changes back to a folder that can't be checked")
                 here = Path("/nonexistent-carrier-cd")
@@ -591,14 +768,25 @@ def check(command: str, entries: list[str], cwd: Path, readable: list[str], edit
                     or not _inside(_resolve(target.text, here), readable):
                 reasons.append("it changes to a folder outside the project's folders")
                 here = Path("/nonexistent-carrier-cd")  # nothing relative can be trusted after this
+            elif others_ran or not os.path.isdir(_resolve(target.text, here)) \
+                    or not os.access(_resolve(target.text, here), os.X_OK) \
+                    or any(op not in (">&", "<&") and t.text not in NULL_TARGETS for op, t in part.redirects):
+                # It may not happen (an earlier command failed, a loop stopped, the folder is
+                # missing): relative paths after it can't be pinned to one folder.
+                here = Path("/nonexistent-carrier-cd")
             else:
                 here = Path(_resolve(target.text, here))
             continue
+        others_ran = True
         if low in BUILTINS and not is_path(prog):
-            if low == "printf" and any(a == "-v" or a.startswith("-v") for a in argv[1:]):
+            fmt = 2 if argv[1:2] == ["--"] else 1
+            if low == "printf" and (any(a == "-v" or a.startswith("-v") for a in argv[1:])
+                                    or (len(part.words) > fmt and part.words[fmt].unresolved)):
                 reasons.append("printf -v sets a variable")
             continue
         entry = _match(argv, parsed, cwd, here, readable + editable)
+        if entry is not None and any(w.unresolved or w.glob for w in part.words[:len(entry)]):
+            entry = None  # a listed "bash build.sh" doesn't cover "bash $(…)build.sh"
         if entry is None and any_program:
             # "Danger Zone": any program runs, but the folder checks below still apply. Programs
             # that run other commands (sudo, env, xargs, a shell given a command) still ask, as what
@@ -723,6 +911,10 @@ def protected(path: str, roots: list[str]) -> bool:
 def _risky(prog: str, args: list[str], all_args: list[str] | None = None) -> str:
     """The first argument that makes ``prog`` do more than it's trusted to ("" if none).
     ``all_args``: every argument (``args`` may leave out the ones a listed entry names)."""
+    if prog in _AWK:
+        script = next((a for a in args if not a.startswith("-")), "")
+        if _AWK_RISKY.search(script):
+            return "with a script that runs commands, writes files or picks other files"
     risky = set(RISKY_ARGS.get(prog, set()))
     if prog == "git":
         sub = next((a for a in (all_args or args) if not a.startswith("-")), "")
@@ -831,6 +1023,11 @@ def _live_problem(low: str, words: list[Word], here: Path, readable: list[str], 
         return "runs commands or writes files from its script"
     if low == "git" and any("://" in a or re.match(r"^[\w.-]+@[\w.-]+:", a) for a in args):
         return "talks to a repository given by address"
+    if low == "sed" and any(re.search(r"(^|[/;}\n])\s*[0-9gpIiMm,$]*[wWe](\s|;|$)", x)
+                            for x in args if not x.startswith("-")):
+        return "writes files or runs commands from its script"
+    if low in SCOPED_READERS:
+        return ""  # it only reads: the project's read-only folders count too (checked below in check)
     for w in words:
         a = w.text
         if w.unresolved or w.glob:

@@ -48,7 +48,7 @@ def test_matching(tmp_path: Path):
     assert pa["change"] == {"commands": ["npm"]} and pa["label"] == "Always allow `npm` in this project"
     assert [p["listed"] for p in pa["programs"]] == [False, True]
     pa = sdk.project_allow("Bash", {"command": "npm test $(id)"}, allow, work, [str(work)], [str(work)])
-    assert pa["change"] is None and "command substitution" in pa["reason"]
+    assert pa["change"] is None and "several arguments" in pa["reason"]  # what $(id) prints is unknown
     assert sdk.project_allow("mcp__carrier__ask_user", {}) is None
 
 
@@ -253,7 +253,7 @@ def test_shell_cards_and_session_programs(deck: FlightDeck, tmp_path: Path):
     deck.send(s["id"], "shell javap $(cat list)")
     wait(deck, s["id"], "needs_you")
     req = events(deck, s["id"], "permission")[-1]
-    assert req["project_label"] == "" and "command substitution" in req["why"]
+    assert req["project_label"] == "" and "several arguments" in req["why"]
     assert req["allow_label"] == "Allow this exact command for this session"
 
 
@@ -317,6 +317,7 @@ def test_live_dangerously_keeps_the_folder_rules(tmp_path):
     assert chk("Write", {"file_path": str(proj / ".git" / "config")})  # .git asks
     assert "another project" in chk("Write", {"file_path": str(proj / "theirs.txt")})
     assert chk("Read", {"file_path": str(ref / "x.md")}) == ""
+    assert chk("Bash", {"command": f"cat {ref}/x.md | wc -l"}) == ""  # reading a reference folder is fine
     assert "outside" in chk("Read", {"file_path": str(out / "x.md")})
     assert chk("WebFetch", {"url": "https://example.com"}) == ""
     assert chk("Write", {"file_path": "~/.bashrc"})
@@ -346,7 +347,7 @@ def test_live_dangerously_keeps_the_folder_rules(tmp_path):
                 "docker run -v /:/h img", "git push http://example.com/x main", "git push git@example.com:x main",
                 # Files and folders outside the project's own folders, in options too.
                 "tar -xf a.tar -C /", f"unzip a.zip -d {out}", f"make -C {out}", f"git clone x {out}/y",
-                "cp /etc/hosts ./x", "base64 /etc/hosts", "find / -name id_rsa", f"cat {ref}/x.md",
+                "cp /etc/hosts ./x", "base64 /etc/hosts", "find / -name id_rsa", 
                 f"pushd {ref} && rm x.md", "popd && rm a.txt", "touch ~/.bashrc", "cat ../../x",
                 "python ../elsewhere/x.py", "rm .git/index",
                 # Versioned names, bundled options, standard input, programs that run a command.
@@ -357,3 +358,69 @@ def test_live_dangerously_keeps_the_folder_rules(tmp_path):
                 "pnpm dlx pkg", "uvx pkg", "cargo install pkg", "go install example.com/x@latest",
                 "tar -xC/etc -f a.tar", "tar -xvzC/etc -f a.tar", "dd if=/etc/hosts of=./x", "gcc @/etc/hosts"):
         assert chk("Bash", {"command": ask}), ask
+
+
+def test_loops_and_command_substitution(tmp_path):
+    """A for loop over fixed words is checked once per word; $( ) is checked like the rest."""
+    from carrier.flightdeck import sdk, shellcheck
+
+    proj, ref = tmp_path / "proj", tmp_path / "ref"
+    (ref / "factions").mkdir(parents=True)
+    proj.mkdir()
+    for n in ("alpha", "beta"):
+        (ref / "factions" / f"{n}.faction").write_text("x\n")
+    count = (f"cd {ref}/factions && for f in alpha beta; do "
+             "echo \"$f $(grep -c 'graphics/portraits' $f.faction) $(grep -c music_ $f.faction)\"; done")
+    parts = shellcheck.split(count)
+    assert [p.words[-1].text for p in parts if p.words and p.words[0].text == "grep"] == \
+        ["alpha.faction", "alpha.faction", "beta.faction", "beta.faction"]
+    # With grep pre-approved (any mode), and in the Danger Zone.
+    assert shellcheck.check(count, ["grep"], proj, [str(proj), str(ref)], [str(proj)]).ok
+    live = lambda c: sdk.live_check("Bash", {"command": c}, proj, [str(ref)], [str(proj)])
+    assert live(count) == ""
+    for ok in ("for a in x y; do for b in z; do echo $a$b; done; done", "n=$(wc -l < a.txt); echo $n",
+               "for f in a b; do touch $f.txt; done | sort", "for f in a; do\n  echo $f\ndone"):
+        assert live(ok) == "", ok
+    for ask in (f"cd {ref}/factions && for f in alpha; do rm $f.faction; done",
+                "for f in a b; do rm /etc/$f; done", "rm $(find . -name x)", "for f in *.py; do echo $f; done",
+                "for f in $(ls); do rm $f; done", "echo $(cd /; rm -rf x)", "echo $(( 1+1 ))",
+                "for f in a; do echo $f; done > /etc/x", "while true; do echo; done", "echo $(curl x)",
+                "sed 's/a/b/w /etc/x' a.txt", "for f in a; do x=1; done; rm $x"):
+        assert live(ask), ask
+    assert "alpha.faction" in live(f"cd {ref}/factions && for f in alpha; do rm $f.faction; done")
+
+
+def test_shell_checker_review_cases(tmp_path):
+    """Commands where a careless reading differs from what bash does: all ask."""
+    from carrier.flightdeck import sdk, shellcheck
+
+    proj, ref = tmp_path / "proj", tmp_path / "ref"
+    for d in (proj / "sub", ref):
+        d.mkdir(parents=True)
+    listed = ["touch", "git", "awk", "sort", "printf", "bash build.sh", "cat"]
+    cases = [
+        'for f in a #; do echo "\ndo touch /tmp/x; done #"; done',   # a comment in the loop's header
+        'echo "$(true #)\ntouch /tmp/x\n)"',                         # a comment inside "$( )"
+        f"for HOME in {proj}/h; do git status; done",                    # a loop setting HOME or PATH
+        "X=ok; for i in 1 2; do touch \"$X\"; X=/tmp/x; done",       # a variable carried to the next pass
+        'X=ok; printf "$(echo -v)" X /tmp/x; touch "$X"',               # printf -v hidden in $( )
+        'X=ok; X=/tmp/x Y=$X; touch "$Y"',                              # assignments apply left to right
+        "false && cd sub; touch ../x",                                   # a cd that may not happen
+        "cd nosuch; touch ../x",                                         # a cd that fails
+        "for d in sub; do break; cd sub; done; touch ../x",              # break
+        "awk 'BEGIN{system(\"touch /tmp/x\")}'",                        # awk running commands
+        "awk 'BEGIN{ARGV[1]=\"/etc/hostname\";ARGC=2}{print}'",          # awk picking another file
+        "sort --files0-from=list",                                       # files named in a list
+        'bash "$(echo sub/)build.sh"',                                   # a listed entry with an unknown part
+        '"$(' * 700 + "x" + ')"' * 700,                                  # nested too deeply
+        f"pushd {ref} && false && popd; touch x",                        # a popd that may not happen
+        'g=ok; for i in 1 2; do touch "$g"; for g in /tmp/x; do :; done; done',  # a nested loop's variable
+        'g=ok; for i in 1; do for g in /tmp/x; do :; done; done; touch "$g"',
+        "cd sub > nodir/x; touch ../x",                                  # a cd whose redirect fails
+    ]
+    for c in cases:
+        assert not shellcheck.check(c, listed, proj, [str(proj), str(ref)], [str(proj)], can_edit=True,
+                                    can_read=True).ok, c
+        assert sdk.live_check("Bash", {"command": c}, proj, [str(ref)], [str(proj)]), c
+    # Still fine: a cd first, to a folder that exists.
+    assert shellcheck.check("cd sub && touch a.txt", ["touch"], proj, [str(proj)], [str(proj)], can_edit=True).ok

@@ -81,8 +81,9 @@ def permissions_section(store: Store, project_id: int | None) -> str:
     else:
         lines.append("Nothing is pre-approved for this project.")
     if programs:
-        lines.append("A shell command still asks the user if it uses $( ) or backticks, loops or if, a "
-                     "here-document, a variable it doesn't set itself, cd outside the project's folders, settings "
+        lines.append("A shell command still asks the user if it uses backticks, $(( )), a loop other than "
+                     "for over fixed words, if or while, a here-document, $( ) whose output is passed to a program "
+                     "other than echo or printf, a variable it doesn't set itself, cd outside the project's folders, settings "
                      "such as PATH=, JAVA_HOME= or GIT_…=, or any program not listed above.")
     else:
         lines.append("Shell commands ask the user (unless the session's permission mode allows them).")
